@@ -1,5 +1,3 @@
-package main
-
 package examples
 
 import (
@@ -41,15 +39,15 @@ type CreateVPCResponse struct {
 // NewServer 创建API服务器
 func NewServer(machineryServer *machinery.Server) *Server {
 	router := gin.Default()
-	
+
 	server := &Server{
 		machineryServer: machineryServer,
 		router:          router,
 	}
-	
+
 	// 注册路由
 	server.setupRoutes()
-	
+
 	return server
 }
 
@@ -58,9 +56,9 @@ func (s *Server) setupRoutes() {
 	api := s.router.Group("/api/v1")
 	{
 		// 使用不同的任务编排方式
-		api.POST("/vpc/independent", s.createVPCIndependent)     // 独立任务
-		api.POST("/vpc/chord", s.createVPCWithChord)             // Chord模式（推荐）
-		api.POST("/vpc/group", s.createVPCWithGroup)             // Group模式
+		api.POST("/vpc/independent", s.createVPCIndependent) // 独立任务
+		api.POST("/vpc/chord", s.createVPCWithChord)         // Chord模式（推荐）
+		api.POST("/vpc/group", s.createVPCWithGroup)         // Group模式
 		api.GET("/health", s.health)
 	}
 }
@@ -159,7 +157,7 @@ func (s *Server) createVPCWithChord(c *gin.Context) {
 	}
 
 	// 创建 Chord: (VRF || VLAN) -> Firewall
-	group := machineryTasks.NewGroup(task1, task2)
+	group, _ := machineryTasks.NewGroup(task1, task2)
 	chord, err := machineryTasks.NewChord(group, callback)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, CreateVPCResponse{
@@ -227,7 +225,7 @@ func (s *Server) createVPCWithGroup(c *gin.Context) {
 		Args: []machineryTasks.Arg{{Type: "string", Value: string(requestJSON)}},
 	}
 
-	group := machineryTasks.NewGroup(task1, task2, task3)
+	group, _ := machineryTasks.NewGroup(task1, task2, task3)
 	_, err := s.machineryServer.SendGroup(group, 0)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, CreateVPCResponse{

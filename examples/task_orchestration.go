@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"workflow_qoder/tasks"
-
 	"github.com/RichardKnop/machinery/v1"
 	machineryTasks "github.com/RichardKnop/machinery/v1/tasks"
 )
@@ -100,8 +98,8 @@ func (t *TaskOrchestrationExamples) Example3_GroupTasks(req VPCRequest) error {
 	}
 
 	// 创建任务组
-	group := machineryTasks.NewGroup(task1, task2)
-	
+	group, _ := machineryTasks.NewGroup(task1, task2)
+
 	_, err := t.server.SendGroup(group, 0) // 0 表示不限制并发数
 	fmt.Println("✓ 发送了任务组，VRF 和 VLAN 并行执行")
 	return err
@@ -129,7 +127,7 @@ func (t *TaskOrchestrationExamples) Example4_ChordTasks(req VPCRequest) error {
 	}
 
 	// 创建 Chord
-	group := machineryTasks.NewGroup(task1, task2)
+	group, _ := machineryTasks.NewGroup(task1, task2)
 	chord, err := machineryTasks.NewChord(group, callback)
 	if err != nil {
 		return err
@@ -163,7 +161,7 @@ func (t *TaskOrchestrationExamples) Example5_ComplexOrchestration(req VPCRequest
 	}
 
 	// 将task2和task3组成一个组
-	group := machineryTasks.NewGroup(task2, task3)
+	_, _ = machineryTasks.NewGroup(task2, task3)
 
 	// task1执行完后，触发group
 	task1.OnSuccess = []*machineryTasks.Signature{
