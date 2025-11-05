@@ -1,0 +1,18 @@
+# 简化版 AZ NSP Dockerfile - 使用预编译的二进制文件
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+
+# 复制预编译的二进制文件
+COPY az-nsp /app/
+
+# 创建日志目录
+RUN mkdir -p /app/logs
+
+# 暴露端口
+EXPOSE 8080
+
+# 运行
+CMD ["/app/az-nsp"]

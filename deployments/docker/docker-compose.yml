@@ -1,0 +1,111 @@
+version: '3.8'
+
+services:
+  # Redis服务
+  redis:
+    image: redis:7-alpine
+    container_name: nsp-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Top NSP
+  top-nsp:
+    image: nsp-top:latest
+    container_name: top-nsp
+    environment:
+      - SERVICE_TYPE=top
+      - PORT=8080
+      - REDIS_ADDR=redis:6379
+      - REDIS_DATA_DB=0
+      - REDIS_BROKER_DB=1
+      - AZ_NSP_PREFIX=az-nsp
+      - AZ_NSP_PORT=8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # AZ NSP - cn-beijing-1a
+  az-nsp-cn-beijing-1a:
+    image: nsp-az:latest
+    container_name: az-nsp-cn-beijing-1a
+    environment:
+      - SERVICE_TYPE=az
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+      - PORT=8080
+      - REDIS_ADDR=redis:6379
+      - REDIS_DATA_DB=0
+      - REDIS_BROKER_DB=1
+      - TOP_NSP_ADDR=http://top-nsp:8080
+      - WORKER_COUNT=2
+    depends_on:
+      redis:
+        condition: service_healthy
+      top-nsp:
+        condition: service_healthy
+    networks:
+      - nsp-network
+
+  # AZ NSP - cn-beijing-1b
+  az-nsp-cn-beijing-1b:
+    image: nsp-az:latest
+    container_name: az-nsp-cn-beijing-1b
+    environment:
+      - SERVICE_TYPE=az
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1b
+      - PORT=8080
+      - REDIS_ADDR=redis:6379
+      - REDIS_DATA_DB=0
+      - REDIS_BROKER_DB=1
+      - TOP_NSP_ADDR=http://top-nsp:8080
+      - WORKER_COUNT=2
+    depends_on:
+      redis:
+        condition: service_healthy
+      top-nsp:
+        condition: service_healthy
+    networks:
+      - nsp-network
+
+  # AZ NSP - cn-shanghai-1a
+  az-nsp-cn-shanghai-1a:
+    image: nsp-az:latest
+    container_name: az-nsp-cn-shanghai-1a
+    environment:
+      - SERVICE_TYPE=az
+      - REGION=cn-shanghai
+      - AZ=cn-shanghai-1a
+      - PORT=8080
+      - REDIS_ADDR=redis:6379
+      - REDIS_DATA_DB=0
+      - REDIS_BROKER_DB=1
+      - TOP_NSP_ADDR=http://top-nsp:8080
+      - WORKER_COUNT=2
+    depends_on:
+      redis:
+        condition: service_healthy
+      top-nsp:
+        condition: service_healthy
+    networks:
+      - nsp-network
+
+networks:
+  nsp-network:
+    driver: bridge

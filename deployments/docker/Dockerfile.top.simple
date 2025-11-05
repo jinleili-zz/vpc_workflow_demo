@@ -1,0 +1,15 @@
+# 简化版 Top NSP Dockerfile - 使用预编译的二进制文件
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata wget
+
+WORKDIR /app
+
+# 复制预编译的二进制文件
+COPY top-nsp /app/
+
+# 暴露端口
+EXPOSE 8080
+
+# 运行
+CMD ["/app/top-nsp"]

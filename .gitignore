@@ -44,3 +44,9 @@ dist/
 # Environment files
 .env
 .env.local
+
+# Go编译输出
+top-nsp
+top_nsp
+az-nsp
+az_nsp

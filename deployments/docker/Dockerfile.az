@@ -1,0 +1,38 @@
+# AZ NSP Dockerfile
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /build
+
+# 设置 Go 代理（国内网络加速）
+ENV GOPROXY=https://goproxy.cn,direct
+
+# 复制go mod文件
+COPY go.mod go.sum ./
+RUN go mod download
+
+# 复制源代码
+COPY . .
+
+# 编译AZ NSP
+RUN CGO_ENABLED=0 GOOS=linux go build -o az-nsp ./cmd/az_nsp
+
+# 运行阶段
+FROM alpine:latest
+
+# 使用国内镜像源加速
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
+    apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+
+# 从builder阶段复制二进制文件
+COPY --from=builder /build/az-nsp /app/
+
+# 创建日志目录
+RUN mkdir -p /app/logs
+
+# 暴露端口
+EXPOSE 8080
+
+# 运行
+CMD ["/app/az-nsp"]
