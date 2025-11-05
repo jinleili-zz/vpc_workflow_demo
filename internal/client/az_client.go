@@ -125,3 +125,26 @@ func (c *AZNSPClient) HealthCheck(ctx context.Context, azAddr string) error {
 
 	return nil
 }
+
+// DeleteVPC 删除指定AZ的VPC（补偿操作）
+func (c *AZNSPClient) DeleteVPC(ctx context.Context, azAddr string, vpcName string) error {
+	url := fmt.Sprintf("%s/api/v1/vpc/%s", azAddr, vpcName)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("创建HTTP请求失败: %v", err)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("发送请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("删除VPC失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}

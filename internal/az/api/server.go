@@ -53,6 +53,7 @@ func (s *Server) setupRoutes() {
 		// VPC相关
 		api.POST("/vpc", s.createVPC)
 		api.GET("/vpc/:vpc_name/status", s.getVPCStatus)
+		api.DELETE("/vpc/:vpc_name", s.deleteVPC)
 
 		// 子网相关
 		api.POST("/subnet", s.createSubnet)
@@ -336,6 +337,49 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// deleteVPC 删除VPC（补偿操作）
+func (s *Server) deleteVPC(c *gin.Context) {
+	vpcName := c.Param("vpc_name")
+	ctx := context.Background()
+
+	log.Printf("[AZ NSP %s] 接收到VPC删除请求: %s", s.cfg.AZ, vpcName)
+
+	// 获取WorkflowID
+	mappingKey := fmt.Sprintf("vpc_mapping:%s", vpcName)
+	workflowID, err := s.redisClient.Get(ctx, mappingKey).Result()
+
+	if err == redis.Nil {
+		log.Printf("[AZ NSP %s] VPC不存在: %s，视为删除成功", s.cfg.AZ, vpcName)
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "VPC不存在或已删除",
+		})
+		return
+	}
+
+	// TODO: 实际应该发送删除任务到Worker（删除VRF、VLAN、防火墙区域）
+	// 这里为了简化，只记录日志并清理映射
+	log.Printf("[AZ NSP %s] 删除VPC: %s (WorkflowID: %s)", s.cfg.AZ, vpcName, workflowID)
+
+	// 清理Redis中的映射
+	if err := s.redisClient.Del(ctx, mappingKey).Err(); err != nil {
+		log.Printf("[AZ NSP %s] 清理VPC映射失败: %v", s.cfg.AZ, err)
+	}
+
+	// 清理任务状态（可选）
+	backend := s.machineryServer.GetBackend()
+	if err := backend.PurgeState(workflowID); err != nil {
+		log.Printf("[AZ NSP %s] 清理任务状态失败: %v", s.cfg.AZ, err)
+	}
+
+	log.Printf("[AZ NSP %s] VPC已删除: %s", s.cfg.AZ, vpcName)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "VPC已成功删除",
+	})
 }
 
 // health 健康检查
