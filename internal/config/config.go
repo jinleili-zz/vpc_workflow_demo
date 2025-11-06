@@ -96,12 +96,22 @@ func (c *NSPConfig) GetRedisDataAddr() string {
 	return fmt.Sprintf("redis://%s/%d", c.Redis.Addr, c.Redis.DataDB)
 }
 
-// GetRedisBrokerAddr 获取消息队列Redis地址
+// GetRedisBrokerAddr 获取消息队列Redis地址（Machinery 格式）
 func (c *NSPConfig) GetRedisBrokerAddr() string {
 	if c.Redis.Password != "" {
 		return fmt.Sprintf("redis://:%s@%s/%d", c.Redis.Password, c.Redis.Addr, c.Redis.BrokerDB)
 	}
 	return fmt.Sprintf("redis://%s/%d", c.Redis.Addr, c.Redis.BrokerDB)
+}
+
+// GetRedisAddr 获取简单的Redis地址（用于Asynq）
+func (c *NSPConfig) GetRedisAddr() string {
+	return c.Redis.Addr
+}
+
+// GetRedisBrokerDB 获取Broker DB编号
+func (c *NSPConfig) GetRedisBrokerDB() int {
+	return c.Redis.BrokerDB
 }
 
 // getEnv 获取环境变量，如果不存在则返回默认值

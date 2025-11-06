@@ -75,10 +75,10 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 	// 3. 执行阶段：并行发送VPC创建请求到所有AZ
 	log.Printf("[Orchestrator] 执行阶段：并行创建VPC")
 	type azResult struct {
-		az          *models.AZ
-		workflowID  string
-		err         error
-		success     bool
+		az         *models.AZ
+		workflowID string
+		err        error
+		success    bool
 	}
 
 	var wg sync.WaitGroup
@@ -132,7 +132,7 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 	// 5. 判断是否需要回滚
 	if len(failedAZs) > 0 {
 		log.Printf("[Orchestrator] 检测到失败: %d个成功, %d个失败", len(successAZs), len(failedAZs))
-		
+
 		// 如果部分成功，触发回滚
 		if len(successAZs) > 0 {
 			log.Printf("[Orchestrator] 触发回滚：清理%d个已成功的AZ", len(successAZs))
@@ -140,8 +140,8 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 		}
 
 		return &models.VPCResponse{
-			Success: false,
-			Message: fmt.Sprintf("VPC创建失败: %d个AZ失败，已回滚成功的%d个AZ", len(failedAZs), len(successAZs)),
+			Success:   false,
+			Message:   fmt.Sprintf("VPC创建失败: %d个AZ失败，已回滚成功的%d个AZ", len(failedAZs), len(successAZs)),
 			AZResults: results,
 		}, nil
 	}
@@ -167,7 +167,7 @@ func (o *Orchestrator) rollbackVPC(ctx context.Context, vpcName string, azs []*m
 		wg.Add(1)
 		go func(az *models.AZ) {
 			defer wg.Done()
-			
+
 			log.Printf("[Orchestrator] 回滚AZ %s 的VPC: %s", az.ID, vpcName)
 			if err := o.azClient.DeleteVPC(ctx, az.NSPAddr, vpcName); err != nil {
 				log.Printf("[Orchestrator] ⚠️  AZ %s 回滚失败: %v (需要人工介入)", az.ID, err)
