@@ -1,13 +1,19 @@
 {
-  "name": "NSP Top API",
-  "slug": "nsp-top-api",
-  "api_id": "nsp-top-api-v1",
+  "name": "NSP Top API with JWT",
+  "slug": "nsp-top-api-jwt",
+  "api_id": "nsp-top-api-jwt-v1",
   "org_id": "nsp-org",
-  "use_keyless": true,
+  "use_keyless": false,
+  "use_standard_auth": false,
+  "enable_jwt": true,
+  "jwt_signing_method": "hmac",
+  "jwt_source": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+  "jwt_identity_base_field": "sub",
+  "jwt_policy_field_name": "pol",
+  "jwt_default_policies": ["default"],
   "auth": {
     "auth_header_name": "Authorization"
   },
-  "use_standard_auth": false,
   "definition": {
     "location": "header",
     "key": "x-api-version"
@@ -27,9 +33,9 @@
     }
   },
   "proxy": {
-    "listen_path": "/",
+    "listen_path": "/jwt/",
     "target_url": "http://top-nsp:8080",
-    "strip_listen_path": false,
+    "strip_listen_path": true,
     "enable_load_balancing": false,
     "check_host_against_uptime_tests": false,
     "preserve_host_header": false
@@ -39,7 +45,7 @@
   "enable_ip_blacklisting": false,
   "enable_context_vars": false,
   "do_not_track": false,
-  "tags": ["nsp", "top-nsp"],
+  "tags": ["nsp", "jwt"],
   "active": true,
   "internal": false
 }
