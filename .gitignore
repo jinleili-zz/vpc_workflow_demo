@@ -50,3 +50,8 @@ top-nsp
 top_nsp
 az-nsp
 az_nsp
+switch-worker
+switch_worker
+firewall-worker
+firewall_worker
+api_server

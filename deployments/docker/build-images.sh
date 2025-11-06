@@ -15,6 +15,14 @@ echo "2. 构建AZ NSP镜像..."
 docker build -t nsp-az:latest -f deployments/docker/Dockerfile.az .
 
 echo ""
+echo "3. 构建Switch Worker镜像..."
+docker build -t nsp-switch-worker:latest -f deployments/docker/Dockerfile.switch .
+
+echo ""
+echo "4. 构建Firewall Worker镜像..."
+docker build -t nsp-firewall-worker:latest -f deployments/docker/Dockerfile.firewall .
+
+echo ""
 echo "========================================="
 echo "镜像构建完成"
 echo ""
