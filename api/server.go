@@ -67,6 +67,7 @@ func (s *Server) setupRoutes() {
 	api := s.router.Group("/api/v1")
 	{
 		api.POST("/vpc", s.createVPC)
+		api.POST("/vpc/priority", s.createVPCWithPriority) // 带优先级的VPC创建
 		// 使用VPC名字查询状态
 		api.GET("/vpc/:vpc_name/status", s.getVPCStatus)
 		api.GET("/health", s.health)
@@ -253,6 +254,114 @@ func (s *Server) health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "ok",
 		"service": "vpc-workflow-api",
+	})
+}
+
+// createVPCWithPriority 创建带优先级的VPC
+func (s *Server) createVPCWithPriority(c *gin.Context) {
+	var req CreateVPCRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, CreateVPCResponse{
+			Success: false,
+			Message: fmt.Sprintf("请求参数错误: %v", err),
+		})
+		return
+	}
+
+	// 生成VPC ID和Workflow ID
+	vpcID := uuid.New().String()
+	workflowID := uuid.New().String()
+
+	// 构造任务请求数据
+	vpcRequest := tasks.VPCRequest{
+		VPCName:      req.VPCName,
+		VPCID:        vpcID,
+		VRFName:      req.VRFName,
+		VLANId:       req.VLANId,
+		FirewallZone: req.FirewallZone,
+	}
+
+	requestJSON, err := json.Marshal(vpcRequest)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, CreateVPCResponse{
+			Success: false,
+			Message: fmt.Sprintf("生成请求数据失败: %v", err),
+		})
+		return
+	}
+
+	// 创建带优先级的任务链: VRF -> VLAN子接口 -> 防火墙 (顺序执行)
+	// 使用高优先级 (9为最高)
+	task1 := machineryTasks.Signature{
+		UUID:     workflowID, // 使用workflow ID作为第一个任务的UUID
+		Name:     "create_vrf_on_switch",
+		Priority: 9, // 高优先级
+		Args: []machineryTasks.Arg{
+			{
+				Type:  "string",
+				Value: string(requestJSON),
+			},
+		},
+	}
+
+	task2 := machineryTasks.Signature{
+		Name:     "create_vlan_subinterface",
+		Priority: 9, // 高优先级
+		Args: []machineryTasks.Arg{
+			{
+				Type:  "string",
+				Value: string(requestJSON),
+			},
+		},
+	}
+
+	task3 := machineryTasks.Signature{
+		Name:     "create_firewall_zone",
+		Priority: 9, // 高优先级
+		Args: []machineryTasks.Arg{
+			{
+				Type:  "string",
+				Value: string(requestJSON),
+			},
+		},
+	}
+
+	// 使用Chain构建workflow，确保任务顺序执行
+	chain, err := machineryTasks.NewChain(&task1, &task2, &task3)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, CreateVPCResponse{
+			Success: false,
+			Message: fmt.Sprintf("创建任务链失败: %v", err),
+		})
+		return
+	}
+
+	// 发送任务链到消息队列
+	_, err = s.machineryServer.SendChain(chain)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, CreateVPCResponse{
+			Success: false,
+			Message: fmt.Sprintf("发送工作流失败: %v", err),
+		})
+		return
+	}
+
+	// 存储VPC名字到WorkflowID的映射（使用Redis，24小时过期）
+	mappingKey := fmt.Sprintf("vpc_mapping:%s", req.VPCName)
+	ctx := context.Background()
+	err = s.redisClient.Set(ctx, mappingKey, workflowID, 24*time.Hour).Err()
+	if err != nil {
+		log.Printf("[API] 警告: 存储VPC映射失败: %v", err)
+	}
+
+	log.Printf("[API] 创建VPC工作流(高优先级): VPC=%s, WorkflowID=%s",
+		req.VPCName, workflowID)
+
+	c.JSON(http.StatusOK, CreateVPCResponse{
+		Success:    true,
+		Message:    "VPC创建工作流已启动(高优先级)",
+		VPCID:      vpcID,
+		WorkflowID: workflowID,
 	})
 }
 
