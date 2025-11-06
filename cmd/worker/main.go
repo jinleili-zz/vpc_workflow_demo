@@ -1,4 +1,3 @@
-package worker
 package main
 
 import (
@@ -102,11 +101,11 @@ func main() {
 }
 
 type Worker struct {
-	ID             string
-	config         *WorkerConfig
-	taskExecutor   TaskExecutor
-	semaphore      chan struct{}
-	wg             sync.WaitGroup
+	ID           string
+	config       *WorkerConfig
+	taskExecutor TaskExecutor
+	semaphore    chan struct{}
+	wg           sync.WaitGroup
 }
 
 func NewWorker(id string, config *WorkerConfig) *Worker {
@@ -180,13 +179,13 @@ func (w *Worker) executeTask(ctx context.Context, task *db.Task) {
 
 	// 执行任务
 	result, err := w.taskExecutor.Execute(task)
-	
+
 	if err != nil {
 		log.Printf("[Worker %s] 任务执行失败 %s: %v", w.ID, task.TaskID, err)
-		
+
 		// 检查是否需要重试
 		if task.RetryCount < task.MaxRetries {
-			log.Printf("[Worker %s] 任务 %s 将重试 (当前重试次数: %d/%d)", 
+			log.Printf("[Worker %s] 任务 %s 将重试 (当前重试次数: %d/%d)",
 				w.ID, task.TaskID, task.RetryCount+1, task.MaxRetries)
 			if err := db.IncrementTaskRetry(task.TaskID); err != nil {
 				log.Printf("[Worker %s] 更新重试次数失败: %v", w.ID, err)
@@ -197,7 +196,7 @@ func (w *Worker) executeTask(ctx context.Context, task *db.Task) {
 			if err := db.UpdateTaskStatus(task.TaskID, "failed", nil, &errMsg); err != nil {
 				log.Printf("[Worker %s] 更新任务状态为失败失败: %v", w.ID, err)
 			}
-			
+
 			// 更新工作流状态为失败
 			if err := db.UpdateWorkflowStatus(task.WorkflowID, "failed", &errMsg); err != nil {
 				log.Printf("[Worker %s] 更新工作流状态失败: %v", w.ID, err)
@@ -208,7 +207,7 @@ func (w *Worker) executeTask(ctx context.Context, task *db.Task) {
 
 	// 任务成功完成
 	log.Printf("[Worker %s] 任务执行成功: %s", w.ID, task.TaskID)
-	
+
 	if err := db.UpdateTaskStatus(task.TaskID, "completed", &result, nil); err != nil {
 		log.Printf("[Worker %s] 更新任务状态失败: %v", w.ID, err)
 		return
@@ -240,7 +239,7 @@ func (w *Worker) checkAndCreateNextTask(completedTask *db.Task) {
 	// 创建下一个任务
 	nextTaskType := getTaskType(nextTaskName)
 	nextTaskID := fmt.Sprintf("%s-%d", completedTask.WorkflowID, time.Now().UnixNano())
-	
+
 	nextTask := &db.Task{
 		TaskID:        nextTaskID,
 		WorkflowID:    completedTask.WorkflowID,
@@ -280,7 +279,7 @@ func getTaskType(taskName string) string {
 		"create_subnet_on_switch":  true,
 		"configure_subnet_routing": true,
 	}
-	
+
 	if switchTasks[taskName] {
 		return "switch"
 	}
@@ -315,23 +314,23 @@ func (e *taskExecutor) Execute(task *db.Task) (string, error) {
 	case "create_vrf_on_switch":
 		result, err := tasks.CreateVRFOnSwitch(requestJSON)
 		return result, err
-		
+
 	case "create_vlan_subinterface":
 		result, err := tasks.CreateVLANSubInterface(requestJSON)
 		return result, err
-		
+
 	case "create_firewall_zone":
 		result, err := tasks.CreateFirewallZone(requestJSON)
 		return result, err
-		
+
 	case "create_subnet_on_switch":
 		result, err := tasks.CreateSubnetOnSwitch(requestJSON)
 		return result, err
-		
+
 	case "configure_subnet_routing":
 		result, err := tasks.ConfigureSubnetRouting(requestJSON)
 		return result, err
-		
+
 	default:
 		return "", fmt.Errorf("未知的任务类型: %s", task.TaskName)
 	}
