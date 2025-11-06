@@ -65,11 +65,15 @@ func main() {
 		},
 	)
 
-	// 6. 注册任务处理器（仅注册交换机相关任务）
+	// 6. 注册任务处理器（注册交换机相关任务，包括VPC和子网）
 	mux := asynq.NewServeMux()
+	// VPC相关任务
 	mux.HandleFunc("create_vrf_on_switch", tasks.CreateVRFOnSwitchHandler(asynqClient, queueName, redisClient))
 	mux.HandleFunc("create_vlan_subinterface", tasks.CreateVLANSubInterfaceHandler(asynqClient, queueName, redisClient))
-	log.Println("✓ 已注册任务: create_vrf_on_switch, create_vlan_subinterface")
+	// 子网相关任务
+	mux.HandleFunc("create_subnet_on_switch", tasks.CreateSubnetOnSwitchHandler(asynqClient, queueName, redisClient))
+	mux.HandleFunc("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(redisClient))
+	log.Println("✓ 已注册任务: create_vrf_on_switch, create_vlan_subinterface, create_subnet_on_switch, configure_subnet_routing")
 
 	// 7. 处理退出信号
 	sigChan := make(chan os.Signal, 1)
@@ -83,7 +87,7 @@ func main() {
 	log.Printf("========================================")
 	log.Printf("交换机Worker已启动: Region=%s, AZ=%s", cfg.Region, cfg.AZ)
 	log.Printf("处理队列: %s", queueName)
-	log.Printf("处理任务: 创廽VRF, 创廽VLAN子接口")
+	log.Printf("处理任务: 创建VRF, 创建VLAN子接口, 创建子网, 配置子网路由")
 	log.Printf("========================================")
 
 	// 8. 启动Worker
