@@ -1,0 +1,19 @@
+{
+  "default": {
+    "rate": 1000,
+    "per": 60,
+    "quota_max": -1,
+    "quota_renewal_rate": 3600,
+    "access_rights": {
+      "nsp-top-api-v1": {
+        "api_id": "nsp-top-api-v1",
+        "api_name": "NSP Top API",
+        "versions": ["Default"]
+      }
+    },
+    "org_id": "nsp-org",
+    "hmac_enabled": false,
+    "active": true,
+    "tags": ["nsp"]
+  }
+}

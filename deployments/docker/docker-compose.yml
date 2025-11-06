@@ -15,6 +15,32 @@ services:
       timeout: 3s
       retries: 5
 
+  # Tyk API Gateway
+  tyk-gateway:
+    image: tykio/tyk-gateway:latest
+    container_name: tyk-gateway
+    ports:
+      - "9696:9696"
+    volumes:
+      - ./tyk-config/tyk.conf:/opt/tyk-gateway/tyk.conf
+      - ./tyk-config/apps:/opt/tyk-gateway/apps
+      - ./tyk-config/policies:/opt/tyk-gateway/policies
+    environment:
+      - TYK_GW_STORAGE_HOST=redis
+      - TYK_GW_STORAGE_PORT=6379
+      - TYK_GW_STORAGE_DATABASE=2
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9696/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   # Top NSP
   top-nsp:
     image: nsp-top:latest
@@ -27,8 +53,9 @@ services:
       - REDIS_BROKER_DB=1
       - AZ_NSP_PREFIX=az-nsp
       - AZ_NSP_PORT=8080
-    ports:
-      - "8080:8080"
+    # 不再暴露到宿主机，只在容器内部使用
+    expose:
+      - "8080"
     depends_on:
       redis:
         condition: service_healthy
