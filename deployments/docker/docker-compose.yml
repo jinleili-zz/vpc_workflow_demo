@@ -1,19 +1,27 @@
 version: '3.8'
 
 services:
-  # Redis服务
-  redis:
-    image: redis:7-alpine
-    container_name: nsp-redis
+  # MySQL数据库
+  mysql:
+    image: mysql:8.0
+    container_name: nsp-mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=nsp_root_2024
+      - MYSQL_DATABASE=nsp_workflow
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
     ports:
-      - "6379:6379"
+      - "3306:3306"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - mysql-data:/var/lib/mysql
     networks:
       - nsp-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pnsp_root_2024"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
 
   # Top NSP
   top-nsp:
@@ -22,15 +30,17 @@ services:
     environment:
       - SERVICE_TYPE=top
       - PORT=8080
-      - REDIS_ADDR=redis:6379
-      - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
+      - MYSQL_DATABASE=nsp_workflow
       - AZ_NSP_PREFIX=az-nsp
       - AZ_NSP_PORT=8080
     ports:
       - "8080:8080"
     depends_on:
-      redis:
+      mysql:
         condition: service_healthy
     networks:
       - nsp-network
@@ -49,13 +59,14 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - PORT=8080
-      - REDIS_ADDR=redis:6379
-      - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
+      - MYSQL_DATABASE=nsp_workflow
       - TOP_NSP_ADDR=http://top-nsp:8080
-      - WORKER_COUNT=2
     depends_on:
-      redis:
+      mysql:
         condition: service_healthy
       top-nsp:
         condition: service_healthy
@@ -71,13 +82,14 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
       - PORT=8080
-      - REDIS_ADDR=redis:6379
-      - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
+      - MYSQL_DATABASE=nsp_workflow
       - TOP_NSP_ADDR=http://top-nsp:8080
-      - WORKER_COUNT=2
     depends_on:
-      redis:
+      mysql:
         condition: service_healthy
       top-nsp:
         condition: service_healthy
@@ -93,18 +105,160 @@ services:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
       - PORT=8080
-      - REDIS_ADDR=redis:6379
-      - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
+      - MYSQL_DATABASE=nsp_workflow
       - TOP_NSP_ADDR=http://top-nsp:8080
-      - WORKER_COUNT=2
     depends_on:
-      redis:
+      mysql:
         condition: service_healthy
       top-nsp:
         condition: service_healthy
     networks:
       - nsp-network
+
+  # Switch Worker - cn-beijing-1a
+  switch-worker-bj-1a:
+    image: nsp-worker:latest
+    container_name: switch-worker-cn-beijing-1a
+    environment:
+      - WORKER_TYPE=switch
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
+      - MYSQL_DATABASE=nsp_workflow
+      - POLL_INTERVAL=3
+      - MAX_CONCURRENCY=3
+    depends_on:
+      mysql:
+        condition: service_healthy
+      az-nsp-cn-beijing-1a:
+        condition: service_started
+    networks:
+      - nsp-network
+
+  # Firewall Worker - cn-beijing-1a
+  firewall-worker-bj-1a:
+    image: nsp-worker:latest
+    container_name: firewall-worker-cn-beijing-1a
+    environment:
+      - WORKER_TYPE=firewall
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
+      - MYSQL_DATABASE=nsp_workflow
+      - POLL_INTERVAL=3
+      - MAX_CONCURRENCY=3
+    depends_on:
+      mysql:
+        condition: service_healthy
+      az-nsp-cn-beijing-1a:
+        condition: service_started
+    networks:
+      - nsp-network
+
+  # Switch Worker - cn-beijing-1b
+  switch-worker-bj-1b:
+    image: nsp-worker:latest
+    container_name: switch-worker-cn-beijing-1b
+    environment:
+      - WORKER_TYPE=switch
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1b
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
+      - MYSQL_DATABASE=nsp_workflow
+      - POLL_INTERVAL=3
+      - MAX_CONCURRENCY=3
+    depends_on:
+      mysql:
+        condition: service_healthy
+      az-nsp-cn-beijing-1b:
+        condition: service_started
+    networks:
+      - nsp-network
+
+  # Firewall Worker - cn-beijing-1b
+  firewall-worker-bj-1b:
+    image: nsp-worker:latest
+    container_name: firewall-worker-cn-beijing-1b
+    environment:
+      - WORKER_TYPE=firewall
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1b
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
+      - MYSQL_DATABASE=nsp_workflow
+      - POLL_INTERVAL=3
+      - MAX_CONCURRENCY=3
+    depends_on:
+      mysql:
+        condition: service_healthy
+      az-nsp-cn-beijing-1b:
+        condition: service_started
+    networks:
+      - nsp-network
+
+  # Switch Worker - cn-shanghai-1a
+  switch-worker-sh-1a:
+    image: nsp-worker:latest
+    container_name: switch-worker-cn-shanghai-1a
+    environment:
+      - WORKER_TYPE=switch
+      - REGION=cn-shanghai
+      - AZ=cn-shanghai-1a
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
+      - MYSQL_DATABASE=nsp_workflow
+      - POLL_INTERVAL=3
+      - MAX_CONCURRENCY=3
+    depends_on:
+      mysql:
+        condition: service_healthy
+      az-nsp-cn-shanghai-1a:
+        condition: service_started
+    networks:
+      - nsp-network
+
+  # Firewall Worker - cn-shanghai-1a
+  firewall-worker-sh-1a:
+    image: nsp-worker:latest
+    container_name: firewall-worker-cn-shanghai-1a
+    environment:
+      - WORKER_TYPE=firewall
+      - REGION=cn-shanghai
+      - AZ=cn-shanghai-1a
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_pass_2024
+      - MYSQL_DATABASE=nsp_workflow
+      - POLL_INTERVAL=3
+      - MAX_CONCURRENCY=3
+    depends_on:
+      mysql:
+        condition: service_healthy
+      az-nsp-cn-shanghai-1a:
+        condition: service_started
+    networks:
+      - nsp-network
+
+volumes:
+  mysql-data:
 
 networks:
   nsp-network:
