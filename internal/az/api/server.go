@@ -116,6 +116,8 @@ func (s *Server) createVPC(c *gin.Context) {
 	task := &db.Task{
 		TaskID:        taskID,
 		WorkflowID:    workflowID,
+		Region:        s.cfg.Region,
+		AZ:            sql.NullString{String: s.cfg.AZ, Valid: true},
 		TaskName:      "create_vrf_on_switch",
 		TaskType:      "switch",
 		SequenceOrder: 1,
@@ -207,6 +209,8 @@ func (s *Server) createSubnet(c *gin.Context) {
 	task := &db.Task{
 		TaskID:        taskID,
 		WorkflowID:    workflowID,
+		Region:        req.Region,
+		AZ:            sql.NullString{String: req.AZ, Valid: true},
 		TaskName:      "create_subnet_on_switch",
 		TaskType:      "switch",
 		SequenceOrder: 1,

@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     task_id VARCHAR(64) NOT NULL UNIQUE COMMENT '任务唯一ID',
     workflow_id VARCHAR(64) NOT NULL COMMENT '所属工作流ID',
+    region VARCHAR(64) NOT NULL COMMENT 'Region',
+    az VARCHAR(64) COMMENT 'AZ',
     task_name VARCHAR(128) NOT NULL COMMENT '任务名称',
     task_type ENUM('switch', 'firewall') NOT NULL COMMENT '任务类型(设备类型)',
     sequence_order INT NOT NULL DEFAULT 0 COMMENT '执行顺序',
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_workflow_id (workflow_id),
     INDEX idx_task_type_status (task_type, status),
+    INDEX idx_region_az_type (region, az, task_type),
     INDEX idx_status (status),
     INDEX idx_created_at (created_at),
     FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE

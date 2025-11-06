@@ -12,6 +12,8 @@ type Task struct {
 	ID            int64
 	TaskID        string
 	WorkflowID    string
+	Region        string
+	AZ            sql.NullString
 	TaskName      string
 	TaskType      string
 	SequenceOrder int
@@ -30,12 +32,12 @@ type Task struct {
 
 // CreateTask 创建任务
 func CreateTask(task *Task) error {
-	query := `INSERT INTO tasks (task_id, workflow_id, task_name, task_type, sequence_order, 
+	query := `INSERT INTO tasks (task_id, workflow_id, region, az, task_name, task_type, sequence_order, 
 	          status, payload, max_retries) 
-	          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-	result, err := db.Exec(query, task.TaskID, task.WorkflowID, task.TaskName, task.TaskType,
-		task.SequenceOrder, task.Status, task.Payload, task.MaxRetries)
+	result, err := db.Exec(query, task.TaskID, task.WorkflowID, task.Region, task.AZ,
+		task.TaskName, task.TaskType, task.SequenceOrder, task.Status, task.Payload, task.MaxRetries)
 	if err != nil {
 		return fmt.Errorf("创建任务失败: %v", err)
 	}
@@ -44,17 +46,34 @@ func CreateTask(task *Task) error {
 	return nil
 }
 
-// GetPendingTasksByType 获取指定类型的待执行任务（按创建时间排序）
-func GetPendingTasksByType(taskType string, limit int) ([]*Task, error) {
-	query := `SELECT id, task_id, workflow_id, task_name, task_type, sequence_order, 
-	          status, payload, result, error_message, retry_count, max_retries, worker_id, 
-	          started_at, completed_at, created_at, updated_at 
-	          FROM tasks 
-	          WHERE task_type = ? AND status = 'pending' 
-	          ORDER BY sequence_order ASC, created_at ASC
-	          LIMIT ?`
+// GetPendingTasksByType 获取指定类型和Region/AZ的待执行任务（按创建时间排序）
+func GetPendingTasksByType(taskType, region string, az *string, limit int) ([]*Task, error) {
+	var query string
+	var rows *sql.Rows
+	var err error
 
-	rows, err := db.Query(query, taskType, limit)
+	if az != nil && *az != "" {
+		// 有AZ，过滤region和az
+		query = `SELECT id, task_id, workflow_id, region, az, task_name, task_type, sequence_order, 
+		          status, payload, result, error_message, retry_count, max_retries, worker_id, 
+		          started_at, completed_at, created_at, updated_at 
+		          FROM tasks 
+		          WHERE task_type = ? AND region = ? AND az = ? AND status = 'pending' 
+		          ORDER BY sequence_order ASC, created_at ASC
+		          LIMIT ?`
+		rows, err = db.Query(query, taskType, region, *az, limit)
+	} else {
+		// 无AZ，只过滤region
+		query = `SELECT id, task_id, workflow_id, region, az, task_name, task_type, sequence_order, 
+		          status, payload, result, error_message, retry_count, max_retries, worker_id, 
+		          started_at, completed_at, created_at, updated_at 
+		          FROM tasks 
+		          WHERE task_type = ? AND region = ? AND status = 'pending' 
+		          ORDER BY sequence_order ASC, created_at ASC
+		          LIMIT ?`
+		rows, err = db.Query(query, taskType, region, limit)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("查询待执行任务失败: %v", err)
 	}
@@ -64,7 +83,7 @@ func GetPendingTasksByType(taskType string, limit int) ([]*Task, error) {
 	for rows.Next() {
 		task := &Task{}
 		err := rows.Scan(
-			&task.ID, &task.TaskID, &task.WorkflowID, &task.TaskName, &task.TaskType,
+			&task.ID, &task.TaskID, &task.WorkflowID, &task.Region, &task.AZ, &task.TaskName, &task.TaskType,
 			&task.SequenceOrder, &task.Status, &task.Payload, &task.Result, &task.ErrorMessage,
 			&task.RetryCount, &task.MaxRetries, &task.WorkerID, &task.StartedAt, &task.CompletedAt,
 			&task.CreatedAt, &task.UpdatedAt,
@@ -150,7 +169,7 @@ func IncrementTaskRetry(taskID string) error {
 
 // GetTasksByWorkflowID 获取工作流的所有任务
 func GetTasksByWorkflowID(workflowID string) ([]*Task, error) {
-	query := `SELECT id, task_id, workflow_id, task_name, task_type, sequence_order, 
+	query := `SELECT id, task_id, workflow_id, region, az, task_name, task_type, sequence_order, 
 	          status, payload, result, error_message, retry_count, max_retries, worker_id, 
 	          started_at, completed_at, created_at, updated_at 
 	          FROM tasks 
@@ -167,7 +186,7 @@ func GetTasksByWorkflowID(workflowID string) ([]*Task, error) {
 	for rows.Next() {
 		task := &Task{}
 		err := rows.Scan(
-			&task.ID, &task.TaskID, &task.WorkflowID, &task.TaskName, &task.TaskType,
+			&task.ID, &task.TaskID, &task.WorkflowID, &task.Region, &task.AZ, &task.TaskName, &task.TaskType,
 			&task.SequenceOrder, &task.Status, &task.Payload, &task.Result, &task.ErrorMessage,
 			&task.RetryCount, &task.MaxRetries, &task.WorkerID, &task.StartedAt, &task.CompletedAt,
 			&task.CreatedAt, &task.UpdatedAt,

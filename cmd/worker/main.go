@@ -138,7 +138,7 @@ func (w *Worker) Start(ctx context.Context) {
 
 func (w *Worker) pollAndExecuteTasks(ctx context.Context) {
 	// 获取待处理任务（最多获取并发数量的任务）
-	tasks, err := db.GetPendingTasksByType(w.config.WorkerType, w.config.MaxConcurrency)
+	tasks, err := db.GetPendingTasksByType(w.config.WorkerType, w.config.Region, &w.config.AZ, w.config.MaxConcurrency)
 	if err != nil {
 		log.Printf("[Worker %s] 获取任务失败: %v", w.ID, err)
 		return
@@ -243,6 +243,8 @@ func (w *Worker) checkAndCreateNextTask(completedTask *db.Task) {
 	nextTask := &db.Task{
 		TaskID:        nextTaskID,
 		WorkflowID:    completedTask.WorkflowID,
+		Region:        completedTask.Region,
+		AZ:            completedTask.AZ,
 		TaskName:      nextTaskName,
 		TaskType:      nextTaskType,
 		SequenceOrder: completedTask.SequenceOrder + 1,
