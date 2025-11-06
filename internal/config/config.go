@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 )
@@ -14,8 +13,8 @@ type NSPConfig struct {
 	AZ          string
 	Port        int
 
-	// Redis 配置
-	Redis RedisConfig
+	// MySQL 配置
+	MySQL MySQLConfig
 
 	// Top NSP 特有配置
 	TopNSP TopNSPConfig
@@ -24,22 +23,13 @@ type NSPConfig struct {
 	AZNSP AZNSPConfig
 }
 
-// RedisConfig Redis配置
-type RedisConfig struct {
-	// Redis 地址
-	Addr     string
+// MySQLConfig MySQL配置
+type MySQLConfig struct {
+	Host     string
+	Port     int
+	User     string
 	Password string
-
-	// 数据存储 DB（任务状态、VPC映射、Region/AZ信息等）
-	DataDB int
-
-	// 消息队列 DB（go-machinery broker）
-	BrokerDB int
-
-	// 连接池配置
-	MaxIdle     int
-	MaxActive   int
-	IdleTimeout int
+	Database string
 }
 
 // TopNSPConfig Top NSP配置
@@ -53,9 +43,6 @@ type TopNSPConfig struct {
 type AZNSPConfig struct {
 	// Top NSP 地址（用于注册和心跳）
 	TopNSPAddr string
-
-	// Worker 配置
-	WorkerCount int
 }
 
 // LoadConfig 从环境变量加载配置
@@ -66,14 +53,12 @@ func LoadConfig() *NSPConfig {
 		AZ:          getEnv("AZ", ""),
 		Port:        getEnvInt("PORT", 8080),
 
-		Redis: RedisConfig{
-			Addr:        getEnv("REDIS_ADDR", "localhost:6379"),
-			Password:    getEnv("REDIS_PASSWORD", ""),
-			DataDB:      getEnvInt("REDIS_DATA_DB", 0),
-			BrokerDB:    getEnvInt("REDIS_BROKER_DB", 1),
-			MaxIdle:     getEnvInt("REDIS_MAX_IDLE", 3),
-			MaxActive:   getEnvInt("REDIS_MAX_ACTIVE", 10),
-			IdleTimeout: getEnvInt("REDIS_IDLE_TIMEOUT", 240),
+		MySQL: MySQLConfig{
+			Host:     getEnv("MYSQL_HOST", "localhost"),
+			Port:     getEnvInt("MYSQL_PORT", 3306),
+			User:     getEnv("MYSQL_USER", "nsp_user"),
+			Password: getEnv("MYSQL_PASSWORD", "nsp_pass_2024"),
+			Database: getEnv("MYSQL_DATABASE", "nsp_workflow"),
 		},
 
 		TopNSP: TopNSPConfig{
@@ -82,26 +67,9 @@ func LoadConfig() *NSPConfig {
 		},
 
 		AZNSP: AZNSPConfig{
-			TopNSPAddr:  getEnv("TOP_NSP_ADDR", "http://top-nsp:8080"),
-			WorkerCount: getEnvInt("WORKER_COUNT", 2),
+			TopNSPAddr: getEnv("TOP_NSP_ADDR", "http://top-nsp:8080"),
 		},
 	}
-}
-
-// GetRedisDataAddr 获取数据存储Redis地址
-func (c *NSPConfig) GetRedisDataAddr() string {
-	if c.Redis.Password != "" {
-		return fmt.Sprintf("redis://:%s@%s/%d", c.Redis.Password, c.Redis.Addr, c.Redis.DataDB)
-	}
-	return fmt.Sprintf("redis://%s/%d", c.Redis.Addr, c.Redis.DataDB)
-}
-
-// GetRedisBrokerAddr 获取消息队列Redis地址
-func (c *NSPConfig) GetRedisBrokerAddr() string {
-	if c.Redis.Password != "" {
-		return fmt.Sprintf("redis://:%s@%s/%d", c.Redis.Password, c.Redis.Addr, c.Redis.BrokerDB)
-	}
-	return fmt.Sprintf("redis://%s/%d", c.Redis.Addr, c.Redis.BrokerDB)
 }
 
 // getEnv 获取环境变量，如果不存在则返回默认值

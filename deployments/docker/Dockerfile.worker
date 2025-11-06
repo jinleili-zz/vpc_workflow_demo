@@ -1,0 +1,40 @@
+# 构建阶段
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /build
+
+# 设置Go代理
+ENV GOPROXY=https://goproxy.cn,direct
+
+# 复制go.mod和go.sum
+COPY go.mod go.sum ./
+
+# 下载依赖
+RUN go mod download
+
+# 复制源代码
+COPY . .
+
+# 编译Worker
+RUN CGO_ENABLED=0 GOOS=linux go build -o worker ./cmd/worker
+
+# 运行阶段
+FROM alpine:latest
+
+WORKDIR /app
+
+# 添加国内镜像源加速
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
+    apk --no-cache add ca-certificates tzdata
+
+# 设置时区
+ENV TZ=Asia/Shanghai
+
+# 从构建阶段复制二进制文件
+COPY --from=builder /build/worker .
+
+# 暴露端口（Worker不需要端口，但保留以便将来扩展）
+# EXPOSE 8080
+
+# 启动Worker
+CMD ["./worker"]

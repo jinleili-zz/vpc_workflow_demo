@@ -33,13 +33,13 @@ func CreateTask(task *Task) error {
 	query := `INSERT INTO tasks (task_id, workflow_id, task_name, task_type, sequence_order, 
 	          status, payload, max_retries) 
 	          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	
+
 	result, err := db.Exec(query, task.TaskID, task.WorkflowID, task.TaskName, task.TaskType,
 		task.SequenceOrder, task.Status, task.Payload, task.MaxRetries)
 	if err != nil {
 		return fmt.Errorf("创建任务失败: %v", err)
 	}
-	
+
 	task.ID, _ = result.LastInsertId()
 	return nil
 }
@@ -53,13 +53,13 @@ func GetPendingTasksByType(taskType string, limit int) ([]*Task, error) {
 	          WHERE task_type = ? AND status = 'pending' 
 	          ORDER BY sequence_order ASC, created_at ASC
 	          LIMIT ?`
-	
+
 	rows, err := db.Query(query, taskType, limit)
 	if err != nil {
 		return nil, fmt.Errorf("查询待执行任务失败: %v", err)
 	}
 	defer rows.Close()
-	
+
 	var tasks []*Task
 	for rows.Next() {
 		task := &Task{}
@@ -74,7 +74,7 @@ func GetPendingTasksByType(taskType string, limit int) ([]*Task, error) {
 		}
 		tasks = append(tasks, task)
 	}
-	
+
 	return tasks, nil
 }
 
@@ -85,7 +85,7 @@ func ClaimTask(taskID, workerID string) error {
 		return fmt.Errorf("开启事务失败: %v", err)
 	}
 	defer tx.Rollback()
-	
+
 	// 使用 FOR UPDATE 锁定行
 	query := `SELECT status FROM tasks WHERE task_id = ? FOR UPDATE`
 	var status string
@@ -93,11 +93,11 @@ func ClaimTask(taskID, workerID string) error {
 	if err != nil {
 		return fmt.Errorf("查询任务失败: %v", err)
 	}
-	
+
 	if status != "pending" {
 		return fmt.Errorf("任务状态不是pending: %s", status)
 	}
-	
+
 	// 更新状态为running
 	updateQuery := `UPDATE tasks SET status = 'running', worker_id = ?, started_at = NOW(), 
 	                updated_at = NOW() WHERE task_id = ?`
@@ -105,7 +105,7 @@ func ClaimTask(taskID, workerID string) error {
 	if err != nil {
 		return fmt.Errorf("更新任务状态失败: %v", err)
 	}
-	
+
 	return tx.Commit()
 }
 
@@ -113,7 +113,7 @@ func ClaimTask(taskID, workerID string) error {
 func UpdateTaskStatus(taskID, status string, result *string, errorMsg *string) error {
 	var query string
 	var args []interface{}
-	
+
 	if status == "completed" {
 		query = `UPDATE tasks SET status = ?, result = ?, completed_at = NOW(), updated_at = NOW() 
 		         WHERE task_id = ?`
@@ -126,12 +126,12 @@ func UpdateTaskStatus(taskID, status string, result *string, errorMsg *string) e
 		query = `UPDATE tasks SET status = ?, updated_at = NOW() WHERE task_id = ?`
 		args = []interface{}{status, taskID}
 	}
-	
+
 	_, err := db.Exec(query, args...)
 	if err != nil {
 		return fmt.Errorf("更新任务状态失败: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -139,12 +139,12 @@ func UpdateTaskStatus(taskID, status string, result *string, errorMsg *string) e
 func IncrementTaskRetry(taskID string) error {
 	query := `UPDATE tasks SET retry_count = retry_count + 1, status = 'pending', 
 	          worker_id = NULL, updated_at = NOW() WHERE task_id = ?`
-	
+
 	_, err := db.Exec(query, taskID)
 	if err != nil {
 		return fmt.Errorf("增加任务重试次数失败: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -156,13 +156,13 @@ func GetTasksByWorkflowID(workflowID string) ([]*Task, error) {
 	          FROM tasks 
 	          WHERE workflow_id = ? 
 	          ORDER BY sequence_order ASC`
-	
+
 	rows, err := db.Query(query, workflowID)
 	if err != nil {
 		return nil, fmt.Errorf("查询工作流任务失败: %v", err)
 	}
 	defer rows.Close()
-	
+
 	var tasks []*Task
 	for rows.Next() {
 		task := &Task{}
@@ -177,6 +177,6 @@ func GetTasksByWorkflowID(workflowID string) ([]*Task, error) {
 		}
 		tasks = append(tasks, task)
 	}
-	
+
 	return tasks, nil
 }
