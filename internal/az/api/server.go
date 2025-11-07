@@ -111,27 +111,41 @@ func (s *Server) createVPC(c *gin.Context) {
 		return
 	}
 
-	// 创建第一个任务：在交换机上创建VRF
-	taskID := fmt.Sprintf("%s-task1-%d", workflowID, time.Now().UnixNano())
-	task := &db.Task{
-		TaskID:        taskID,
-		WorkflowID:    workflowID,
-		Region:        s.cfg.Region,
-		AZ:            sql.NullString{String: s.cfg.AZ, Valid: true},
-		TaskName:      "create_vrf_on_switch",
-		TaskType:      "switch",
-		SequenceOrder: 1,
-		Status:        "pending",
-		Payload:       requestJSON,
-		MaxRetries:    3,
+	// 创建任务链:VRF -> VLAN -> Firewall
+	// 编排侧负责创建完整任务链,Worker只负责执行
+	tasks := []struct {
+		name     string
+		taskType string
+		sequence int
+	}{
+		{"create_vrf_on_switch", "switch", 1},
+		{"create_vlan_subinterface", "switch", 2},
+		{"create_firewall_zone", "firewall", 3},
 	}
 
-	if err := db.CreateTask(task); err != nil {
-		c.JSON(http.StatusInternalServerError, models.VPCResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建任务失败: %v", err),
-		})
-		return
+	for _, taskDef := range tasks {
+		taskID := fmt.Sprintf("%s-task%d-%d", workflowID, taskDef.sequence, time.Now().UnixNano())
+		task := &db.Task{
+			TaskID:        taskID,
+			WorkflowID:    workflowID,
+			Region:        s.cfg.Region,
+			AZ:            sql.NullString{String: s.cfg.AZ, Valid: true},
+			TaskName:      taskDef.name,
+			TaskType:      taskDef.taskType,
+			SequenceOrder: taskDef.sequence,
+			Status:        "pending",
+			Payload:       requestJSON,
+			MaxRetries:    3,
+		}
+
+		if err := db.CreateTask(task); err != nil {
+			c.JSON(http.StatusInternalServerError, models.VPCResponse{
+				Success: false,
+				Message: fmt.Sprintf("创建任务失败: %v", err),
+			})
+			return
+		}
+		log.Printf("[AZ NSP %s] 创建任务 %d/%d: %s (%s)", s.cfg.AZ, taskDef.sequence, len(tasks), taskDef.name, taskID)
 	}
 
 	// 创建资源映射（用于通过VPC名称查询）
@@ -139,8 +153,8 @@ func (s *Server) createVPC(c *gin.Context) {
 		log.Printf("[AZ NSP %s] 警告: 创建资源映射失败: %v", s.cfg.AZ, err)
 	}
 
-	log.Printf("[AZ NSP %s] VPC工作流已创建: VPC=%s, WorkflowID=%s, 首任务=%s",
-		s.cfg.AZ, req.VPCName, workflowID, taskID)
+	log.Printf("[AZ NSP %s] VPC工作流已创建: VPC=%s, WorkflowID=%s, 任务数=%d",
+		s.cfg.AZ, req.VPCName, workflowID, 3)
 
 	c.JSON(http.StatusOK, models.VPCResponse{
 		Success:    true,
@@ -204,27 +218,39 @@ func (s *Server) createSubnet(c *gin.Context) {
 		return
 	}
 
-	// 创建第一个任务：在交换机上创建子网
-	taskID := fmt.Sprintf("%s-task1-%d", workflowID, time.Now().UnixNano())
-	task := &db.Task{
-		TaskID:        taskID,
-		WorkflowID:    workflowID,
-		Region:        req.Region,
-		AZ:            sql.NullString{String: req.AZ, Valid: true},
-		TaskName:      "create_subnet_on_switch",
-		TaskType:      "switch",
-		SequenceOrder: 1,
-		Status:        "pending",
-		Payload:       requestJSON,
-		MaxRetries:    3,
+	// 创建任务链:Subnet -> Routing
+	tasks := []struct {
+		name     string
+		taskType string
+		sequence int
+	}{
+		{"create_subnet_on_switch", "switch", 1},
+		{"configure_subnet_routing", "switch", 2},
 	}
 
-	if err := db.CreateTask(task); err != nil {
-		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建任务失败: %v", err),
-		})
-		return
+	for _, taskDef := range tasks {
+		taskID := fmt.Sprintf("%s-task%d-%d", workflowID, taskDef.sequence, time.Now().UnixNano())
+		task := &db.Task{
+			TaskID:        taskID,
+			WorkflowID:    workflowID,
+			Region:        req.Region,
+			AZ:            sql.NullString{String: req.AZ, Valid: true},
+			TaskName:      taskDef.name,
+			TaskType:      taskDef.taskType,
+			SequenceOrder: taskDef.sequence,
+			Status:        "pending",
+			Payload:       requestJSON,
+			MaxRetries:    3,
+		}
+
+		if err := db.CreateTask(task); err != nil {
+			c.JSON(http.StatusInternalServerError, models.SubnetResponse{
+				Success: false,
+				Message: fmt.Sprintf("创建任务失败: %v", err),
+			})
+			return
+		}
+		log.Printf("[AZ NSP %s] 创建任务 %d/%d: %s (%s)", s.cfg.AZ, taskDef.sequence, len(tasks), taskDef.name, taskID)
 	}
 
 	// 创建资源映射
@@ -232,8 +258,8 @@ func (s *Server) createSubnet(c *gin.Context) {
 		log.Printf("[AZ NSP %s] 警告: 创建资源映射失败: %v", s.cfg.AZ, err)
 	}
 
-	log.Printf("[AZ NSP %s] 子网工作流已创建: Subnet=%s, WorkflowID=%s",
-		s.cfg.AZ, req.SubnetName, workflowID)
+	log.Printf("[AZ NSP %s] 子网工作流已创建: Subnet=%s, WorkflowID=%s, 任务数=%d",
+		s.cfg.AZ, req.SubnetName, workflowID, 2)
 
 	c.JSON(http.StatusOK, models.SubnetResponse{
 		Success:    true,

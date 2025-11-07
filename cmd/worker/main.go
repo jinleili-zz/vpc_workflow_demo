@@ -213,79 +213,34 @@ func (w *Worker) executeTask(ctx context.Context, task *db.Task) {
 		return
 	}
 
-	// 检查是否有后续任务需要创建
-	w.checkAndCreateNextTask(task)
+	// 检查工作流是否全部完成
+	w.checkWorkflowCompletion(task.WorkflowID)
 }
 
-func (w *Worker) checkAndCreateNextTask(completedTask *db.Task) {
-	// 解析payload获取任务链信息
-	var payload map[string]interface{}
-	if err := json.Unmarshal(completedTask.Payload, &payload); err != nil {
-		log.Printf("[Worker %s] 解析任务payload失败: %v", w.ID, err)
+// checkWorkflowCompletion 检查工作流是否全部完成
+func (w *Worker) checkWorkflowCompletion(workflowID string) {
+	// 获取工作流的所有任务
+	tasks, err := db.GetTasksByWorkflowID(workflowID)
+	if err != nil {
+		log.Printf("[Worker %s] 获取工作流任务失败: %v", w.ID, err)
 		return
 	}
 
-	// 根据当前任务确定下一个任务
-	nextTaskName := getNextTaskName(completedTask.TaskName)
-	if nextTaskName == "" {
-		// 没有后续任务，工作流完成
-		log.Printf("[Worker %s] 工作流 %s 所有任务已完成", w.ID, completedTask.WorkflowID)
-		if err := db.UpdateWorkflowStatus(completedTask.WorkflowID, "completed", nil); err != nil {
+	// 检查所有任务是否都已完成
+	allCompleted := true
+	for _, task := range tasks {
+		if task.Status != "completed" {
+			allCompleted = false
+			break
+		}
+	}
+
+	if allCompleted {
+		log.Printf("[Worker %s] 工作流 %s 所有任务已完成", w.ID, workflowID)
+		if err := db.UpdateWorkflowStatus(workflowID, "completed", nil); err != nil {
 			log.Printf("[Worker %s] 更新工作流状态失败: %v", w.ID, err)
 		}
-		return
 	}
-
-	// 创建下一个任务
-	nextTaskType := getTaskType(nextTaskName)
-	nextTaskID := fmt.Sprintf("%s-%d", completedTask.WorkflowID, time.Now().UnixNano())
-
-	nextTask := &db.Task{
-		TaskID:        nextTaskID,
-		WorkflowID:    completedTask.WorkflowID,
-		Region:        completedTask.Region,
-		AZ:            completedTask.AZ,
-		TaskName:      nextTaskName,
-		TaskType:      nextTaskType,
-		SequenceOrder: completedTask.SequenceOrder + 1,
-		Status:        "pending",
-		Payload:       completedTask.Payload,
-		MaxRetries:    3,
-	}
-
-	if err := db.CreateTask(nextTask); err != nil {
-		log.Printf("[Worker %s] 创建下一个任务失败: %v", w.ID, err)
-		return
-	}
-
-	log.Printf("[Worker %s] 已创建下一个任务: %s (%s)", w.ID, nextTaskName, nextTaskID)
-}
-
-// getNextTaskName 获取下一个任务名称
-func getNextTaskName(currentTaskName string) string {
-	taskChain := map[string]string{
-		"create_vrf_on_switch":     "create_vlan_subinterface",
-		"create_vlan_subinterface": "create_firewall_zone",
-		"create_firewall_zone":     "", // VPC工作流结束
-		"create_subnet_on_switch":  "configure_subnet_routing",
-		"configure_subnet_routing": "", // 子网工作流结束
-	}
-	return taskChain[currentTaskName]
-}
-
-// getTaskType 根据任务名称获取任务类型
-func getTaskType(taskName string) string {
-	switchTasks := map[string]bool{
-		"create_vrf_on_switch":     true,
-		"create_vlan_subinterface": true,
-		"create_subnet_on_switch":  true,
-		"configure_subnet_routing": true,
-	}
-
-	if switchTasks[taskName] {
-		return "switch"
-	}
-	return "firewall"
 }
 
 // TaskExecutor 任务执行器接口

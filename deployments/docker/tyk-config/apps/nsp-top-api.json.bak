@@ -1,0 +1,48 @@
+{
+  "name": "NSP Top API",
+  "slug": "nsp-top-api",
+  "api_id": "nsp-top-api-v1",
+  "org_id": "nsp-org",
+  "use_keyless": false,
+  "auth": {
+    "auth_header_name": "X-API-Key",
+    "use_param": false,
+    "use_cookie": false,
+    "use_certificate": false
+  },
+  "use_standard_auth": true,
+  "definition": {
+    "location": "header",
+    "key": "x-api-version"
+  },
+  "version_data": {
+    "not_versioned": true,
+    "versions": {
+      "Default": {
+        "name": "Default",
+        "use_extended_paths": true,
+        "extended_paths": {
+          "ignored": [],
+          "white_list": [],
+          "black_list": []
+        }
+      }
+    }
+  },
+  "proxy": {
+    "listen_path": "/",
+    "target_url": "http://top-nsp:8080",
+    "strip_listen_path": false,
+    "enable_load_balancing": false,
+    "check_host_against_uptime_tests": false,
+    "preserve_host_header": false
+  },
+  "enable_batch_request_support": false,
+  "enable_ip_whitelisting": false,
+  "enable_ip_blacklisting": false,
+  "enable_context_vars": false,
+  "do_not_track": false,
+  "tags": ["nsp", "top-nsp"],
+  "active": true,
+  "internal": false
+}
