@@ -12,10 +12,9 @@ import (
 
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/rocketmq"
 	"workflow_qoder/tasks"
 
-	"github.com/RichardKnop/machinery/v1"
-	machineryTasks "github.com/RichardKnop/machinery/v1/tasks"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
@@ -23,21 +22,21 @@ import (
 
 // Server AZ NSP API服务器
 type Server struct {
-	cfg             *config.NSPConfig
-	machineryServer *machinery.Server
-	router          *gin.Engine
-	redisClient     *redis.Client
+	cfg         *config.NSPConfig
+	rmqProducer *rocketmq.Producer
+	router      *gin.Engine
+	redisClient *redis.Client
 }
 
 // NewServer 创建AZ NSP服务器
-func NewServer(cfg *config.NSPConfig, machineryServer *machinery.Server, redisClient *redis.Client) *Server {
+func NewServer(cfg *config.NSPConfig, rmqProducer *rocketmq.Producer, redisClient *redis.Client) *Server {
 	router := gin.Default()
 
 	server := &Server{
-		cfg:             cfg,
-		machineryServer: machineryServer,
-		router:          router,
-		redisClient:     redisClient,
+		cfg:         cfg,
+		rmqProducer: rmqProducer,
+		router:      router,
+		redisClient: redisClient,
 	}
 
 	// 注册路由
@@ -99,55 +98,30 @@ func (s *Server) createVPC(c *gin.Context) {
 	}
 
 	// 创建任务链: VRF -> VLAN子接口 -> 防火墙 (顺序执行)
-	// 每个AZ使用独立的队列
-	queueName := fmt.Sprintf("vpc_tasks_%s_%s", s.cfg.Region, s.cfg.AZ)
+	// 使用RocketMQ发送链式任务
+	topic := fmt.Sprintf("%s_%s_%s", s.cfg.RocketMQ.VPCTopic, s.cfg.Region, s.cfg.AZ)
 
-	task1 := machineryTasks.Signature{
-		UUID:       workflowID,
-		Name:       "create_vrf_on_switch",
-		RoutingKey: queueName,
-		Args: []machineryTasks.Arg{
-			{
-				Type:  "string",
-				Value: string(requestJSON),
-			},
+	// 定义任务链
+	tasks := []*rocketmq.TaskMessage{
+		{
+			TaskID:   fmt.Sprintf("%s-task1", workflowID),
+			TaskName: "create_vrf_on_switch",
+			Args:     []interface{}{string(requestJSON)},
+		},
+		{
+			TaskID:   fmt.Sprintf("%s-task2", workflowID),
+			TaskName: "create_vlan_subinterface",
+			Args:     []interface{}{string(requestJSON)},
+		},
+		{
+			TaskID:   fmt.Sprintf("%s-task3", workflowID),
+			TaskName: "create_firewall_zone",
+			Args:     []interface{}{string(requestJSON)},
 		},
 	}
 
-	task2 := machineryTasks.Signature{
-		Name:       "create_vlan_subinterface",
-		RoutingKey: queueName,
-		Args: []machineryTasks.Arg{
-			{
-				Type:  "string",
-				Value: string(requestJSON),
-			},
-		},
-	}
-
-	task3 := machineryTasks.Signature{
-		Name:       "create_firewall_zone",
-		RoutingKey: queueName,
-		Args: []machineryTasks.Arg{
-			{
-				Type:  "string",
-				Value: string(requestJSON),
-			},
-		},
-	}
-
-	// 使用Chain构建workflow
-	chain, err := machineryTasks.NewChain(&task1, &task2, &task3)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.VPCResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建任务链失败: %v", err),
-		})
-		return
-	}
-
-	// 发送任务链到消息队列
-	_, err = s.machineryServer.SendChain(chain)
+	// 发送任务链到RocketMQ
+	err = s.rmqProducer.SendChain(topic, workflowID, tasks)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.VPCResponse{
 			Success: false,
@@ -211,44 +185,25 @@ func (s *Server) createSubnet(c *gin.Context) {
 	}
 
 	// 创建任务链: 创建子网 -> 配置路由
-	// 每个AZ使用独立的队列
-	queueName := fmt.Sprintf("vpc_tasks_%s_%s", s.cfg.Region, s.cfg.AZ)
+	// 使用RocketMQ发送链式任务
+	topic := fmt.Sprintf("%s_%s_%s", s.cfg.RocketMQ.VPCTopic, s.cfg.Region, s.cfg.AZ)
 
-	task1 := machineryTasks.Signature{
-		UUID:       workflowID,
-		Name:       "create_subnet_on_switch",
-		RoutingKey: queueName,
-		Args: []machineryTasks.Arg{
-			{
-				Type:  "string",
-				Value: string(requestJSON),
-			},
+	// 定义任务链
+	tasks := []*rocketmq.TaskMessage{
+		{
+			TaskID:   fmt.Sprintf("%s-task1", workflowID),
+			TaskName: "create_subnet_on_switch",
+			Args:     []interface{}{string(requestJSON)},
+		},
+		{
+			TaskID:   fmt.Sprintf("%s-task2", workflowID),
+			TaskName: "configure_subnet_routing",
+			Args:     []interface{}{string(requestJSON)},
 		},
 	}
 
-	task2 := machineryTasks.Signature{
-		Name:       "configure_subnet_routing",
-		RoutingKey: queueName,
-		Args: []machineryTasks.Arg{
-			{
-				Type:  "string",
-				Value: string(requestJSON),
-			},
-		},
-	}
-
-	// 使用Chain构建workflow
-	chain, err := machineryTasks.NewChain(&task1, &task2)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建任务链失败: %v", err),
-		})
-		return
-	}
-
-	// 发送任务链到消息队列
-	_, err = s.machineryServer.SendChain(chain)
+	// 发送任务链到RocketMQ
+	err = s.rmqProducer.SendChain(topic, workflowID, tasks)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
 			Success: false,
@@ -293,9 +248,8 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 		return
 	}
 
-	// 通过workflow ID查询任务状态
-	backend := s.machineryServer.GetBackend()
-	taskState, err := backend.GetState(workflowID)
+	// 通过workflow ID查询任务状态（从Redis获取）
+	taskState, err := s.rmqProducer.GetTaskState(workflowID + "-task1") // 查询第一个任务的状态
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
@@ -311,26 +265,15 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 		"az":          s.cfg.AZ,
 		"vpc_name":    vpcName,
 		"workflow_id": workflowID,
-		"task_name":   taskState.TaskName,
-		"state":       taskState.State,
+		"state":       taskState,
 	}
 
-	if taskState.IsCompleted() {
+	if taskState == "success" {
 		response["status"] = "completed"
 		response["message"] = "工作流执行成功"
-		if len(taskState.Results) > 0 {
-			response["results"] = taskState.Results
-		}
-	} else if taskState.IsFailure() {
+	} else if taskState == "failed" {
 		response["status"] = "failed"
 		response["message"] = "工作流执行失败"
-		response["error"] = taskState.Error
-	} else if taskState.IsSuccess() {
-		response["status"] = "success"
-		response["message"] = "工作流执行成功"
-		if len(taskState.Results) > 0 {
-			response["results"] = taskState.Results
-		}
 	} else {
 		response["status"] = "pending"
 		response["message"] = "工作流执行中"
@@ -366,12 +309,6 @@ func (s *Server) deleteVPC(c *gin.Context) {
 	// 清理Redis中的映射
 	if err := s.redisClient.Del(ctx, mappingKey).Err(); err != nil {
 		log.Printf("[AZ NSP %s] 清理VPC映射失败: %v", s.cfg.AZ, err)
-	}
-
-	// 清理任务状态（可选）
-	backend := s.machineryServer.GetBackend()
-	if err := backend.PurgeState(workflowID); err != nil {
-		log.Printf("[AZ NSP %s] 清理任务状态失败: %v", s.cfg.AZ, err)
 	}
 
 	log.Printf("[AZ NSP %s] VPC已删除: %s", s.cfg.AZ, vpcName)

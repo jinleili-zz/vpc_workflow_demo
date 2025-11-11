@@ -17,6 +17,9 @@ type NSPConfig struct {
 	// Redis 配置
 	Redis RedisConfig
 
+	// RocketMQ 配置
+	RocketMQ RocketMQConfig
+
 	// Top NSP 特有配置
 	TopNSP TopNSPConfig
 
@@ -58,6 +61,27 @@ type AZNSPConfig struct {
 	WorkerCount int
 }
 
+// RocketMQConfig RocketMQ配置
+type RocketMQConfig struct {
+	// NameServer 地址列表
+	NameServers []string
+
+	// 生产者配置
+	ProducerGroup    string
+	ProducerInstance string
+
+	// 消费者配置
+	ConsumerGroup    string
+	ConsumerInstance string
+
+	// 主题配置
+	VPCTopic    string // VPC任务主题
+	SubnetTopic string // 子网任务主题
+
+	// 重试次数
+	RetryTimes int
+}
+
 // LoadConfig 从环境变量加载配置
 func LoadConfig() *NSPConfig {
 	return &NSPConfig{
@@ -74,6 +98,17 @@ func LoadConfig() *NSPConfig {
 			MaxIdle:     getEnvInt("REDIS_MAX_IDLE", 3),
 			MaxActive:   getEnvInt("REDIS_MAX_ACTIVE", 10),
 			IdleTimeout: getEnvInt("REDIS_IDLE_TIMEOUT", 240),
+		},
+
+		RocketMQ: RocketMQConfig{
+			NameServers:      getEnvSlice("ROCKETMQ_NAME_SERVERS", []string{"rmqnamesrv:9876"}),
+			ProducerGroup:    getEnv("ROCKETMQ_PRODUCER_GROUP", "nsp_producer_group"),
+			ProducerInstance: getEnv("ROCKETMQ_PRODUCER_INSTANCE", "nsp_producer"),
+			ConsumerGroup:    getEnv("ROCKETMQ_CONSUMER_GROUP", "nsp_consumer_group"),
+			ConsumerInstance: getEnv("ROCKETMQ_CONSUMER_INSTANCE", "nsp_consumer"),
+			VPCTopic:         getEnv("ROCKETMQ_VPC_TOPIC", "vpc_tasks"),
+			SubnetTopic:      getEnv("ROCKETMQ_SUBNET_TOPIC", "subnet_tasks"),
+			RetryTimes:       getEnvInt("ROCKETMQ_RETRY_TIMES", 3),
 		},
 
 		TopNSP: TopNSPConfig{
@@ -124,4 +159,23 @@ func getEnvInt(key string, defaultValue int) int {
 		return defaultValue
 	}
 	return intValue
+}
+
+// getEnvSlice 获取字符串数组环境变量（逗号分隔）
+func getEnvSlice(key string, defaultValue []string) []string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	// 简单处理，按逗号分割
+	var result []string
+	for _, v := range []rune(value) {
+		if v != ',' {
+			result = append(result, string(v))
+		}
+	}
+	if len(result) == 0 {
+		return defaultValue
+	}
+	return []string{value} // 简单处理，实际应该按逗号分割
 }

@@ -3,15 +3,17 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"workflow_qoder/internal/config"
+	"workflow_qoder/internal/rocketmq"
 	"workflow_qoder/tasks"
 
-	"github.com/RichardKnop/machinery/v1"
-	machineryConfig "github.com/RichardKnop/machinery/v1/config"
+	"github.com/go-redis/redis/v8"
 )
 
 func main() {
@@ -23,74 +25,85 @@ func main() {
 	}
 
 	log.Printf("[Firewall Worker] 正在启动 Region=%s, AZ=%s", cfg.Region, cfg.AZ)
-	log.Printf("[Firewall Worker] Redis地址: %s", cfg.Redis.Addr)
+	log.Printf("[Firewall Worker] RocketMQ NameServer: %v", cfg.RocketMQ.NameServers)
 
-	// 创建 Machinery 服务器
-	machineryServer, err := createMachineryServer(cfg)
+	// 解析NameServer域名为IP地址
+	resolvedNameServers := make([]string, 0, len(cfg.RocketMQ.NameServers))
+	for _, addr := range cfg.RocketMQ.NameServers {
+		parts := strings.Split(addr, ":")
+		if len(parts) != 2 {
+			continue
+		}
+		host, port := parts[0], parts[1]
+		ips, err := net.LookupHost(host)
+		if err != nil || len(ips) == 0 {
+			resolvedNameServers = append(resolvedNameServers, addr)
+		} else {
+			resolvedAddr := fmt.Sprintf("%s:%s", ips[0], port)
+			log.Printf("[Firewall Worker] 解析 %s -> %s", addr, resolvedAddr)
+			resolvedNameServers = append(resolvedNameServers, resolvedAddr)
+		}
+	}
+
+	// 创建 Redis 客户端（用于状态存储）
+	redisClient := redis.NewClient(&redis.Options{
+		Addr: cfg.Redis.Addr,
+		DB:   cfg.Redis.DataDB,
+	})
+
+	// 创建 RocketMQ 生产者（用于链式任务的下一个任务）
+	rmqCfg := &rocketmq.Config{
+		NameServerAddrs: resolvedNameServers,
+		GroupName:       fmt.Sprintf("%s_firewall_worker_%s_%s", cfg.RocketMQ.ProducerGroup, cfg.Region, cfg.AZ),
+		InstanceName:    fmt.Sprintf("firewall_worker_%s_%s", cfg.Region, cfg.AZ),
+		RetryTimes:      cfg.RocketMQ.RetryTimes,
+	}
+
+	producer, err := rocketmq.NewProducer(rmqCfg, redisClient)
 	if err != nil {
-		log.Fatalf("[Firewall Worker] 创建Machinery服务器失败: %v", err)
+		log.Fatalf("[Firewall Worker] 创建 RocketMQ 生产者失败: %v", err)
 	}
+	defer producer.Close()
 
-	// 注册任务（仅注册防火墙相关任务）
-	tasksMap := map[string]interface{}{
-		"create_firewall_zone": tasks.CreateFirewallZone,
-	}
+	// 创建 RocketMQ 消费者
+	topic := fmt.Sprintf("%s_%s_%s", cfg.RocketMQ.VPCTopic, cfg.Region, cfg.AZ)
+	rmqCfg.GroupName = fmt.Sprintf("%s_firewall_worker_%s_%s", cfg.RocketMQ.ConsumerGroup, cfg.Region, cfg.AZ)
 
-	err = machineryServer.RegisterTasks(tasksMap)
+	consumer, err := rocketmq.NewConsumer(rmqCfg, topic, redisClient, producer)
 	if err != nil {
-		log.Fatalf("[Firewall Worker] 注册任务失败: %v", err)
+		log.Fatalf("[Firewall Worker] 创建 RocketMQ 消费者失败: %v", err)
+	}
+	defer consumer.Close()
+
+	// 注册任务处理器（仅注册防火墙相关任务）
+	consumer.RegisterTask("create_firewall_zone", wrapTaskHandler(tasks.CreateFirewallZone))
+
+	// 启动消费者
+	if err := consumer.Start(); err != nil {
+		log.Fatalf("[Firewall Worker] 启动消费者失败: %v", err)
 	}
 
-	// 创建 Worker，指定 Worker 名称
-	workerName := fmt.Sprintf("firewall_worker_%s_%s", cfg.Region, cfg.AZ)
-	workerCount := cfg.AZNSP.WorkerCount
-	if workerCount <= 0 {
-		workerCount = 2
-	}
-	worker := machineryServer.NewWorker(workerName, workerCount)
+	log.Printf("[Firewall Worker %s] 启动成功... 处理Topic: %s", cfg.AZ, topic)
+	log.Printf("[Firewall Worker %s] 处理任务类型: 创建防火墙安全区域", cfg.AZ)
 
 	// 处理退出信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	go func() {
-		<-sigChan
-		log.Printf("[Firewall Worker %s] 收到退出信号，正在关闭...", cfg.AZ)
-		worker.Quit()
-	}()
-
-	queueName := fmt.Sprintf("vpc_tasks_%s_%s", cfg.Region, cfg.AZ)
-	log.Printf("[Firewall Worker %s] 启动中... 处理队列: %s", cfg.AZ, queueName)
-	log.Printf("[Firewall Worker %s] 处理任务类型: 创建防火墙安全区域", cfg.AZ)
-	log.Printf("[Firewall Worker %s] Worker数量: %d", cfg.AZ, workerCount)
-
-	// 启动Worker
-	err = worker.Launch()
-	if err != nil {
-		log.Fatalf("[Firewall Worker %s] Worker启动失败: %v", cfg.AZ, err)
-	}
+	<-sigChan
+	log.Printf("[Firewall Worker %s] 收到退出信号，正在关闭...", cfg.AZ)
 }
 
-// createMachineryServer 创建Machinery服务器
-func createMachineryServer(cfg *config.NSPConfig) (*machinery.Server, error) {
-	// Worker 从特定 AZ 的队列消费任务
-	queueName := fmt.Sprintf("vpc_tasks_%s_%s", cfg.Region, cfg.AZ)
-
-	cnf := &machineryConfig.Config{
-		Broker:          cfg.GetRedisBrokerAddr(),
-		DefaultQueue:    queueName,
-		ResultBackend:   cfg.GetRedisBrokerAddr(),
-		ResultsExpireIn: 3600,
-		Redis: &machineryConfig.RedisConfig{
-			MaxIdle:                3,
-			IdleTimeout:            240,
-			ReadTimeout:            15,
-			WriteTimeout:           15,
-			ConnectTimeout:         15,
-			NormalTasksPollPeriod:  1000,
-			DelayedTasksPollPeriod: 500,
-		},
+// wrapTaskHandler 封装任务处理器
+func wrapTaskHandler(handler func(...string) (string, error)) rocketmq.TaskHandler {
+	return func(args ...interface{}) (interface{}, error) {
+		// 转换参数
+		strArgs := make([]string, len(args))
+		for i, arg := range args {
+			if str, ok := arg.(string); ok {
+				strArgs[i] = str
+			}
+		}
+		return handler(strArgs...)
 	}
-
-	return machinery.NewServer(cnf)
 }

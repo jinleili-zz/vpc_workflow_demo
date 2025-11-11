@@ -1,7 +1,51 @@
 version: '3.8'
 
 services:
-  # Redis服务
+  # RocketMQ NameServer
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.1.4
+    container_name: rmqnamesrv
+    ports:
+      - "9876:9876"
+    environment:
+      - JAVA_OPT_EXT=-Xms512M -Xmx512M
+    command: sh mqnamesrv
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD-SHELL", "sh", "mqadmin", "clusterList", "-n", "localhost:9876"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # RocketMQ Broker
+  rocketmq-broker:
+    image: apache/rocketmq:5.1.4
+    container_name: rmqbroker
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+    environment:
+      - NAMESRV_ADDR=rmqnamesrv:9876
+      - JAVA_OPT_EXT=-Xms512M -Xmx512M
+    command: sh mqbroker -c /home/rocketmq/broker.conf
+    volumes:
+      - ./rocketmq/broker.conf:/home/rocketmq/broker.conf
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD-SHELL", "sh", "mqadmin", "clusterList", "-n", "rmqnamesrv:9876"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Redis服务 (保留用于状态存储)
   redis:
     image: redis:7-alpine
     container_name: nsp-redis
@@ -78,13 +122,16 @@ services:
       - PORT=8080
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAME_SERVERS=rmqnamesrv:9876
+      - ROCKETMQ_VPC_TOPIC=vpc_tasks
       - TOP_NSP_ADDR=http://top-nsp:8080
       - WORKER_COUNT=2
+    ports:
+      - "8081:8080"
     depends_on:
       redis:
         condition: service_healthy
-      top-nsp:
+      rocketmq-broker:
         condition: service_healthy
     networks:
       - nsp-network
@@ -100,11 +147,14 @@ services:
       - PORT=8080
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAME_SERVERS=rmqnamesrv:9876
+      - ROCKETMQ_VPC_TOPIC=vpc_tasks
       - TOP_NSP_ADDR=http://top-nsp:8080
       - WORKER_COUNT=2
     depends_on:
       redis:
+        condition: service_healthy
+      rocketmq-broker:
         condition: service_healthy
       top-nsp:
         condition: service_healthy
@@ -122,11 +172,14 @@ services:
       - PORT=8080
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAME_SERVERS=rmqnamesrv:9876
+      - ROCKETMQ_VPC_TOPIC=vpc_tasks
       - TOP_NSP_ADDR=http://top-nsp:8080
       - WORKER_COUNT=2
     depends_on:
       redis:
+        condition: service_healthy
+      rocketmq-broker:
         condition: service_healthy
       top-nsp:
         condition: service_healthy
@@ -143,10 +196,13 @@ services:
       - AZ=cn-beijing-1a
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAME_SERVERS=rmqnamesrv:9876
+      - ROCKETMQ_VPC_TOPIC=vpc_tasks
       - WORKER_COUNT=2
     depends_on:
       redis:
+        condition: service_healthy
+      rocketmq-broker:
         condition: service_healthy
     networks:
       - nsp-network
@@ -161,10 +217,13 @@ services:
       - AZ=cn-beijing-1b
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAME_SERVERS=rmqnamesrv:9876
+      - ROCKETMQ_VPC_TOPIC=vpc_tasks
       - WORKER_COUNT=2
     depends_on:
       redis:
+        condition: service_healthy
+      rocketmq-broker:
         condition: service_healthy
     networks:
       - nsp-network
@@ -179,10 +238,13 @@ services:
       - AZ=cn-shanghai-1a
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAME_SERVERS=rmqnamesrv:9876
+      - ROCKETMQ_VPC_TOPIC=vpc_tasks
       - WORKER_COUNT=2
     depends_on:
       redis:
+        condition: service_healthy
+      rocketmq-broker:
         condition: service_healthy
     networks:
       - nsp-network
@@ -197,10 +259,13 @@ services:
       - AZ=cn-beijing-1a
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAME_SERVERS=rmqnamesrv:9876
+      - ROCKETMQ_VPC_TOPIC=vpc_tasks
       - WORKER_COUNT=2
     depends_on:
       redis:
+        condition: service_healthy
+      rocketmq-broker:
         condition: service_healthy
     networks:
       - nsp-network
@@ -215,10 +280,13 @@ services:
       - AZ=cn-beijing-1b
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAME_SERVERS=rmqnamesrv:9876
+      - ROCKETMQ_VPC_TOPIC=vpc_tasks
       - WORKER_COUNT=2
     depends_on:
       redis:
+        condition: service_healthy
+      rocketmq-broker:
         condition: service_healthy
     networks:
       - nsp-network
@@ -233,10 +301,13 @@ services:
       - AZ=cn-shanghai-1a
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAME_SERVERS=rmqnamesrv:9876
+      - ROCKETMQ_VPC_TOPIC=vpc_tasks
       - WORKER_COUNT=2
     depends_on:
       redis:
+        condition: service_healthy
+      rocketmq-broker:
         condition: service_healthy
     networks:
       - nsp-network
