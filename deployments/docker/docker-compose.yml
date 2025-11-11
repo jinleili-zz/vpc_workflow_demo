@@ -97,9 +97,9 @@ services:
       - REDIS_BROKER_DB=1
       - AZ_NSP_PREFIX=az-nsp
       - AZ_NSP_PORT=8080
-    # 不再暴露到宿主机，只在容器内部使用
-    expose:
-      - "8080"
+    # 暴露到宿主机8080端口
+    ports:
+      - "8080:8080"
     depends_on:
       redis:
         condition: service_healthy
