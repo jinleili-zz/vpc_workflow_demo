@@ -45,8 +45,10 @@ dist/
 .env
 .env.local
 
-# Go编译输出
-top-nsp
-top_nsp
-az-nsp
-az_nsp
+# Go编译输出（二进制文件）
+/top-nsp
+/az-nsp
+bin/top-nsp
+bin/az-nsp
+bin/top_nsp
+bin/az_nsp

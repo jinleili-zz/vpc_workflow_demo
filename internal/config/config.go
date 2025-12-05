@@ -26,17 +26,11 @@ type NSPConfig struct {
 
 // RedisConfig Redis配置
 type RedisConfig struct {
-	// Redis 地址
 	Addr     string
 	Password string
-
-	// 数据存储 DB（任务状态、VPC映射、Region/AZ信息等）
-	DataDB int
-
-	// 消息队列 DB（go-machinery broker）
+	DataDB   int
 	BrokerDB int
 
-	// 连接池配置
 	MaxIdle     int
 	MaxActive   int
 	IdleTimeout int
@@ -44,17 +38,13 @@ type RedisConfig struct {
 
 // TopNSPConfig Top NSP配置
 type TopNSPConfig struct {
-	// AZ NSP 服务发现
-	AZNSPPrefix string // 容器名前缀，如 "az-nsp"
-	AZNSPPort   int    // AZ NSP 统一端口
+	AZNSPPrefix string
+	AZNSPPort   int
 }
 
 // AZNSPConfig AZ NSP配置
 type AZNSPConfig struct {
-	// Top NSP 地址（用于注册和心跳）
-	TopNSPAddr string
-
-	// Worker 配置
+	TopNSPAddr  string
 	WorkerCount int
 }
 
