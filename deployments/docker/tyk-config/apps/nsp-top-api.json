@@ -28,7 +28,7 @@
   },
   "proxy": {
     "listen_path": "/",
-    "target_url": "http://top-nsp:8080",
+    "target_url": "http://nsp-api-server:8080",
     "strip_listen_path": false,
     "enable_load_balancing": false,
     "check_host_against_uptime_tests": false,

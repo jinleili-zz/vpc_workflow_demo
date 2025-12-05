@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/RichardKnop/machinery/v1"
 	machineryConfig "github.com/RichardKnop/machinery/v1/config"
 )
@@ -33,10 +36,22 @@ var DefaultConfig = &MachineryConfig{
 
 // NewMachineryServer 创建machinery服务器
 func NewMachineryServer(cfg *MachineryConfig) (*machinery.Server, error) {
+	// 从环境变量读取Redis地址
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	brokerDB := os.Getenv("REDIS_BROKER_DB")
+	if brokerDB == "" {
+		brokerDB = "1"
+	}
+
+	brokerURL := fmt.Sprintf("redis://%s/%s", redisAddr, brokerDB)
+
 	cnf := &machineryConfig.Config{
-		Broker:          cfg.Broker,
+		Broker:          brokerURL,
 		DefaultQueue:    cfg.DefaultQueue,
-		ResultBackend:   cfg.ResultBackend,
+		ResultBackend:   brokerURL,
 		ResultsExpireIn: cfg.ResultsExpireIn,
 		// 消息队列配置
 		Redis: &machineryConfig.RedisConfig{

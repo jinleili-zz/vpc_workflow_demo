@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"workflow_qoder/tasks"
@@ -44,9 +45,15 @@ type CreateVPCResponse struct {
 func NewServer(machineryServer *machinery.Server) *Server {
 	router := gin.Default()
 
+	// 从环境变量获取Redis地址
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+
 	// 创建Redis客户端（用于存储VPC映射）
 	redisClient := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+		Addr: redisAddr,
 		DB:   0,
 	})
 

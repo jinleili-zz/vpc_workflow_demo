@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  # Redis服务 - 用于go-machinery的broker和result backend
+  redis:
+    image: redis:7-alpine
+    container_name: nsp-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Tyk API Gateway
+  tyk-gateway:
+    image: tykio/tyk-gateway:latest
+    container_name: tyk-gateway
+    ports:
+      - "9696:9696"
+    volumes:
+      - ./tyk-config/tyk.conf:/opt/tyk-gateway/tyk.conf
+      - ./tyk-config/apps:/opt/tyk-gateway/apps
+      - ./tyk-config/policies:/opt/tyk-gateway/policies
+    environment:
+      - TYK_GW_STORAGE_HOST=redis
+      - TYK_GW_STORAGE_PORT=6379
+      - TYK_GW_STORAGE_DATABASE=2
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9696/hello"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # API Server (go-machinery)
+  api-server:
+    image: nsp-api:latest
+    container_name: nsp-api-server
+    environment:
+      - REDIS_ADDR=redis:6379
+      - REDIS_BROKER_DB=1
+      - REDIS_DATA_DB=0
+      - PORT=8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Switch Worker
+  switch-worker:
+    image: nsp-switch-worker:latest
+    container_name: nsp-switch-worker
+    environment:
+      - REDIS_ADDR=redis:6379
+      - REDIS_BROKER_DB=1
+      - REDIS_DATA_DB=0
+      - WORKER_TYPE=switch
+      - WORKER_COUNT=2
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - nsp-network
+
+  # Firewall Worker
+  firewall-worker:
+    image: nsp-firewall-worker:latest
+    container_name: nsp-firewall-worker
+    environment:
+      - REDIS_ADDR=redis:6379
+      - REDIS_BROKER_DB=1
+      - REDIS_DATA_DB=0
+      - WORKER_TYPE=firewall
+      - WORKER_COUNT=2
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - nsp-network
+
+networks:
+  nsp-network:
+    driver: bridge
