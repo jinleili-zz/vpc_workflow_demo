@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -188,12 +189,82 @@ func (s *Server) createVPC(c *gin.Context) {
 // getVPCStatus 查询VPC状态
 func (s *Server) getVPCStatus(c *gin.Context) {
 	vpcName := c.Param("vpc_name")
+	ctx := context.Background()
 
-	// TODO: 实现VPC状态聚合查询
+	azs, err := s.registry.ListAllAZs(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("获取AZ列表失败: %v", err),
+		})
+		return
+	}
+
+	type AZStatus struct {
+		AZ           string                 `json:"az"`
+		Status       string                 `json:"status"`
+		Progress     models.ResourceProgress `json:"progress"`
+		ErrorMessage string                 `json:"error_message,omitempty"`
+	}
+
+	azStatuses := make(map[string]*AZStatus)
+	overallStatus := "running"
+	hasCreating := false
+	hasFailed := false
+
+	for _, az := range azs {
+		statusURL := fmt.Sprintf("%s/api/v1/vpc/%s/status", az.NSPAddr, vpcName)
+		resp, err := http.Get(statusURL)
+		if err != nil {
+			log.Printf("[Top NSP] 查询AZ %s的VPC状态失败: %v", az.ID, err)
+			azStatuses[az.ID] = &AZStatus{
+				AZ:           az.ID,
+				Status:       "unknown",
+				ErrorMessage: fmt.Sprintf("查询失败: %v", err),
+			}
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNotFound {
+			azStatuses[az.ID] = &AZStatus{
+				AZ:     az.ID,
+				Status: "not_found",
+			}
+			continue
+		}
+
+		var vpcStatus models.VPCStatusResponse
+		if err := json.NewDecoder(resp.Body).Decode(&vpcStatus); err != nil {
+			log.Printf("[Top NSP] 解析AZ %s的VPC状态失败: %v", az.ID, err)
+			continue
+		}
+
+		azStatuses[az.ID] = &AZStatus{
+			AZ:           az.ID,
+			Status:       string(vpcStatus.Status),
+			Progress:     vpcStatus.Progress,
+			ErrorMessage: vpcStatus.ErrorMessage,
+		}
+
+		if vpcStatus.Status == models.ResourceStatusCreating {
+			hasCreating = true
+		}
+		if vpcStatus.Status == models.ResourceStatusFailed {
+			hasFailed = true
+		}
+	}
+
+	if hasFailed {
+		overallStatus = "failed"
+	} else if hasCreating {
+		overallStatus = "creating"
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"vpc_name": vpcName,
-		"status":   "pending",
-		"message":  "状态查询功能开发中",
+		"vpc_name":       vpcName,
+		"overall_status": overallStatus,
+		"az_statuses":    azStatuses,
 	})
 }
 

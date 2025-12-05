@@ -158,3 +158,21 @@ func (r *Registry) ListAllRegions(ctx context.Context) ([]string, error) {
 
 	return regions, nil
 }
+// ListAllAZs 列出所有AZ
+func (r *Registry) ListAllAZs(ctx context.Context) ([]*models.AZ, error) {
+	regions, err := r.ListAllRegions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	allAZs := make([]*models.AZ, 0)
+	for _, region := range regions {
+		azs, err := r.GetRegionAZs(ctx, region)
+		if err != nil {
+			continue
+		}
+		allAZs = append(allAZs, azs...)
+	}
+
+	return allAZs, nil
+}

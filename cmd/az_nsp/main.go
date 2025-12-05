@@ -11,7 +11,7 @@ import (
 
 	"workflow_qoder/internal/az/api"
 	"workflow_qoder/internal/config"
-	"workflow_qoder/tasks"
+	"workflow_qoder/internal/db"
 
 	"github.com/hibiken/asynq"
 )
@@ -51,6 +51,19 @@ func main() {
 	log.Printf("[AZ NSP] Region=%s, AZ=%s, Port=%d", region, az, portInt)
 	log.Printf("[AZ NSP] Top NSP地址: %s", topNSPAddr)
 
+	mysqlCfg := db.LoadMySQLConfig()
+	if err := db.InitMySQL(mysqlCfg); err != nil {
+		log.Fatalf("[AZ NSP] MySQL初始化失败: %v", err)
+	}
+	defer db.Close()
+
+	mysqlDB := db.GetDB()
+
+	migrationDir := "./internal/db/migrations"
+	if err := db.RunMigrations(mysqlDB, migrationDir); err != nil {
+		log.Printf("[AZ NSP] 数据库迁移失败: %v (可能已执行过)", err)
+	}
+
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
 
@@ -60,14 +73,10 @@ func main() {
 	})
 	defer asynqClient.Close()
 
-	redisClient := config.NewRedisClient(cfg)
-	if err := config.TestRedisConnection(redisClient); err != nil {
-		log.Fatalf("Redis连接失败: %v", err)
-	}
-
 	queueName := "vpc_tasks_" + region + "_" + az
+	callbackQueueName := "vpc_callbacks_" + region + "_" + az
 
-	server := api.NewServer(cfg, asynqClient, redisClient, queueName)
+	server := api.NewServer(cfg, asynqClient, mysqlDB, queueName, callbackQueueName)
 
 	if err := server.RegisterToTopNSP(); err != nil {
 		log.Printf("[AZ NSP %s] 注册到Top NSP失败: %v (将在后续心跳中重试)", az, err)
@@ -78,37 +87,26 @@ func main() {
 
 	go server.StartHeartbeat(ctx)
 
-	workerCount := 2
-	if workerCountEnv := os.Getenv("WORKER_COUNT"); workerCountEnv != "" {
-		if count, err := strconv.Atoi(workerCountEnv); err == nil {
-			workerCount = count
-		}
-	}
-
 	asynqServer := asynq.NewServer(
 		asynq.RedisClientOpt{
 			Addr: redisAddr,
 			DB:   redisBrokerDB,
 		},
 		asynq.Config{
-			Concurrency: workerCount,
+			Concurrency: 2,
 			Queues: map[string]int{
-				queueName: 10,
+				callbackQueueName: 10,
 			},
 		},
 	)
 
 	mux := asynq.NewServeMux()
-	mux.HandleFunc("create_vrf_on_switch", tasks.CreateVRFOnSwitchHandler(asynqClient, queueName, redisClient))
-	mux.HandleFunc("create_vlan_subinterface", tasks.CreateVLANSubInterfaceHandler(asynqClient, queueName, redisClient))
-	mux.HandleFunc("create_firewall_zone", tasks.CreateFirewallZoneHandler(redisClient))
-	mux.HandleFunc("create_subnet_on_switch", tasks.CreateSubnetOnSwitchHandler(asynqClient, queueName, redisClient))
-	mux.HandleFunc("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(redisClient))
+	mux.HandleFunc("task_callback", server.HandleTaskCallback())
 
 	go func() {
-		log.Printf("[AZ NSP %s] Worker启动, 并发数=%d, 队列=%s", az, workerCount, queueName)
+		log.Printf("[AZ NSP %s] 回调处理器启动, 队列=%s", az, callbackQueueName)
 		if err := asynqServer.Run(mux); err != nil {
-			log.Fatalf("[AZ NSP %s] Worker启动失败: %v", az, err)
+			log.Fatalf("[AZ NSP %s] 回调处理器启动失败: %v", az, err)
 		}
 	}()
 
