@@ -12,9 +12,8 @@ import (
 	"workflow_qoder/internal/az/api"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/db"
+	"workflow_qoder/internal/mq"
 	"workflow_qoder/internal/queue"
-
-	"github.com/hibiken/asynq"
 )
 
 func main() {
@@ -65,18 +64,25 @@ func main() {
 		log.Printf("[AZ NSP] 数据库迁移失败: %v (可能已执行过)", err)
 	}
 
-	redisAddr := cfg.GetRedisAddr()
-	redisBrokerDB := cfg.GetRedisBrokerDB()
+	namesrvAddr := os.Getenv("ROCKETMQ_NAMESRV")
+	if namesrvAddr == "" {
+		namesrvAddr = "namesrv:9876"
+	}
 
-	asynqClient := asynq.NewClient(asynq.RedisClientOpt{
-		Addr: redisAddr,
-		DB:   redisBrokerDB,
-	})
-	defer asynqClient.Close()
+	producer, err := mq.NewProducer(namesrvAddr)
+	if err != nil {
+		log.Fatalf("[AZ NSP] 创建RocketMQ Producer失败: %v", err)
+	}
+	defer producer.Close()
 
-	callbackQueueName := queue.GetCallbackQueueName(region, az)
+	callbackTopic := queue.GetCallbackTopicName(region, az)
+	callbackGroup := queue.GetCallbackConsumerGroup(region, az)
 
-	server := api.NewServer(cfg, asynqClient, mysqlDB)
+	if err := producer.EnsureTopicExists(callbackTopic); err != nil {
+		log.Printf("[AZ NSP] 创建回调topic失败(可能已存在): %v", err)
+	}
+
+	server := api.NewServer(cfg, producer, mysqlDB)
 
 	if err := server.RegisterToTopNSP(); err != nil {
 		log.Printf("[AZ NSP %s] 注册到Top NSP失败: %v (将在后续心跳中重试)", az, err)
@@ -87,28 +93,23 @@ func main() {
 
 	go server.StartHeartbeat(ctx)
 
-	asynqServer := asynq.NewServer(
-		asynq.RedisClientOpt{
-			Addr: redisAddr,
-			DB:   redisBrokerDB,
-		},
-		asynq.Config{
-			Concurrency: 2,
-			Queues: map[string]int{
-				callbackQueueName: 10,
-			},
-		},
-	)
+	callbackConsumer, err := mq.NewConsumer(namesrvAddr, callbackGroup)
+	if err != nil {
+		log.Fatalf("[AZ NSP] 创建回调Consumer失败: %v", err)
+	}
+	defer callbackConsumer.Close()
 
-	mux := asynq.NewServeMux()
-	mux.HandleFunc("task_callback", server.HandleTaskCallback())
+	callbackConsumer.RegisterHandler("task_callback", server.HandleTaskCallback())
 
-	go func() {
-		log.Printf("[AZ NSP %s] 回调处理器启动, 队列=%s", az, callbackQueueName)
-		if err := asynqServer.Run(mux); err != nil {
-			log.Fatalf("[AZ NSP %s] 回调处理器启动失败: %v", az, err)
-		}
-	}()
+	if err := callbackConsumer.Subscribe(callbackTopic); err != nil {
+		log.Fatalf("[AZ NSP] 订阅回调topic失败: %v", err)
+	}
+
+	if err := callbackConsumer.Start(); err != nil {
+		log.Fatalf("[AZ NSP] 启动回调Consumer失败: %v", err)
+	}
+
+	log.Printf("[AZ NSP %s] 回调处理器启动, topic=%s", az, callbackTopic)
 
 	go func() {
 		addr := ":" + port
@@ -128,8 +129,6 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-
-	asynqServer.Shutdown()
 
 	<-shutdownCtx.Done()
 	log.Printf("[AZ NSP %s] 服务已关闭", az)

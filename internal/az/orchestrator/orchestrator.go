@@ -9,29 +9,29 @@ import (
 
 	"workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/mq"
 	"workflow_qoder/internal/queue"
 
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
 )
 
 type AZOrchestrator struct {
-	vpcDAO      *dao.VPCDAO
-	subnetDAO   *dao.SubnetDAO
-	taskDAO     *dao.TaskDAO
-	asynqClient *asynq.Client
-	region      string
-	az          string
+	vpcDAO    *dao.VPCDAO
+	subnetDAO *dao.SubnetDAO
+	taskDAO   *dao.TaskDAO
+	producer  *mq.Producer
+	region    string
+	az        string
 }
 
-func NewAZOrchestrator(db *sql.DB, asynqClient *asynq.Client, region, az string) *AZOrchestrator {
+func NewAZOrchestrator(db *sql.DB, producer *mq.Producer, region, az string) *AZOrchestrator {
 	return &AZOrchestrator{
-		vpcDAO:      dao.NewVPCDAO(db),
-		subnetDAO:   dao.NewSubnetDAO(db),
-		taskDAO:     dao.NewTaskDAO(db),
-		asynqClient: asynqClient,
-		region:      region,
-		az:          az,
+		vpcDAO:    dao.NewVPCDAO(db),
+		subnetDAO: dao.NewSubnetDAO(db),
+		taskDAO:   dao.NewTaskDAO(db),
+		producer:  producer,
+		region:    region,
+		az:        az,
 	}
 }
 
@@ -39,19 +39,19 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	log.Printf("[AZ Orchestrator %s] 开始创建VPC: %s", o.az, req.VPCName)
 
 	vpcID := uuid.New().String()
-	
+
 	vpcResource := &models.VPCResource{
-		ID:           vpcID,
-		VPCName:      req.VPCName,
-		Region:       req.Region,
-		AZ:           o.az,
-		VRFName:      req.VRFName,
-		VLANId:       req.VLANId,
-		FirewallZone: req.FirewallZone,
-		Status:       models.ResourceStatusPending,
-		TotalTasks:   0,
+		ID:             vpcID,
+		VPCName:        req.VPCName,
+		Region:         req.Region,
+		AZ:             o.az,
+		VRFName:        req.VRFName,
+		VLANId:         req.VLANId,
+		FirewallZone:   req.FirewallZone,
+		Status:         models.ResourceStatusPending,
+		TotalTasks:     0,
 		CompletedTasks: 0,
-		FailedTasks:  0,
+		FailedTasks:    0,
 	}
 
 	if err := o.vpcDAO.Create(ctx, vpcResource); err != nil {
@@ -62,7 +62,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	}
 
 	tasks := o.buildVPCTasks(vpcID, req)
-	
+
 	if err := o.taskDAO.BatchCreate(ctx, tasks); err != nil {
 		return &models.VPCResponse{
 			Success: false,
@@ -168,18 +168,18 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	log.Printf("[AZ Orchestrator %s] 开始创建子网: %s", o.az, req.SubnetName)
 
 	subnetID := uuid.New().String()
-	
+
 	subnetResource := &models.SubnetResource{
-		ID:         subnetID,
-		SubnetName: req.SubnetName,
-		VPCName:    req.VPCName,
-		Region:     req.Region,
-		AZ:         o.az,
-		CIDR:       req.CIDR,
-		Status:     models.ResourceStatusPending,
-		TotalTasks: 0,
+		ID:             subnetID,
+		SubnetName:     req.SubnetName,
+		VPCName:        req.VPCName,
+		Region:         req.Region,
+		AZ:             o.az,
+		CIDR:           req.CIDR,
+		Status:         models.ResourceStatusPending,
+		TotalTasks:     0,
 		CompletedTasks: 0,
-		FailedTasks: 0,
+		FailedTasks:    0,
 	}
 
 	if err := o.subnetDAO.Create(ctx, subnetResource); err != nil {
@@ -190,7 +190,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	}
 
 	tasks := o.buildSubnetTasks(subnetID, req)
-	
+
 	if err := o.taskDAO.BatchCreate(ctx, tasks); err != nil {
 		return &models.SubnetResponse{
 			Success: false,
@@ -302,31 +302,22 @@ func (o *AZOrchestrator) enqueueTask(ctx context.Context, task *models.Task) err
 		deviceType = queue.GetDeviceTypeForTaskType(task.TaskType)
 	}
 
-	priority := queue.TaskPriority(task.Priority)
-	if priority == 0 {
-		priority = queue.PriorityNormal
-	}
+	topic := queue.GetTopicName(o.region, o.az, deviceType)
 
-	queueName := queue.GetPriorityQueueName(o.region, o.az, deviceType, priority)
-
-	asynqTask := asynq.NewTask(task.TaskType, payloadData)
-	info, err := o.asynqClient.Enqueue(
-		asynqTask,
-		asynq.Queue(queueName),
-	)
+	msgID, err := o.producer.SendMessage(topic, task.TaskType, payloadData)
 	if err != nil {
 		return fmt.Errorf("入队失败: %v", err)
 	}
 
-	if err := o.taskDAO.UpdateAsynqTaskID(ctx, task.ID, info.ID); err != nil {
-		return fmt.Errorf("更新Asynq任务ID失败: %v", err)
+	if err := o.taskDAO.UpdateMQMessageID(ctx, task.ID, msgID); err != nil {
+		return fmt.Errorf("更新MQ消息ID失败: %v", err)
 	}
 
 	if err := o.taskDAO.UpdateStatus(ctx, task.ID, models.TaskStatusQueued); err != nil {
 		return fmt.Errorf("更新任务状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] 任务已入队: %s (AsynqID: %s, Queue: %s, Priority: %d)", o.az, task.TaskName, info.ID, queueName, priority)
+	log.Printf("[AZ Orchestrator %s] 任务已入队: %s (MsgID: %s, Topic: %s)", o.az, task.TaskName, msgID, topic)
 	return nil
 }
 

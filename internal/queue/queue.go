@@ -17,47 +17,20 @@ const (
 	PriorityCritical TaskPriority = 9
 )
 
-func GetQueueName(region, az string, deviceType DeviceType) string {
+func GetTopicName(region, az string, deviceType DeviceType) string {
 	return "tasks_" + region + "_" + az + "_" + string(deviceType)
 }
 
-func GetPriorityQueueName(region, az string, deviceType DeviceType, priority TaskPriority) string {
-	var prioritySuffix string
-	switch priority {
-	case PriorityCritical:
-		prioritySuffix = "_critical"
-	case PriorityHigh:
-		prioritySuffix = "_high"
-	case PriorityLow:
-		prioritySuffix = "_low"
-	default:
-		prioritySuffix = ""
-	}
-	return "tasks_" + region + "_" + az + "_" + string(deviceType) + prioritySuffix
-}
-
-func GetCallbackQueueName(region, az string) string {
+func GetCallbackTopicName(region, az string) string {
 	return "callbacks_" + region + "_" + az
 }
 
-func GetQueueConfig(region, az string, deviceType DeviceType) map[string]int {
-	baseQueue := GetQueueName(region, az, deviceType)
-	return map[string]int{
-		baseQueue + "_critical": int(PriorityCritical),
-		baseQueue + "_high":     int(PriorityHigh),
-		baseQueue:               int(PriorityNormal),
-		baseQueue + "_low":      int(PriorityLow),
-	}
+func GetConsumerGroup(region, az string, deviceType DeviceType) string {
+	return "worker_" + region + "_" + az + "_" + string(deviceType)
 }
 
-func GetAllQueuesConfig(region, az string) map[string]int {
-	config := make(map[string]int)
-	for _, dt := range []DeviceType{DeviceTypeSwitch, DeviceTypeFirewall, DeviceTypeLoadBalancer} {
-		for k, v := range GetQueueConfig(region, az, dt) {
-			config[k] = v
-		}
-	}
-	return config
+func GetCallbackConsumerGroup(region, az string) string {
+	return "callback_" + region + "_" + az
 }
 
 func GetDeviceTypeForTaskType(taskType string) DeviceType {

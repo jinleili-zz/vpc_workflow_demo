@@ -1,6 +1,47 @@
 version: '3.8'
 
 services:
+  namesrv:
+    image: apache/rocketmq:4.9.4
+    container_name: rocketmq-namesrv
+    ports:
+      - "9876:9876"
+    environment:
+      - MAX_HEAP_SIZE=256M
+      - HEAP_NEWSIZE=128M
+    command: sh mqnamesrv
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z localhost 9876 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  broker:
+    image: apache/rocketmq:4.9.4
+    container_name: rocketmq-broker
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+    environment:
+      - NAMESRV_ADDR=namesrv:9876
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=256M
+    volumes:
+      - ./broker.conf:/home/rocketmq/rocketmq-4.9.4/conf/broker.conf
+    command: sh mqbroker -n namesrv:9876 -c /home/rocketmq/rocketmq-4.9.4/conf/broker.conf
+    depends_on:
+      namesrv:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z localhost 10911 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     container_name: nsp-redis
@@ -43,7 +84,6 @@ services:
       - PORT=8080
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
       - AZ_NSP_PREFIX=az-nsp
       - AZ_NSP_PORT=8080
     ports:
@@ -69,7 +109,7 @@ services:
       - PORT=8080
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAMESRV=namesrv:9876
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_DATABASE=nsp_cn_beijing_1a
@@ -80,6 +120,8 @@ services:
       redis:
         condition: service_healthy
       mysql:
+        condition: service_healthy
+      broker:
         condition: service_healthy
       top-nsp:
         condition: service_healthy
@@ -93,11 +135,9 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - WORKER_TYPE=switch
-      - REDIS_ADDR=redis:6379
-      - REDIS_BROKER_DB=1
-      - WORKER_COUNT=100
+      - ROCKETMQ_NAMESRV=namesrv:9876
     depends_on:
-      redis:
+      broker:
         condition: service_healthy
       az-nsp-cn-beijing-1a:
         condition: service_started
@@ -111,11 +151,9 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - WORKER_TYPE=firewall
-      - REDIS_ADDR=redis:6379
-      - REDIS_BROKER_DB=1
-      - WORKER_COUNT=100
+      - ROCKETMQ_NAMESRV=namesrv:9876
     depends_on:
-      redis:
+      broker:
         condition: service_healthy
       az-nsp-cn-beijing-1a:
         condition: service_started
@@ -129,11 +167,9 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - WORKER_TYPE=loadbalancer
-      - REDIS_ADDR=redis:6379
-      - REDIS_BROKER_DB=1
-      - WORKER_COUNT=2
+      - ROCKETMQ_NAMESRV=namesrv:9876
     depends_on:
-      redis:
+      broker:
         condition: service_healthy
       az-nsp-cn-beijing-1a:
         condition: service_started
@@ -150,7 +186,7 @@ services:
       - PORT=8080
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAMESRV=namesrv:9876
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_DATABASE=nsp_cn_beijing_1b
@@ -161,6 +197,8 @@ services:
       redis:
         condition: service_healthy
       mysql:
+        condition: service_healthy
+      broker:
         condition: service_healthy
       top-nsp:
         condition: service_healthy
@@ -174,11 +212,9 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
       - WORKER_TYPE=switch
-      - REDIS_ADDR=redis:6379
-      - REDIS_BROKER_DB=1
-      - WORKER_COUNT=100
+      - ROCKETMQ_NAMESRV=namesrv:9876
     depends_on:
-      redis:
+      broker:
         condition: service_healthy
       az-nsp-cn-beijing-1b:
         condition: service_started
@@ -192,11 +228,9 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
       - WORKER_TYPE=firewall
-      - REDIS_ADDR=redis:6379
-      - REDIS_BROKER_DB=1
-      - WORKER_COUNT=100
+      - ROCKETMQ_NAMESRV=namesrv:9876
     depends_on:
-      redis:
+      broker:
         condition: service_healthy
       az-nsp-cn-beijing-1b:
         condition: service_started
@@ -213,7 +247,7 @@ services:
       - PORT=8080
       - REDIS_ADDR=redis:6379
       - REDIS_DATA_DB=0
-      - REDIS_BROKER_DB=1
+      - ROCKETMQ_NAMESRV=namesrv:9876
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_DATABASE=nsp_cn_shanghai_1a
@@ -224,6 +258,8 @@ services:
       redis:
         condition: service_healthy
       mysql:
+        condition: service_healthy
+      broker:
         condition: service_healthy
       top-nsp:
         condition: service_healthy
@@ -237,11 +273,9 @@ services:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
       - WORKER_TYPE=switch
-      - REDIS_ADDR=redis:6379
-      - REDIS_BROKER_DB=1
-      - WORKER_COUNT=3
+      - ROCKETMQ_NAMESRV=namesrv:9876
     depends_on:
-      redis:
+      broker:
         condition: service_healthy
       az-nsp-cn-shanghai-1a:
         condition: service_started
@@ -255,11 +289,9 @@ services:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
       - WORKER_TYPE=firewall
-      - REDIS_ADDR=redis:6379
-      - REDIS_BROKER_DB=1
-      - WORKER_COUNT=2
+      - ROCKETMQ_NAMESRV=namesrv:9876
     depends_on:
-      redis:
+      broker:
         condition: service_healthy
       az-nsp-cn-shanghai-1a:
         condition: service_started

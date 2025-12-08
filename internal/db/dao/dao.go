@@ -605,6 +605,12 @@ func (d *TaskDAO) UpdateAsynqTaskID(ctx context.Context, id, asynqTaskID string)
 	return err
 }
 
+func (d *TaskDAO) UpdateMQMessageID(ctx context.Context, id, msgID string) error {
+	query := `UPDATE tasks SET asynq_task_id = ?, updated_at = ? WHERE id = ?`
+	_, err := d.db.ExecContext(ctx, query, msgID, time.Now(), id)
+	return err
+}
+
 func (d *TaskDAO) IncrementRetryCount(ctx context.Context, id string) error {
 	query := `UPDATE tasks SET retry_count = retry_count + 1, updated_at = ? WHERE id = ?`
 	_, err := d.db.ExecContext(ctx, query, time.Now(), id)

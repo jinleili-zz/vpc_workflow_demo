@@ -14,10 +14,10 @@ import (
 	"workflow_qoder/internal/az/orchestrator"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/mq"
 	"workflow_qoder/internal/queue"
 
 	"github.com/gin-gonic/gin"
-	"github.com/hibiken/asynq"
 )
 
 type Server struct {
@@ -25,21 +25,21 @@ type Server struct {
 	orchestrator      *orchestrator.AZOrchestrator
 	router            *gin.Engine
 	db                *sql.DB
-	callbackQueueName string
+	callbackTopic     string
 }
 
-func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, mysqlDB *sql.DB) *Server {
+func NewServer(cfg *config.NSPConfig, producer *mq.Producer, mysqlDB *sql.DB) *Server {
 	router := gin.Default()
 
-	orch := orchestrator.NewAZOrchestrator(mysqlDB, asynqClient, cfg.Region, cfg.AZ)
-	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ)
+	orch := orchestrator.NewAZOrchestrator(mysqlDB, producer, cfg.Region, cfg.AZ)
+	callbackTopic := queue.GetCallbackTopicName(cfg.Region, cfg.AZ)
 
 	server := &Server{
-		cfg:               cfg,
-		orchestrator:      orch,
-		router:            router,
-		db:                mysqlDB,
-		callbackQueueName: callbackQueueName,
+		cfg:           cfg,
+		orchestrator:  orch,
+		router:        router,
+		db:            mysqlDB,
+		callbackTopic: callbackTopic,
 	}
 
 	server.setupRoutes()
@@ -296,29 +296,23 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 	})
 }
 
-func (s *Server) HandleTaskCallback() func(context.Context, *asynq.Task) error {
-	return func(ctx context.Context, t *asynq.Task) error {
-		var payload struct {
-			TaskID       string      `json:"task_id"`
-			Status       string      `json:"status"`
-			Result       interface{} `json:"result"`
-			ErrorMessage string      `json:"error_message"`
-		}
-
-		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+func (s *Server) HandleTaskCallback() mq.MessageHandler {
+	return func(ctx context.Context, payload []byte) error {
+		var callbackPayload mq.CallbackPayload
+		if err := json.Unmarshal(payload, &callbackPayload); err != nil {
 			return fmt.Errorf("解析回调载荷失败: %v", err)
 		}
 
-		log.Printf("[AZ NSP %s] 收到任务回调: taskID=%s, status=%s", s.cfg.AZ, payload.TaskID, payload.Status)
+		log.Printf("[AZ NSP %s] 收到任务回调: taskID=%s, status=%s", s.cfg.AZ, callbackPayload.TaskID, callbackPayload.Status)
 
-		status := models.TaskStatus(payload.Status)
-		err := s.orchestrator.HandleTaskCallback(ctx, payload.TaskID, status, payload.Result, payload.ErrorMessage)
+		status := models.TaskStatus(callbackPayload.Status)
+		err := s.orchestrator.HandleTaskCallback(ctx, callbackPayload.TaskID, status, callbackPayload.Result, callbackPayload.ErrorMessage)
 		if err != nil {
 			log.Printf("[AZ NSP %s] 任务回调处理失败: %v", s.cfg.AZ, err)
 			return err
 		}
 
-		log.Printf("[AZ NSP %s] 任务回调处理成功: taskID=%s", s.cfg.AZ, payload.TaskID)
+		log.Printf("[AZ NSP %s] 任务回调处理成功: taskID=%s", s.cfg.AZ, callbackPayload.TaskID)
 		return nil
 	}
 }
