@@ -122,6 +122,48 @@ func (d *VPCDAO) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+func (d *VPCDAO) ListAll(ctx context.Context) ([]*models.VPCResource, error) {
+	query := `
+		SELECT id, vpc_name, region, az, vrf_name, vlan_id, firewall_zone,
+		       status, error_message, total_tasks, completed_tasks, failed_tasks,
+		       created_at, updated_at
+		FROM vpc_resources
+		WHERE status != 'deleted'
+		ORDER BY created_at DESC
+	`
+	rows, err := d.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var vpcs []*models.VPCResource
+	for rows.Next() {
+		vpc := &models.VPCResource{}
+		var errorMessage sql.NullString
+		err := rows.Scan(
+			&vpc.ID, &vpc.VPCName, &vpc.Region, &vpc.AZ, &vpc.VRFName, &vpc.VLANId, &vpc.FirewallZone,
+			&vpc.Status, &errorMessage, &vpc.TotalTasks, &vpc.CompletedTasks, &vpc.FailedTasks,
+			&vpc.CreatedAt, &vpc.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if errorMessage.Valid {
+			vpc.ErrorMessage = errorMessage.String
+		}
+		vpcs = append(vpcs, vpc)
+	}
+	return vpcs, rows.Err()
+}
+
+func (d *VPCDAO) CountSubnetsByVPCID(ctx context.Context, vpcID string) (int, error) {
+	query := `SELECT COUNT(*) FROM subnet_resources WHERE vpc_name = (SELECT vpc_name FROM vpc_resources WHERE id = ?) AND az = (SELECT az FROM vpc_resources WHERE id = ?) AND status != 'deleted'`
+	var count int
+	err := d.db.QueryRowContext(ctx, query, vpcID, vpcID).Scan(&count)
+	return count, err
+}
+
 type SubnetDAO struct {
 	db *sql.DB
 }
@@ -228,6 +270,77 @@ func (d *SubnetDAO) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+func (d *SubnetDAO) ListByVPCName(ctx context.Context, vpcName, az string) ([]*models.SubnetResource, error) {
+	query := `
+		SELECT id, subnet_name, vpc_name, region, az, cidr,
+		       status, error_message, total_tasks, completed_tasks, failed_tasks,
+		       created_at, updated_at
+		FROM subnet_resources
+		WHERE vpc_name = ? AND az = ? AND status != 'deleted'
+		ORDER BY created_at DESC
+	`
+	rows, err := d.db.QueryContext(ctx, query, vpcName, az)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var subnets []*models.SubnetResource
+	for rows.Next() {
+		subnet := &models.SubnetResource{}
+		var errorMessage sql.NullString
+		err := rows.Scan(
+			&subnet.ID, &subnet.SubnetName, &subnet.VPCName, &subnet.Region, &subnet.AZ, &subnet.CIDR,
+			&subnet.Status, &errorMessage, &subnet.TotalTasks, &subnet.CompletedTasks, &subnet.FailedTasks,
+			&subnet.CreatedAt, &subnet.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if errorMessage.Valid {
+			subnet.ErrorMessage = errorMessage.String
+		}
+		subnets = append(subnets, subnet)
+	}
+	return subnets, rows.Err()
+}
+
+func (d *SubnetDAO) ListByVPCID(ctx context.Context, vpcID string) ([]*models.SubnetResource, error) {
+	query := `
+		SELECT s.id, s.subnet_name, s.vpc_name, s.region, s.az, s.cidr,
+		       s.status, s.error_message, s.total_tasks, s.completed_tasks, s.failed_tasks,
+		       s.created_at, s.updated_at
+		FROM subnet_resources s
+		INNER JOIN vpc_resources v ON s.vpc_name = v.vpc_name AND s.az = v.az
+		WHERE v.id = ? AND s.status != 'deleted'
+		ORDER BY s.created_at DESC
+	`
+	rows, err := d.db.QueryContext(ctx, query, vpcID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var subnets []*models.SubnetResource
+	for rows.Next() {
+		subnet := &models.SubnetResource{}
+		var errorMessage sql.NullString
+		err := rows.Scan(
+			&subnet.ID, &subnet.SubnetName, &subnet.VPCName, &subnet.Region, &subnet.AZ, &subnet.CIDR,
+			&subnet.Status, &errorMessage, &subnet.TotalTasks, &subnet.CompletedTasks, &subnet.FailedTasks,
+			&subnet.CreatedAt, &subnet.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if errorMessage.Valid {
+			subnet.ErrorMessage = errorMessage.String
+		}
+		subnets = append(subnets, subnet)
+	}
+	return subnets, rows.Err()
+}
+
 type TaskDAO struct {
 	db *sql.DB
 }
@@ -240,12 +353,12 @@ func (d *TaskDAO) Create(ctx context.Context, task *models.Task) error {
 	query := `
 		INSERT INTO tasks (
 			id, resource_type, resource_id, task_type, task_name, task_order,
-			task_params, status, retry_count, max_retries, az
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			task_params, status, priority, device_type, retry_count, max_retries, az
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	_, err := d.db.ExecContext(ctx, query,
 		task.ID, task.ResourceType, task.ResourceID, task.TaskType, task.TaskName, task.TaskOrder,
-		task.TaskParams, task.Status, task.RetryCount, task.MaxRetries, task.AZ,
+		task.TaskParams, task.Status, task.Priority, task.DeviceType, task.RetryCount, task.MaxRetries, task.AZ,
 	)
 	return err
 }
@@ -264,8 +377,8 @@ func (d *TaskDAO) BatchCreate(ctx context.Context, tasks []*models.Task) error {
 	query := `
 		INSERT INTO tasks (
 			id, resource_type, resource_id, task_type, task_name, task_order,
-			task_params, status, retry_count, max_retries, az
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			task_params, status, priority, device_type, retry_count, max_retries, az
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	stmt, err := tx.PrepareContext(ctx, query)
@@ -277,7 +390,7 @@ func (d *TaskDAO) BatchCreate(ctx context.Context, tasks []*models.Task) error {
 	for _, task := range tasks {
 		_, err := stmt.ExecContext(ctx,
 			task.ID, task.ResourceType, task.ResourceID, task.TaskType, task.TaskName, task.TaskOrder,
-			task.TaskParams, task.Status, task.RetryCount, task.MaxRetries, task.AZ,
+			task.TaskParams, task.Status, task.Priority, task.DeviceType, task.RetryCount, task.MaxRetries, task.AZ,
 		)
 		if err != nil {
 			return err
@@ -290,23 +403,30 @@ func (d *TaskDAO) BatchCreate(ctx context.Context, tasks []*models.Task) error {
 func (d *TaskDAO) GetByID(ctx context.Context, id string) (*models.Task, error) {
 	query := `
 		SELECT id, resource_type, resource_id, task_type, task_name, task_order,
-		       task_params, status, asynq_task_id, result, error_message,
+		       task_params, status, priority, device_type, asynq_task_id, result, error_message,
 		       retry_count, max_retries, az, created_at, queued_at, started_at, completed_at, updated_at
 		FROM tasks WHERE id = ?
 	`
 	task := &models.Task{}
-	var asynqTaskID, result, errorMessage sql.NullString
+	var asynqTaskID, result, errorMessage, deviceType sql.NullString
+	var priority sql.NullInt32
 	var queuedAt, startedAt, completedAt sql.NullTime
 
 	err := d.db.QueryRowContext(ctx, query, id).Scan(
 		&task.ID, &task.ResourceType, &task.ResourceID, &task.TaskType, &task.TaskName, &task.TaskOrder,
-		&task.TaskParams, &task.Status, &asynqTaskID, &result, &errorMessage,
+		&task.TaskParams, &task.Status, &priority, &deviceType, &asynqTaskID, &result, &errorMessage,
 		&task.RetryCount, &task.MaxRetries, &task.AZ, &task.CreatedAt, &queuedAt, &startedAt, &completedAt, &task.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 
+	if priority.Valid {
+		task.Priority = int(priority.Int32)
+	}
+	if deviceType.Valid {
+		task.DeviceType = deviceType.String
+	}
 	if asynqTaskID.Valid {
 		task.AsynqTaskID = asynqTaskID.String
 	}
@@ -332,7 +452,7 @@ func (d *TaskDAO) GetByID(ctx context.Context, id string) (*models.Task, error) 
 func (d *TaskDAO) GetByResourceID(ctx context.Context, resourceID string) ([]*models.Task, error) {
 	query := `
 		SELECT id, resource_type, resource_id, task_type, task_name, task_order,
-		       task_params, status, asynq_task_id, result, error_message,
+		       task_params, status, priority, device_type, asynq_task_id, result, error_message,
 		       retry_count, max_retries, az, created_at, queued_at, started_at, completed_at, updated_at
 		FROM tasks WHERE resource_id = ? ORDER BY task_order ASC
 	`
@@ -345,18 +465,25 @@ func (d *TaskDAO) GetByResourceID(ctx context.Context, resourceID string) ([]*mo
 	var tasks []*models.Task
 	for rows.Next() {
 		task := &models.Task{}
-		var asynqTaskID, result, errorMessage sql.NullString
+		var asynqTaskID, result, errorMessage, deviceType sql.NullString
+		var priority sql.NullInt32
 		var queuedAt, startedAt, completedAt sql.NullTime
 
 		err := rows.Scan(
 			&task.ID, &task.ResourceType, &task.ResourceID, &task.TaskType, &task.TaskName, &task.TaskOrder,
-			&task.TaskParams, &task.Status, &asynqTaskID, &result, &errorMessage,
+			&task.TaskParams, &task.Status, &priority, &deviceType, &asynqTaskID, &result, &errorMessage,
 			&task.RetryCount, &task.MaxRetries, &task.AZ, &task.CreatedAt, &queuedAt, &startedAt, &completedAt, &task.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
 		}
 
+		if priority.Valid {
+			task.Priority = int(priority.Int32)
+		}
+		if deviceType.Valid {
+			task.DeviceType = deviceType.String
+		}
 		if asynqTaskID.Valid {
 			task.AsynqTaskID = asynqTaskID.String
 		}
@@ -385,19 +512,20 @@ func (d *TaskDAO) GetByResourceID(ctx context.Context, resourceID string) ([]*mo
 func (d *TaskDAO) GetNextPendingTask(ctx context.Context, resourceID string) (*models.Task, error) {
 	query := `
 		SELECT id, resource_type, resource_id, task_type, task_name, task_order,
-		       task_params, status, asynq_task_id, result, error_message,
+		       task_params, status, priority, device_type, asynq_task_id, result, error_message,
 		       retry_count, max_retries, az, created_at, queued_at, started_at, completed_at, updated_at
 		FROM tasks 
 		WHERE resource_id = ? AND status = 'pending'
 		ORDER BY task_order ASC LIMIT 1
 	`
 	task := &models.Task{}
-	var asynqTaskID, result, errorMessage sql.NullString
+	var asynqTaskID, result, errorMessage, deviceType sql.NullString
+	var priority sql.NullInt32
 	var queuedAt, startedAt, completedAt sql.NullTime
 
 	err := d.db.QueryRowContext(ctx, query, resourceID).Scan(
 		&task.ID, &task.ResourceType, &task.ResourceID, &task.TaskType, &task.TaskName, &task.TaskOrder,
-		&task.TaskParams, &task.Status, &asynqTaskID, &result, &errorMessage,
+		&task.TaskParams, &task.Status, &priority, &deviceType, &asynqTaskID, &result, &errorMessage,
 		&task.RetryCount, &task.MaxRetries, &task.AZ, &task.CreatedAt, &queuedAt, &startedAt, &completedAt, &task.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -407,6 +535,12 @@ func (d *TaskDAO) GetNextPendingTask(ctx context.Context, resourceID string) (*m
 		return nil, err
 	}
 
+	if priority.Valid {
+		task.Priority = int(priority.Int32)
+	}
+	if deviceType.Valid {
+		task.DeviceType = deviceType.String
+	}
 	if asynqTaskID.Valid {
 		task.AsynqTaskID = asynqTaskID.String
 	}

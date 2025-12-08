@@ -230,3 +230,79 @@ func ConfigureSubnetRoutingHandler(asynqClient *asynq.Client, callbackQueue stri
 		return nil
 	}
 }
+
+func CreateLBPoolHandler(asynqClient *asynq.Client, callbackQueue string) func(context.Context, *asynq.Task) error {
+	return func(ctx context.Context, t *asynq.Task) error {
+		var payload TaskPayload
+		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+			return fmt.Errorf("解析任务载荷失败: %v", err)
+		}
+
+		var params map[string]interface{}
+		if err := json.Unmarshal([]byte(payload.TaskParams), &params); err != nil {
+			return fmt.Errorf("解析任务参数失败: %v", err)
+		}
+
+		poolName := "default-pool"
+		if name, ok := params["pool_name"].(string); ok {
+			poolName = name
+		}
+
+		log.Printf("[Worker] [负载均衡任务] 开始创建LB Pool: %s (TaskID: %s)", poolName, payload.TaskID)
+
+		time.Sleep(2 * time.Second)
+
+		result := map[string]interface{}{
+			"message":   fmt.Sprintf("负载均衡器上成功创建Pool: %s", poolName),
+			"pool_name": poolName,
+			"timestamp": time.Now().Unix(),
+		}
+
+		log.Printf("[Worker] [负载均衡任务] ✓ LB Pool创建完成: %s", poolName)
+
+		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
+			log.Printf("[Worker] [负载均衡任务] 回调失败: %v", err)
+			return err
+		}
+
+		return nil
+	}
+}
+
+func ConfigureLBListenerHandler(asynqClient *asynq.Client, callbackQueue string) func(context.Context, *asynq.Task) error {
+	return func(ctx context.Context, t *asynq.Task) error {
+		var payload TaskPayload
+		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+			return fmt.Errorf("解析任务载荷失败: %v", err)
+		}
+
+		var params map[string]interface{}
+		if err := json.Unmarshal([]byte(payload.TaskParams), &params); err != nil {
+			return fmt.Errorf("解析任务参数失败: %v", err)
+		}
+
+		listenerName := "default-listener"
+		if name, ok := params["listener_name"].(string); ok {
+			listenerName = name
+		}
+
+		log.Printf("[Worker] [负载均衡任务] 开始配置LB Listener: %s (TaskID: %s)", listenerName, payload.TaskID)
+
+		time.Sleep(2 * time.Second)
+
+		result := map[string]interface{}{
+			"message":       fmt.Sprintf("负载均衡器上成功配置Listener: %s", listenerName),
+			"listener_name": listenerName,
+			"timestamp":     time.Now().Unix(),
+		}
+
+		log.Printf("[Worker] [负载均衡任务] ✓ LB Listener配置完成: %s", listenerName)
+
+		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
+			log.Printf("[Worker] [负载均衡任务] 回调失败: %v", err)
+			return err
+		}
+
+		return nil
+	}
+}

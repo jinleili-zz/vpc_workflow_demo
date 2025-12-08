@@ -9,27 +9,28 @@ import (
 
 	"workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/queue"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 )
 
 type AZOrchestrator struct {
-	vpcDAO     *dao.VPCDAO
-	subnetDAO  *dao.SubnetDAO
-	taskDAO    *dao.TaskDAO
+	vpcDAO      *dao.VPCDAO
+	subnetDAO   *dao.SubnetDAO
+	taskDAO     *dao.TaskDAO
 	asynqClient *asynq.Client
-	queueName   string
+	region      string
 	az          string
 }
 
-func NewAZOrchestrator(db *sql.DB, asynqClient *asynq.Client, queueName, az string) *AZOrchestrator {
+func NewAZOrchestrator(db *sql.DB, asynqClient *asynq.Client, region, az string) *AZOrchestrator {
 	return &AZOrchestrator{
-		vpcDAO:     dao.NewVPCDAO(db),
-		subnetDAO:  dao.NewSubnetDAO(db),
-		taskDAO:    dao.NewTaskDAO(db),
+		vpcDAO:      dao.NewVPCDAO(db),
+		subnetDAO:   dao.NewSubnetDAO(db),
+		taskDAO:     dao.NewTaskDAO(db),
 		asynqClient: asynqClient,
-		queueName:   queueName,
+		region:      region,
 		az:          az,
 	}
 }
@@ -111,6 +112,8 @@ func (o *AZOrchestrator) buildVPCTasks(vpcID string, req *models.VPCRequest) []*
 			TaskOrder:    1,
 			TaskParams:   o.buildVPCTaskParams(req),
 			Status:       models.TaskStatusPending,
+			Priority:     int(queue.PriorityNormal),
+			DeviceType:   string(queue.DeviceTypeSwitch),
 			RetryCount:   0,
 			MaxRetries:   3,
 			AZ:           o.az,
@@ -124,6 +127,8 @@ func (o *AZOrchestrator) buildVPCTasks(vpcID string, req *models.VPCRequest) []*
 			TaskOrder:    2,
 			TaskParams:   o.buildVPCTaskParams(req),
 			Status:       models.TaskStatusPending,
+			Priority:     int(queue.PriorityNormal),
+			DeviceType:   string(queue.DeviceTypeSwitch),
 			RetryCount:   0,
 			MaxRetries:   3,
 			AZ:           o.az,
@@ -137,6 +142,8 @@ func (o *AZOrchestrator) buildVPCTasks(vpcID string, req *models.VPCRequest) []*
 			TaskOrder:    3,
 			TaskParams:   o.buildVPCTaskParams(req),
 			Status:       models.TaskStatusPending,
+			Priority:     int(queue.PriorityNormal),
+			DeviceType:   string(queue.DeviceTypeFirewall),
 			RetryCount:   0,
 			MaxRetries:   3,
 			AZ:           o.az,
@@ -233,6 +240,8 @@ func (o *AZOrchestrator) buildSubnetTasks(subnetID string, req *models.SubnetReq
 			TaskOrder:    1,
 			TaskParams:   o.buildSubnetTaskParams(req),
 			Status:       models.TaskStatusPending,
+			Priority:     int(queue.PriorityNormal),
+			DeviceType:   string(queue.DeviceTypeSwitch),
 			RetryCount:   0,
 			MaxRetries:   3,
 			AZ:           o.az,
@@ -246,6 +255,8 @@ func (o *AZOrchestrator) buildSubnetTasks(subnetID string, req *models.SubnetReq
 			TaskOrder:    2,
 			TaskParams:   o.buildSubnetTaskParams(req),
 			Status:       models.TaskStatusPending,
+			Priority:     int(queue.PriorityNormal),
+			DeviceType:   string(queue.DeviceTypeSwitch),
 			RetryCount:   0,
 			MaxRetries:   3,
 			AZ:           o.az,
@@ -286,8 +297,23 @@ func (o *AZOrchestrator) enqueueTask(ctx context.Context, task *models.Task) err
 	}
 	payloadData, _ := json.Marshal(payload)
 
+	deviceType := queue.DeviceType(task.DeviceType)
+	if deviceType == "" {
+		deviceType = queue.GetDeviceTypeForTaskType(task.TaskType)
+	}
+
+	priority := queue.TaskPriority(task.Priority)
+	if priority == 0 {
+		priority = queue.PriorityNormal
+	}
+
+	queueName := queue.GetPriorityQueueName(o.region, o.az, deviceType, priority)
+
 	asynqTask := asynq.NewTask(task.TaskType, payloadData)
-	info, err := o.asynqClient.Enqueue(asynqTask, asynq.Queue(o.queueName))
+	info, err := o.asynqClient.Enqueue(
+		asynqTask,
+		asynq.Queue(queueName),
+	)
 	if err != nil {
 		return fmt.Errorf("入队失败: %v", err)
 	}
@@ -300,7 +326,7 @@ func (o *AZOrchestrator) enqueueTask(ctx context.Context, task *models.Task) err
 		return fmt.Errorf("更新任务状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] 任务已入队: %s (AsynqID: %s)", o.az, task.TaskName, info.ID)
+	log.Printf("[AZ Orchestrator %s] 任务已入队: %s (AsynqID: %s, Queue: %s, Priority: %d)", o.az, task.TaskName, info.ID, queueName, priority)
 	return nil
 }
 
@@ -519,5 +545,71 @@ func (o *AZOrchestrator) DeleteSubnet(ctx context.Context, subnetName string) er
 	}
 
 	log.Printf("[AZ Orchestrator %s] 子网删除成功: %s", o.az, subnetName)
+	return nil
+}
+
+func (o *AZOrchestrator) ListVPCs(ctx context.Context) ([]*models.VPCResource, error) {
+	return o.vpcDAO.ListAll(ctx)
+}
+
+func (o *AZOrchestrator) GetVPCByID(ctx context.Context, vpcID string) (*models.VPCResource, error) {
+	return o.vpcDAO.GetByID(ctx, vpcID)
+}
+
+func (o *AZOrchestrator) DeleteVPCByID(ctx context.Context, vpcID string) error {
+	vpc, err := o.vpcDAO.GetByID(ctx, vpcID)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("VPC不存在: %s", vpcID)
+	}
+	if err != nil {
+		return fmt.Errorf("查询VPC失败: %v", err)
+	}
+
+	if vpc.Status != models.ResourceStatusRunning {
+		return fmt.Errorf("VPC状态不是running，无法删除")
+	}
+
+	subnetCount, err := o.vpcDAO.CountSubnetsByVPCID(ctx, vpcID)
+	if err != nil {
+		return fmt.Errorf("查询子网数量失败: %v", err)
+	}
+	if subnetCount > 0 {
+		return fmt.Errorf("VPC下存在%d个子网，无法删除", subnetCount)
+	}
+
+	if err := o.vpcDAO.UpdateStatus(ctx, vpcID, models.ResourceStatusDeleted, ""); err != nil {
+		return fmt.Errorf("更新VPC状态失败: %v", err)
+	}
+
+	log.Printf("[AZ Orchestrator %s] VPC删除成功: %s", o.az, vpcID)
+	return nil
+}
+
+func (o *AZOrchestrator) ListSubnetsByVPCID(ctx context.Context, vpcID string) ([]*models.SubnetResource, error) {
+	return o.subnetDAO.ListByVPCID(ctx, vpcID)
+}
+
+func (o *AZOrchestrator) GetSubnetByID(ctx context.Context, subnetID string) (*models.SubnetResource, error) {
+	return o.subnetDAO.GetByID(ctx, subnetID)
+}
+
+func (o *AZOrchestrator) DeleteSubnetByID(ctx context.Context, subnetID string) error {
+	subnet, err := o.subnetDAO.GetByID(ctx, subnetID)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("子网不存在: %s", subnetID)
+	}
+	if err != nil {
+		return fmt.Errorf("查询子网失败: %v", err)
+	}
+
+	if subnet.Status != models.ResourceStatusRunning {
+		return fmt.Errorf("子网状态不是running，无法删除")
+	}
+
+	if err := o.subnetDAO.UpdateStatus(ctx, subnetID, models.ResourceStatusDeleted, ""); err != nil {
+		return fmt.Errorf("更新子网状态失败: %v", err)
+	}
+
+	log.Printf("[AZ Orchestrator %s] 子网删除成功: %s", o.az, subnetID)
 	return nil
 }

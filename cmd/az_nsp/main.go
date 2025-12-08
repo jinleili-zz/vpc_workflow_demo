@@ -12,6 +12,7 @@ import (
 	"workflow_qoder/internal/az/api"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/db"
+	"workflow_qoder/internal/queue"
 
 	"github.com/hibiken/asynq"
 )
@@ -73,10 +74,9 @@ func main() {
 	})
 	defer asynqClient.Close()
 
-	queueName := "vpc_tasks_" + region + "_" + az
-	callbackQueueName := "vpc_callbacks_" + region + "_" + az
+	callbackQueueName := queue.GetCallbackQueueName(region, az)
 
-	server := api.NewServer(cfg, asynqClient, mysqlDB, queueName, callbackQueueName)
+	server := api.NewServer(cfg, asynqClient, mysqlDB)
 
 	if err := server.RegisterToTopNSP(); err != nil {
 		log.Printf("[AZ NSP %s] 注册到Top NSP失败: %v (将在后续心跳中重试)", az, err)

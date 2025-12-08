@@ -48,11 +48,17 @@ func (s *Server) setupRoutes() {
 		api.GET("/regions/:region/azs", s.listRegionAZs)
 
 		// Region级服务
+		api.GET("/vpcs", s.listVPCs)
 		api.POST("/vpc", s.createVPC)
 		api.GET("/vpc/:vpc_name/status", s.getVPCStatus)
+		api.GET("/vpc/id/:vpc_id", s.getVPCByID)
+		api.DELETE("/vpc/id/:vpc_id", s.deleteVPCByID)
+		api.GET("/vpc/id/:vpc_id/subnets", s.listSubnetsByVPCID)
 
 		// AZ级服务
 		api.POST("/subnet", s.createSubnet)
+		api.GET("/subnet/id/:subnet_id", s.getSubnetByID)
+		api.DELETE("/subnet/id/:subnet_id", s.deleteSubnetByID)
 
 		// 健康检查
 		api.GET("/health", s.health)
@@ -290,6 +296,277 @@ func (s *Server) createSubnet(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) listVPCs(c *gin.Context) {
+	ctx := context.Background()
+
+	azs, err := s.registry.ListAllAZs(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("获取AZ列表失败: %v", err),
+		})
+		return
+	}
+
+	var allVPCs []interface{}
+
+	for _, az := range azs {
+		listURL := fmt.Sprintf("%s/api/v1/vpcs", az.NSPAddr)
+		resp, err := http.Get(listURL)
+		if err != nil {
+			log.Printf("[Top NSP] 查询AZ %s的VPC列表失败: %v", az.ID, err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		var result struct {
+			Success bool                     `json:"success"`
+			VPCs    []map[string]interface{} `json:"vpcs"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			log.Printf("[Top NSP] 解析AZ %s的VPC列表失败: %v", az.ID, err)
+			continue
+		}
+
+		for _, vpc := range result.VPCs {
+			allVPCs = append(allVPCs, vpc)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"vpcs":    allVPCs,
+	})
+}
+
+func (s *Server) getVPCByID(c *gin.Context) {
+	vpcID := c.Param("vpc_id")
+	ctx := context.Background()
+
+	azs, err := s.registry.ListAllAZs(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("获取AZ列表失败: %v", err),
+		})
+		return
+	}
+
+	for _, az := range azs {
+		getURL := fmt.Sprintf("%s/api/v1/vpc/id/%s", az.NSPAddr, vpcID)
+		resp, err := http.Get(getURL)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			var result map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				continue
+			}
+			c.JSON(http.StatusOK, result)
+			return
+		}
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{
+		"success": false,
+		"message": "VPC不存在",
+	})
+}
+
+func (s *Server) deleteVPCByID(c *gin.Context) {
+	vpcID := c.Param("vpc_id")
+	ctx := context.Background()
+
+	azs, err := s.registry.ListAllAZs(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("获取AZ列表失败: %v", err),
+		})
+		return
+	}
+
+	deleted := false
+	var lastError string
+
+	for _, az := range azs {
+		deleteURL := fmt.Sprintf("%s/api/v1/vpc/id/%s", az.NSPAddr, vpcID)
+		req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		var result map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			continue
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			deleted = true
+		} else if msg, ok := result["message"].(string); ok {
+			lastError = msg
+		}
+	}
+
+	if deleted {
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "VPC已成功删除",
+		})
+	} else if lastError != "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": lastError,
+		})
+	} else {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "VPC不存在",
+		})
+	}
+}
+
+func (s *Server) listSubnetsByVPCID(c *gin.Context) {
+	vpcID := c.Param("vpc_id")
+	ctx := context.Background()
+
+	azs, err := s.registry.ListAllAZs(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("获取AZ列表失败: %v", err),
+		})
+		return
+	}
+
+	var allSubnets []interface{}
+
+	for _, az := range azs {
+		listURL := fmt.Sprintf("%s/api/v1/vpc/id/%s/subnets", az.NSPAddr, vpcID)
+		resp, err := http.Get(listURL)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		var result struct {
+			Success bool                     `json:"success"`
+			Subnets []map[string]interface{} `json:"subnets"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			continue
+		}
+
+		for _, subnet := range result.Subnets {
+			allSubnets = append(allSubnets, subnet)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"subnets": allSubnets,
+	})
+}
+
+func (s *Server) getSubnetByID(c *gin.Context) {
+	subnetID := c.Param("subnet_id")
+	ctx := context.Background()
+
+	azs, err := s.registry.ListAllAZs(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("获取AZ列表失败: %v", err),
+		})
+		return
+	}
+
+	for _, az := range azs {
+		getURL := fmt.Sprintf("%s/api/v1/subnet/id/%s", az.NSPAddr, subnetID)
+		resp, err := http.Get(getURL)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			var result map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				continue
+			}
+			c.JSON(http.StatusOK, result)
+			return
+		}
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{
+		"success": false,
+		"message": "子网不存在",
+	})
+}
+
+func (s *Server) deleteSubnetByID(c *gin.Context) {
+	subnetID := c.Param("subnet_id")
+	ctx := context.Background()
+
+	azs, err := s.registry.ListAllAZs(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("获取AZ列表失败: %v", err),
+		})
+		return
+	}
+
+	deleted := false
+	var lastError string
+
+	for _, az := range azs {
+		deleteURL := fmt.Sprintf("%s/api/v1/subnet/id/%s", az.NSPAddr, subnetID)
+		req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		var result map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			continue
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			deleted = true
+		} else if msg, ok := result["message"].(string); ok {
+			lastError = msg
+		}
+	}
+
+	if deleted {
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "子网已成功删除",
+		})
+	} else if lastError != "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": lastError,
+		})
+	} else {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "子网不存在",
+		})
+	}
 }
 
 // health 健康检查

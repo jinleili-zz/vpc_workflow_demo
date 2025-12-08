@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # Redis服务
   redis:
     image: redis:7-alpine
     container_name: nsp-redis
@@ -15,7 +14,6 @@ services:
       timeout: 3s
       retries: 5
 
-  # MySQL服务
   mysql:
     image: mysql:8.0
     container_name: nsp-mysql
@@ -37,7 +35,6 @@ services:
       retries: 5
     command: --default-authentication-plugin=mysql_native_password
 
-  # Top NSP
   top-nsp:
     image: nsp-top:latest
     container_name: top-nsp
@@ -62,7 +59,6 @@ services:
       timeout: 5s
       retries: 3
 
-  # AZ NSP - cn-beijing-1a
   az-nsp-cn-beijing-1a:
     image: nsp-az:latest
     container_name: az-nsp-cn-beijing-1a
@@ -90,17 +86,16 @@ services:
     networks:
       - nsp-network
 
-  # Worker - cn-beijing-1a
-  worker-cn-beijing-1a:
+  worker-switch-cn-beijing-1a:
     image: nsp-worker:latest
-    container_name: worker-cn-beijing-1a
+    container_name: worker-switch-cn-beijing-1a
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
-      - WORKER_TYPE=vpc
+      - WORKER_TYPE=switch
       - REDIS_ADDR=redis:6379
       - REDIS_BROKER_DB=1
-      - WORKER_COUNT=10
+      - WORKER_COUNT=100
     depends_on:
       redis:
         condition: service_healthy
@@ -109,7 +104,42 @@ services:
     networks:
       - nsp-network
 
-  # AZ NSP - cn-beijing-1b
+  worker-firewall-cn-beijing-1a:
+    image: nsp-worker:latest
+    container_name: worker-firewall-cn-beijing-1a
+    environment:
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+      - WORKER_TYPE=firewall
+      - REDIS_ADDR=redis:6379
+      - REDIS_BROKER_DB=1
+      - WORKER_COUNT=100
+    depends_on:
+      redis:
+        condition: service_healthy
+      az-nsp-cn-beijing-1a:
+        condition: service_started
+    networks:
+      - nsp-network
+
+  worker-loadbalancer-cn-beijing-1a:
+    image: nsp-worker:latest
+    container_name: worker-loadbalancer-cn-beijing-1a
+    environment:
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+      - WORKER_TYPE=loadbalancer
+      - REDIS_ADDR=redis:6379
+      - REDIS_BROKER_DB=1
+      - WORKER_COUNT=2
+    depends_on:
+      redis:
+        condition: service_healthy
+      az-nsp-cn-beijing-1a:
+        condition: service_started
+    networks:
+      - nsp-network
+
   az-nsp-cn-beijing-1b:
     image: nsp-az:latest
     container_name: az-nsp-cn-beijing-1b
@@ -137,17 +167,16 @@ services:
     networks:
       - nsp-network
 
-  # Worker - cn-beijing-1b
-  worker-cn-beijing-1b:
+  worker-switch-cn-beijing-1b:
     image: nsp-worker:latest
-    container_name: worker-cn-beijing-1b
+    container_name: worker-switch-cn-beijing-1b
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
-      - WORKER_TYPE=vpc
+      - WORKER_TYPE=switch
       - REDIS_ADDR=redis:6379
       - REDIS_BROKER_DB=1
-      - WORKER_COUNT=10
+      - WORKER_COUNT=100
     depends_on:
       redis:
         condition: service_healthy
@@ -156,7 +185,24 @@ services:
     networks:
       - nsp-network
 
-  # AZ NSP - cn-shanghai-1a
+  worker-firewall-cn-beijing-1b:
+    image: nsp-worker:latest
+    container_name: worker-firewall-cn-beijing-1b
+    environment:
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1b
+      - WORKER_TYPE=firewall
+      - REDIS_ADDR=redis:6379
+      - REDIS_BROKER_DB=1
+      - WORKER_COUNT=100
+    depends_on:
+      redis:
+        condition: service_healthy
+      az-nsp-cn-beijing-1b:
+        condition: service_started
+    networks:
+      - nsp-network
+
   az-nsp-cn-shanghai-1a:
     image: nsp-az:latest
     container_name: az-nsp-cn-shanghai-1a
@@ -184,14 +230,31 @@ services:
     networks:
       - nsp-network
 
-  # Worker - cn-shanghai-1a
-  worker-cn-shanghai-1a:
+  worker-switch-cn-shanghai-1a:
     image: nsp-worker:latest
-    container_name: worker-cn-shanghai-1a
+    container_name: worker-switch-cn-shanghai-1a
     environment:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
-      - WORKER_TYPE=vpc
+      - WORKER_TYPE=switch
+      - REDIS_ADDR=redis:6379
+      - REDIS_BROKER_DB=1
+      - WORKER_COUNT=3
+    depends_on:
+      redis:
+        condition: service_healthy
+      az-nsp-cn-shanghai-1a:
+        condition: service_started
+    networks:
+      - nsp-network
+
+  worker-firewall-cn-shanghai-1a:
+    image: nsp-worker:latest
+    container_name: worker-firewall-cn-shanghai-1a
+    environment:
+      - REGION=cn-shanghai
+      - AZ=cn-shanghai-1a
+      - WORKER_TYPE=firewall
       - REDIS_ADDR=redis:6379
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=2

@@ -14,6 +14,7 @@ import (
 	"workflow_qoder/internal/az/orchestrator"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/queue"
 
 	"github.com/gin-gonic/gin"
 	"github.com/hibiken/asynq"
@@ -27,10 +28,11 @@ type Server struct {
 	callbackQueueName string
 }
 
-func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, mysqlDB *sql.DB, queueName string, callbackQueueName string) *Server {
+func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, mysqlDB *sql.DB) *Server {
 	router := gin.Default()
 
-	orch := orchestrator.NewAZOrchestrator(mysqlDB, asynqClient, queueName, cfg.AZ)
+	orch := orchestrator.NewAZOrchestrator(mysqlDB, asynqClient, cfg.Region, cfg.AZ)
+	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ)
 
 	server := &Server{
 		cfg:               cfg,
@@ -48,13 +50,19 @@ func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, mysqlDB *sql.DB
 func (s *Server) setupRoutes() {
 	api := s.router.Group("/api/v1")
 	{
+		api.GET("/vpcs", s.listVPCs)
 		api.POST("/vpc", s.createVPC)
 		api.GET("/vpc/:vpc_name/status", s.getVPCStatus)
 		api.DELETE("/vpc/:vpc_name", s.deleteVPC)
+		api.GET("/vpc/id/:vpc_id", s.getVPCByID)
+		api.DELETE("/vpc/id/:vpc_id", s.deleteVPCByID)
+		api.GET("/vpc/id/:vpc_id/subnets", s.listSubnetsByVPCID)
 
 		api.POST("/subnet", s.createSubnet)
 		api.GET("/subnet/:subnet_name/status", s.getSubnetStatus)
 		api.DELETE("/subnet/:subnet_name", s.deleteSubnet)
+		api.GET("/subnet/id/:subnet_id", s.getSubnetByID)
+		api.DELETE("/subnet/id/:subnet_id", s.deleteSubnetByID)
 
 		api.GET("/health", s.health)
 	}
@@ -162,6 +170,118 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 	ctx := context.Background()
 
 	err := s.orchestrator.DeleteSubnet(ctx, subnetName)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "子网已成功删除",
+	})
+}
+
+func (s *Server) listVPCs(c *gin.Context) {
+	ctx := context.Background()
+	vpcs, err := s.orchestrator.ListVPCs(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("查询VPC列表失败: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"vpcs":    vpcs,
+	})
+}
+
+func (s *Server) getVPCByID(c *gin.Context) {
+	vpcID := c.Param("vpc_id")
+	ctx := context.Background()
+
+	vpc, err := s.orchestrator.GetVPCByID(ctx, vpcID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"vpc":     vpc,
+	})
+}
+
+func (s *Server) deleteVPCByID(c *gin.Context) {
+	vpcID := c.Param("vpc_id")
+	ctx := context.Background()
+
+	err := s.orchestrator.DeleteVPCByID(ctx, vpcID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "VPC已成功删除",
+	})
+}
+
+func (s *Server) listSubnetsByVPCID(c *gin.Context) {
+	vpcID := c.Param("vpc_id")
+	ctx := context.Background()
+
+	subnets, err := s.orchestrator.ListSubnetsByVPCID(ctx, vpcID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("查询子网列表失败: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"subnets": subnets,
+	})
+}
+
+func (s *Server) getSubnetByID(c *gin.Context) {
+	subnetID := c.Param("subnet_id")
+	ctx := context.Background()
+
+	subnet, err := s.orchestrator.GetSubnetByID(ctx, subnetID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"subnet":  subnet,
+	})
+}
+
+func (s *Server) deleteSubnetByID(c *gin.Context) {
+	subnetID := c.Param("subnet_id")
+	ctx := context.Background()
+
+	err := s.orchestrator.DeleteSubnetByID(ctx, subnetID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,

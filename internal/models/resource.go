@@ -71,10 +71,12 @@ type Task struct {
 	TaskType     string       `json:"task_type"`
 	TaskName     string       `json:"task_name"`
 	TaskOrder    int          `json:"task_order"`
-	TaskParams   string       `json:"task_params"` // JSON string
+	TaskParams   string       `json:"task_params"`
 	Status       TaskStatus   `json:"status"`
+	Priority     int          `json:"priority"`
+	DeviceType   string       `json:"device_type"`
 	AsynqTaskID  string       `json:"asynq_task_id,omitempty"`
-	Result       string       `json:"result,omitempty"` // JSON string
+	Result       string       `json:"result,omitempty"`
 	ErrorMessage string       `json:"error_message,omitempty"`
 	RetryCount   int          `json:"retry_count"`
 	MaxRetries   int          `json:"max_retries"`
