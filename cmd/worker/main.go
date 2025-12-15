@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -58,19 +59,39 @@ func main() {
 	taskQueueName := queue.GetQueueName(region, az, deviceType)
 	callbackQueueName := queue.GetCallbackQueueName(region, az)
 
-	asynqClient := asynq.NewClient(asynq.RedisClientOpt{
-		Addr: redisAddr,
-		DB:   redisBrokerDB,
-	})
+	addrs := strings.Split(redisAddr, ",")
+	var asynqClientOpt asynq.RedisConnOpt
+	
+	if len(addrs) > 1 {
+		asynqClientOpt = asynq.RedisClusterClientOpt{
+			Addrs: addrs,
+		}
+	} else {
+		asynqClientOpt = asynq.RedisClientOpt{
+			Addr: redisAddr,
+			DB:   redisBrokerDB,
+		}
+	}
+
+	asynqClient := asynq.NewClient(asynqClientOpt)
 	defer asynqClient.Close()
 
 	queuesConfig := queue.GetQueueConfig(region, az, deviceType)
 
-	asynqServer := asynq.NewServer(
-		asynq.RedisClientOpt{
+	var asynqServerOpt asynq.RedisConnOpt
+	if len(addrs) > 1 {
+		asynqServerOpt = asynq.RedisClusterClientOpt{
+			Addrs: addrs,
+		}
+	} else {
+		asynqServerOpt = asynq.RedisClientOpt{
 			Addr: redisAddr,
 			DB:   redisBrokerDB,
-		},
+		}
+	}
+
+	asynqServer := asynq.NewServer(
+		asynqServerOpt,
 		asynq.Config{
 			Concurrency:    workerCount,
 			Queues:         queuesConfig,

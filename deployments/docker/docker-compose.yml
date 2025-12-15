@@ -1,11 +1,15 @@
 version: '3.8'
 
 services:
-  redis:
+  redis-node-1:
     image: redis:7-alpine
-    container_name: nsp-redis
+    container_name: redis-node-1
+    command: redis-server /usr/local/etc/redis/redis.conf
     ports:
       - "6379:6379"
+    volumes:
+      - ./redis-node-1.conf:/usr/local/etc/redis/redis.conf
+      - redis-node-1-data:/data
     networks:
       - nsp-network
     healthcheck:
@@ -13,6 +17,56 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  redis-node-2:
+    image: redis:7-alpine
+    container_name: redis-node-2
+    command: redis-server /usr/local/etc/redis/redis.conf
+    ports:
+      - "6380:6379"
+    volumes:
+      - ./redis-node-2.conf:/usr/local/etc/redis/redis.conf
+      - redis-node-2-data:/data
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-node-3:
+    image: redis:7-alpine
+    container_name: redis-node-3
+    command: redis-server /usr/local/etc/redis/redis.conf
+    ports:
+      - "6381:6379"
+    volumes:
+      - ./redis-node-3.conf:/usr/local/etc/redis/redis.conf
+      - redis-node-3-data:/data
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-cluster-setup:
+    image: redis:7-alpine
+    container_name: redis-cluster-setup
+    depends_on:
+      redis-node-1:
+        condition: service_healthy
+      redis-node-2:
+        condition: service_healthy
+      redis-node-3:
+        condition: service_healthy
+    volumes:
+      - ./redis-cluster-setup.sh:/setup.sh
+    networks:
+      - nsp-network
+    entrypoint: ["/bin/sh", "/setup.sh"]
 
   mysql:
     image: mysql:8.0
@@ -41,7 +95,7 @@ services:
     environment:
       - SERVICE_TYPE=top
       - PORT=8080
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
       - AZ_NSP_PREFIX=az-nsp
@@ -49,8 +103,8 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
     networks:
       - nsp-network
     healthcheck:
@@ -67,7 +121,7 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - PORT=8080
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
       - MYSQL_HOST=mysql
@@ -77,8 +131,8 @@ services:
       - MYSQL_PASSWORD=nsp_password
       - TOP_NSP_ADDR=http://top-nsp:8080
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
       mysql:
         condition: service_healthy
       top-nsp:
@@ -93,12 +147,12 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - WORKER_TYPE=switch
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=100
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
       az-nsp-cn-beijing-1a:
         condition: service_started
     networks:
@@ -111,12 +165,12 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - WORKER_TYPE=firewall
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=100
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
       az-nsp-cn-beijing-1a:
         condition: service_started
     networks:
@@ -129,12 +183,12 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - WORKER_TYPE=loadbalancer
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=2
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
       az-nsp-cn-beijing-1a:
         condition: service_started
     networks:
@@ -148,7 +202,7 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
       - PORT=8080
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
       - MYSQL_HOST=mysql
@@ -158,8 +212,8 @@ services:
       - MYSQL_PASSWORD=nsp_password
       - TOP_NSP_ADDR=http://top-nsp:8080
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
       mysql:
         condition: service_healthy
       top-nsp:
@@ -174,12 +228,12 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
       - WORKER_TYPE=switch
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=100
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
       az-nsp-cn-beijing-1b:
         condition: service_started
     networks:
@@ -192,12 +246,12 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
       - WORKER_TYPE=firewall
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=100
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
       az-nsp-cn-beijing-1b:
         condition: service_started
     networks:
@@ -211,7 +265,7 @@ services:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
       - PORT=8080
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
       - MYSQL_HOST=mysql
@@ -221,8 +275,8 @@ services:
       - MYSQL_PASSWORD=nsp_password
       - TOP_NSP_ADDR=http://top-nsp:8080
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
       mysql:
         condition: service_healthy
       top-nsp:
@@ -237,12 +291,12 @@ services:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
       - WORKER_TYPE=switch
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=3
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
       az-nsp-cn-shanghai-1a:
         condition: service_started
     networks:
@@ -255,19 +309,40 @@ services:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
       - WORKER_TYPE=firewall
-      - REDIS_ADDR=redis:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=2
     depends_on:
-      redis:
-        condition: service_healthy
+      redis-cluster-setup:
+        condition: service_completed_successfully
       az-nsp-cn-shanghai-1a:
         condition: service_started
     networks:
       - nsp-network
 
+  asynq-dashboard:
+    image: hibiken/asynqmon:latest
+    container_name: asynq-dashboard
+    command: 
+      - --redis-cluster-nodes=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - --port=8081
+    ports:
+      - "8081:8081"
+    depends_on:
+      redis-node-1:
+        condition: service_healthy
+      redis-node-2:
+        condition: service_healthy
+      redis-node-3:
+        condition: service_healthy
+    networks:
+      - nsp-network
+
 volumes:
   mysql-data:
+  redis-node-1-data:
+  redis-node-2-data:
+  redis-node-3-data:
 
 networks:
   nsp-network:

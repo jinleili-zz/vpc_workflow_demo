@@ -8,16 +8,16 @@ import (
 
 	"workflow_qoder/internal/models"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // Registry AZ注册中心
 type Registry struct {
-	redisClient *redis.Client
+	redisClient redis.UniversalClient
 }
 
 // NewRegistry 创建注册中心
-func NewRegistry(redisClient *redis.Client) *Registry {
+func NewRegistry(redisClient redis.UniversalClient) *Registry {
 	return &Registry{
 		redisClient: redisClient,
 	}
@@ -143,17 +143,34 @@ func (r *Registry) CheckAZHealth(ctx context.Context, region, azID string) (bool
 
 // ListAllRegions 列出所有Region
 func (r *Registry) ListAllRegions(ctx context.Context) ([]string, error) {
-	// 通过pattern匹配获取所有region的key
-	keys, err := r.redisClient.Keys(ctx, "region:*:azs").Result()
+	var keys []string
+	var err error
+	
+	if clusterClient, ok := r.redisClient.(*redis.ClusterClient); ok {
+		err = clusterClient.ForEachMaster(ctx, func(ctx context.Context, client *redis.Client) error {
+			nodeKeys, err := client.Keys(ctx, "region:*:azs").Result()
+			if err != nil {
+				return err
+			}
+			keys = append(keys, nodeKeys...)
+			return nil
+		})
+	} else {
+		keys, err = r.redisClient.Keys(ctx, "region:*:azs").Result()
+	}
+	
 	if err != nil {
 		return nil, fmt.Errorf("获取Region列表失败: %v", err)
 	}
 
 	regions := make([]string, 0, len(keys))
+	seen := make(map[string]bool)
 	for _, key := range keys {
-		// 从 "region:cn-beijing:azs" 提取 "cn-beijing"
 		region := key[7 : len(key)-4]
-		regions = append(regions, region)
+		if !seen[region] {
+			regions = append(regions, region)
+			seen[region] = true
+		}
 	}
 
 	return regions, nil
