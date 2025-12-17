@@ -23,14 +23,14 @@ services:
     container_name: redis-node-2
     command: redis-server /usr/local/etc/redis/redis.conf
     ports:
-      - "6380:6379"
+      - "6380:6380"
     volumes:
       - ./redis-node-2.conf:/usr/local/etc/redis/redis.conf
       - redis-node-2-data:/data
     networks:
       - nsp-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-p", "6380", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -40,14 +40,14 @@ services:
     container_name: redis-node-3
     command: redis-server /usr/local/etc/redis/redis.conf
     ports:
-      - "6381:6379"
+      - "6381:6381"
     volumes:
       - ./redis-node-3.conf:/usr/local/etc/redis/redis.conf
       - redis-node-3-data:/data
     networks:
       - nsp-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-p", "6381", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -95,7 +95,7 @@ services:
     environment:
       - SERVICE_TYPE=top
       - PORT=8080
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
       - AZ_NSP_PREFIX=az-nsp
@@ -121,7 +121,7 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - PORT=8080
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
       - MYSQL_HOST=mysql
@@ -147,7 +147,7 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - WORKER_TYPE=switch
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=100
     depends_on:
@@ -165,7 +165,7 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - WORKER_TYPE=firewall
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=100
     depends_on:
@@ -183,7 +183,7 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
       - WORKER_TYPE=loadbalancer
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=2
     depends_on:
@@ -202,7 +202,7 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
       - PORT=8080
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
       - MYSQL_HOST=mysql
@@ -228,7 +228,7 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
       - WORKER_TYPE=switch
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=100
     depends_on:
@@ -246,7 +246,7 @@ services:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
       - WORKER_TYPE=firewall
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=100
     depends_on:
@@ -265,7 +265,7 @@ services:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
       - PORT=8080
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
       - MYSQL_HOST=mysql
@@ -291,7 +291,7 @@ services:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
       - WORKER_TYPE=switch
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=3
     depends_on:
@@ -309,7 +309,7 @@ services:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
       - WORKER_TYPE=firewall
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=2
     depends_on:
@@ -324,7 +324,7 @@ services:
     image: hibiken/asynqmon:latest
     container_name: asynq-dashboard
     command: 
-      - --redis-cluster-nodes=redis-node-1:6379,redis-node-2:6379,redis-node-3:6379
+      - --redis-cluster-nodes=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - --port=8081
     ports:
       - "8081:8081"

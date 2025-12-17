@@ -7,8 +7,8 @@ sleep 5
 echo "Creating Redis Cluster..."
 redis-cli --cluster create \
   redis-node-1:6379 \
-  redis-node-2:6379 \
-  redis-node-3:6379 \
+  redis-node-2:6380 \
+  redis-node-3:6381 \
   --cluster-yes
 
 echo "Redis Cluster created successfully!"
