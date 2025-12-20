@@ -613,3 +613,29 @@ func (o *AZOrchestrator) DeleteSubnetByID(ctx context.Context, subnetID string) 
 	log.Printf("[AZ Orchestrator %s] 子网删除成功: %s", o.az, subnetID)
 	return nil
 }
+
+func (o *AZOrchestrator) GetTaskByID(ctx context.Context, taskID string) (*models.Task, error) {
+	return o.taskDAO.GetByID(ctx, taskID)
+}
+
+func (o *AZOrchestrator) ReplayTask(ctx context.Context, taskID string) error {
+	task, err := o.taskDAO.GetByID(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("获取任务失败: %v", err)
+	}
+
+	if task.Status != models.TaskStatusFailed {
+		return fmt.Errorf("任务状态不是failed，无法重做 (当前状态: %s)", task.Status)
+	}
+
+	if err := o.taskDAO.UpdateStatus(ctx, taskID, models.TaskStatusPending); err != nil {
+		return fmt.Errorf("更新任务状态为pending失败: %v", err)
+	}
+
+	if err := o.enqueueTask(ctx, task); err != nil {
+		return fmt.Errorf("重新入队任务失败: %v", err)
+	}
+
+	log.Printf("[AZ Orchestrator %s] 任务重做成功: taskID=%s", o.az, taskID)
+	return nil
+}

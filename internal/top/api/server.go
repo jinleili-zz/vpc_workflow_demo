@@ -60,6 +60,9 @@ func (s *Server) setupRoutes() {
 		api.GET("/subnet/id/:subnet_id", s.getSubnetByID)
 		api.DELETE("/subnet/id/:subnet_id", s.deleteSubnetByID)
 
+		// 运维接口
+		api.POST("/task/replay/:task_id", s.replayTask)
+
 		// 健康检查
 		api.GET("/health", s.health)
 	}
@@ -567,6 +570,45 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 			"message": "子网不存在",
 		})
 	}
+}
+
+func (s *Server) replayTask(c *gin.Context) {
+	taskID := c.Param("task_id")
+	ctx := context.Background()
+
+	azs, err := s.registry.ListAllAZs(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("获取AZ列表失败: %v", err),
+		})
+		return
+	}
+
+	for _, az := range azs {
+		replayURL := fmt.Sprintf("%s/api/v1/task/replay/%s", az.NSPAddr, taskID)
+		req, _ := http.NewRequest(http.MethodPost, replayURL, nil)
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			var result map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				continue
+			}
+			c.JSON(http.StatusOK, result)
+			return
+		}
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{
+		"success": false,
+		"message": "任务不存在或重做失败",
+	})
 }
 
 // health 健康检查

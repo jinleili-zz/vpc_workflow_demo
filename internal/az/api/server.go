@@ -26,9 +26,10 @@ type Server struct {
 	router            *gin.Engine
 	db                *sql.DB
 	callbackQueueName string
+	asynqInspector    *asynq.Inspector
 }
 
-func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, mysqlDB *sql.DB) *Server {
+func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, asynqInspector *asynq.Inspector, mysqlDB *sql.DB) *Server {
 	router := gin.Default()
 
 	orch := orchestrator.NewAZOrchestrator(mysqlDB, asynqClient, cfg.Region, cfg.AZ)
@@ -40,6 +41,7 @@ func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, mysqlDB *sql.DB
 		router:            router,
 		db:                mysqlDB,
 		callbackQueueName: callbackQueueName,
+		asynqInspector:    asynqInspector,
 	}
 
 	server.setupRoutes()
@@ -63,6 +65,9 @@ func (s *Server) setupRoutes() {
 		api.DELETE("/subnet/:subnet_name", s.deleteSubnet)
 		api.GET("/subnet/id/:subnet_id", s.getSubnetByID)
 		api.DELETE("/subnet/id/:subnet_id", s.deleteSubnetByID)
+
+		api.POST("/task/replay/:task_id", s.replayTask)
+		api.GET("/task/:task_id", s.getTaskByID)
 
 		api.GET("/health", s.health)
 	}
@@ -321,6 +326,61 @@ func (s *Server) HandleTaskCallback() func(context.Context, *asynq.Task) error {
 		log.Printf("[AZ NSP %s] 任务回调处理成功: taskID=%s", s.cfg.AZ, payload.TaskID)
 		return nil
 	}
+}
+
+func (s *Server) replayTask(c *gin.Context) {
+	taskID := c.Param("task_id")
+	ctx := context.Background()
+
+	task, err := s.orchestrator.GetTaskByID(ctx, taskID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("任务不存在: %v", err),
+		})
+		return
+	}
+
+	if task.Status != models.TaskStatusFailed {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("任务状态不是failed，无法重做 (当前状态: %s)", task.Status),
+		})
+		return
+	}
+
+	if err := s.orchestrator.ReplayTask(ctx, taskID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("重做任务失败: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "任务已重新入队",
+		"task_id": taskID,
+	})
+}
+
+func (s *Server) getTaskByID(c *gin.Context) {
+	taskID := c.Param("task_id")
+	ctx := context.Background()
+
+	task, err := s.orchestrator.GetTaskByID(ctx, taskID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("任务不存在: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"task":    task,
+	})
 }
 
 func (s *Server) health(c *gin.Context) {

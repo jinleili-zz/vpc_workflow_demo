@@ -177,6 +177,17 @@ func CreateSubnetOnSwitchHandler(asynqClient *asynq.Client, callbackQueue string
 
 		time.Sleep(2 * time.Second)
 
+		if cidr == "10.0.99.0/24" {
+			errorMsg := fmt.Sprintf("CIDR冲突: %s 在VPC %s 中已存在", cidr, vpcName)
+			log.Printf("[Worker] [子网任务] ✗ 子网创建失败: %s - %s", subnetName, errorMsg)
+			
+			if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "failed", nil, errorMsg); err != nil {
+				log.Printf("[Worker] [子网任务] 回调失败: %v", err)
+				return err
+			}
+			return fmt.Errorf(errorMsg)
+		}
+
 		result := map[string]interface{}{
 			"message": fmt.Sprintf("交换机上成功创建子网: %s, CIDR: %s", subnetName, cidr),
 			"subnet_name": subnetName,

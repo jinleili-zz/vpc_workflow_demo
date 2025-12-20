@@ -86,9 +86,24 @@ func main() {
 	asynqClient := asynq.NewClient(asynqClientOpt)
 	defer asynqClient.Close()
 
+	var asynqInspectorOpt asynq.RedisConnOpt
+	if len(addrs) > 1 {
+		asynqInspectorOpt = asynq.RedisClusterClientOpt{
+			Addrs: addrs,
+		}
+	} else {
+		asynqInspectorOpt = asynq.RedisClientOpt{
+			Addr: redisAddr,
+			DB:   redisBrokerDB,
+		}
+	}
+
+	asynqInspector := asynq.NewInspector(asynqInspectorOpt)
+	defer asynqInspector.Close()
+
 	callbackQueueName := queue.GetCallbackQueueName(region, az)
 
-	server := api.NewServer(cfg, asynqClient, mysqlDB)
+	server := api.NewServer(cfg, asynqClient, asynqInspector, mysqlDB)
 
 	if err := server.RegisterToTopNSP(); err != nil {
 		log.Printf("[AZ NSP %s] 注册到Top NSP失败: %v (将在后续心跳中重试)", az, err)
