@@ -17,6 +17,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    mem_limit: 64m
 
   redis-node-2:
     image: redis:7-alpine
@@ -34,6 +35,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    mem_limit: 64m
 
   redis-node-3:
     image: redis:7-alpine
@@ -51,6 +53,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    mem_limit: 64m
 
   redis-cluster-setup:
     image: redis:7-alpine
@@ -88,23 +91,30 @@ services:
       timeout: 5s
       retries: 5
     command: --default-authentication-plugin=mysql_native_password
+    mem_limit: 512m
 
-  top-nsp:
-    image: nsp-top:latest
-    container_name: top-nsp
+  top-nsp-vpc:
+    image: nsp-top-vpc:latest
+    container_name: top-nsp-vpc
     environment:
       - SERVICE_TYPE=top
       - PORT=8080
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
-      - AZ_NSP_PREFIX=az-nsp
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_password
+      - AZ_NSP_PREFIX=az-nsp-vpc
       - AZ_NSP_PORT=8080
     ports:
       - "8080:8080"
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
     networks:
       - nsp-network
     healthcheck:
@@ -112,10 +122,36 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+    mem_limit: 64m
 
-  az-nsp-cn-beijing-1a:
-    image: nsp-az:latest
-    container_name: az-nsp-cn-beijing-1a
+  top-nsp-vfw:
+    image: nsp-top-vfw:latest
+    container_name: top-nsp-vfw
+    environment:
+      - PORT=8082
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_password
+    ports:
+      - "8082:8082"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      top-nsp-vpc:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    mem_limit: 64m
+
+  az-nsp-vpc-cn-beijing-1a:
+    image: nsp-az-vpc:latest
+    container_name: az-nsp-vpc-cn-beijing-1a
     environment:
       - SERVICE_TYPE=az
       - REGION=cn-beijing
@@ -126,19 +162,48 @@ services:
       - REDIS_BROKER_DB=1
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
-      - MYSQL_DATABASE=nsp_cn_beijing_1a
+      - MYSQL_DATABASE=nsp_cn_beijing_1a_vpc
       - MYSQL_USER=nsp_user
       - MYSQL_PASSWORD=nsp_password
-      - TOP_NSP_ADDR=http://top-nsp:8080
+      - TOP_NSP_ADDR=http://top-nsp-vpc:8080
+      - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-beijing-1a:8080
+      - NSP_ADDR=http://az-nsp-vpc-cn-beijing-1a:8080
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
       mysql:
         condition: service_healthy
-      top-nsp:
+      top-nsp-vpc:
         condition: service_healthy
     networks:
       - nsp-network
+    mem_limit: 64m
+
+  az-nsp-vfw-cn-beijing-1a:
+    image: nsp-az-vfw:latest
+    container_name: az-nsp-vfw-cn-beijing-1a
+    environment:
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+      - PORT=8080
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - REDIS_BROKER_DB=1
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=nsp_cn_beijing_1a_vfw
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_password
+      - TOP_NSP_VFW_ADDR=http://top-nsp-vfw:8082
+    depends_on:
+      redis-cluster-setup:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      top-nsp-vfw:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    mem_limit: 64m
 
   worker-switch-cn-beijing-1a:
     image: nsp-worker:latest
@@ -149,14 +214,15 @@ services:
       - WORKER_TYPE=switch
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
-      - WORKER_COUNT=100
+      - WORKER_COUNT=10
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      az-nsp-cn-beijing-1a:
+      az-nsp-vpc-cn-beijing-1a:
         condition: service_started
     networks:
       - nsp-network
+    mem_limit: 32m
 
   worker-firewall-cn-beijing-1a:
     image: nsp-worker:latest
@@ -167,36 +233,21 @@ services:
       - WORKER_TYPE=firewall
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
-      - WORKER_COUNT=100
+      - WORKER_COUNT=10
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      az-nsp-cn-beijing-1a:
+      az-nsp-vpc-cn-beijing-1a:
+        condition: service_started
+      az-nsp-vfw-cn-beijing-1a:
         condition: service_started
     networks:
       - nsp-network
+    mem_limit: 32m
 
-  worker-loadbalancer-cn-beijing-1a:
-    image: nsp-worker:latest
-    container_name: worker-loadbalancer-cn-beijing-1a
-    environment:
-      - REGION=cn-beijing
-      - AZ=cn-beijing-1a
-      - WORKER_TYPE=loadbalancer
-      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
-      - REDIS_BROKER_DB=1
-      - WORKER_COUNT=2
-    depends_on:
-      redis-cluster-setup:
-        condition: service_completed_successfully
-      az-nsp-cn-beijing-1a:
-        condition: service_started
-    networks:
-      - nsp-network
-
-  az-nsp-cn-beijing-1b:
-    image: nsp-az:latest
-    container_name: az-nsp-cn-beijing-1b
+  az-nsp-vpc-cn-beijing-1b:
+    image: nsp-az-vpc:latest
+    container_name: az-nsp-vpc-cn-beijing-1b
     environment:
       - SERVICE_TYPE=az
       - REGION=cn-beijing
@@ -207,19 +258,48 @@ services:
       - REDIS_BROKER_DB=1
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
-      - MYSQL_DATABASE=nsp_cn_beijing_1b
+      - MYSQL_DATABASE=nsp_cn_beijing_1b_vpc
       - MYSQL_USER=nsp_user
       - MYSQL_PASSWORD=nsp_password
-      - TOP_NSP_ADDR=http://top-nsp:8080
+      - TOP_NSP_ADDR=http://top-nsp-vpc:8080
+      - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-beijing-1b:8080
+      - NSP_ADDR=http://az-nsp-vpc-cn-beijing-1b:8080
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
       mysql:
         condition: service_healthy
-      top-nsp:
+      top-nsp-vpc:
         condition: service_healthy
     networks:
       - nsp-network
+    mem_limit: 64m
+
+  az-nsp-vfw-cn-beijing-1b:
+    image: nsp-az-vfw:latest
+    container_name: az-nsp-vfw-cn-beijing-1b
+    environment:
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1b
+      - PORT=8080
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - REDIS_BROKER_DB=1
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=nsp_cn_beijing_1b_vfw
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_password
+      - TOP_NSP_VFW_ADDR=http://top-nsp-vfw:8082
+    depends_on:
+      redis-cluster-setup:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      top-nsp-vfw:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    mem_limit: 64m
 
   worker-switch-cn-beijing-1b:
     image: nsp-worker:latest
@@ -230,14 +310,15 @@ services:
       - WORKER_TYPE=switch
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
-      - WORKER_COUNT=100
+      - WORKER_COUNT=10
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      az-nsp-cn-beijing-1b:
+      az-nsp-vpc-cn-beijing-1b:
         condition: service_started
     networks:
       - nsp-network
+    mem_limit: 32m
 
   worker-firewall-cn-beijing-1b:
     image: nsp-worker:latest
@@ -248,18 +329,21 @@ services:
       - WORKER_TYPE=firewall
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
-      - WORKER_COUNT=100
+      - WORKER_COUNT=10
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      az-nsp-cn-beijing-1b:
+      az-nsp-vpc-cn-beijing-1b:
+        condition: service_started
+      az-nsp-vfw-cn-beijing-1b:
         condition: service_started
     networks:
       - nsp-network
+    mem_limit: 32m
 
-  az-nsp-cn-shanghai-1a:
-    image: nsp-az:latest
-    container_name: az-nsp-cn-shanghai-1a
+  az-nsp-vpc-cn-shanghai-1a:
+    image: nsp-az-vpc:latest
+    container_name: az-nsp-vpc-cn-shanghai-1a
     environment:
       - SERVICE_TYPE=az
       - REGION=cn-shanghai
@@ -270,19 +354,48 @@ services:
       - REDIS_BROKER_DB=1
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
-      - MYSQL_DATABASE=nsp_cn_shanghai_1a
+      - MYSQL_DATABASE=nsp_cn_shanghai_1a_vpc
       - MYSQL_USER=nsp_user
       - MYSQL_PASSWORD=nsp_password
-      - TOP_NSP_ADDR=http://top-nsp:8080
+      - TOP_NSP_ADDR=http://top-nsp-vpc:8080
+      - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-shanghai-1a:8080
+      - NSP_ADDR=http://az-nsp-vpc-cn-shanghai-1a:8080
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
       mysql:
         condition: service_healthy
-      top-nsp:
+      top-nsp-vpc:
         condition: service_healthy
     networks:
       - nsp-network
+    mem_limit: 64m
+
+  az-nsp-vfw-cn-shanghai-1a:
+    image: nsp-az-vfw:latest
+    container_name: az-nsp-vfw-cn-shanghai-1a
+    environment:
+      - REGION=cn-shanghai
+      - AZ=cn-shanghai-1a
+      - PORT=8080
+      - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - REDIS_BROKER_DB=1
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=nsp_cn_shanghai_1a_vfw
+      - MYSQL_USER=nsp_user
+      - MYSQL_PASSWORD=nsp_password
+      - TOP_NSP_VFW_ADDR=http://top-nsp-vfw:8082
+    depends_on:
+      redis-cluster-setup:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      top-nsp-vfw:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    mem_limit: 64m
 
   worker-switch-cn-shanghai-1a:
     image: nsp-worker:latest
@@ -297,10 +410,11 @@ services:
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      az-nsp-cn-shanghai-1a:
+      az-nsp-vpc-cn-shanghai-1a:
         condition: service_started
     networks:
       - nsp-network
+    mem_limit: 32m
 
   worker-firewall-cn-shanghai-1a:
     image: nsp-worker:latest
@@ -315,10 +429,13 @@ services:
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      az-nsp-cn-shanghai-1a:
+      az-nsp-vpc-cn-shanghai-1a:
+        condition: service_started
+      az-nsp-vfw-cn-shanghai-1a:
         condition: service_started
     networks:
       - nsp-network
+    mem_limit: 32m
 
   asynq-dashboard:
     image: hibiken/asynqmon:latest
@@ -337,6 +454,7 @@ services:
         condition: service_healthy
     networks:
       - nsp-network
+    mem_limit: 64m
 
 volumes:
   mysql-data:

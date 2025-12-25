@@ -109,6 +109,7 @@ func main() {
 		mux.HandleFunc("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(asynqClient, callbackQueueName))
 	case queue.DeviceTypeFirewall:
 		mux.HandleFunc("create_firewall_zone", tasks.CreateFirewallZoneHandler(asynqClient, callbackQueueName))
+		mux.HandleFunc("create_firewall_policy", tasks.CreateFirewallPolicyHandler(asynqClient, callbackQueueName+"_vfw"))
 	case queue.DeviceTypeLoadBalancer:
 		mux.HandleFunc("create_lb_pool", tasks.CreateLBPoolHandler(asynqClient, callbackQueueName))
 		mux.HandleFunc("configure_lb_listener", tasks.ConfigureLBListenerHandler(asynqClient, callbackQueueName))

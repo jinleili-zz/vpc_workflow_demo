@@ -2,28 +2,35 @@ package orchestrator
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
+	"net/http"
 	"sync"
 
 	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
 	"workflow_qoder/internal/top/registry"
+	topdao "workflow_qoder/internal/top/vpc/dao"
 
 	"github.com/google/uuid"
 )
 
-// Orchestrator 服务编排器
 type Orchestrator struct {
 	registry *registry.Registry
 	azClient *client.AZNSPClient
+	topDAO   *topdao.TopVPCDAO
 }
 
-// NewOrchestrator 创建编排器
-func NewOrchestrator(registry *registry.Registry) *Orchestrator {
+func NewOrchestrator(registry *registry.Registry, topDB *sql.DB) *Orchestrator {
+	var dao *topdao.TopVPCDAO
+	if topDB != nil {
+		dao = topdao.NewTopVPCDAO(topDB)
+	}
 	return &Orchestrator{
 		registry: registry,
 		azClient: client.NewAZNSPClient(),
+		topDAO:   dao,
 	}
 }
 
@@ -146,9 +153,31 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 		}, nil
 	}
 
-	// 6. 全部成功，构造响应
+	// 6. 全部成功，构造响应并同步拓扑
 	vpcID := uuid.New().String()
 	log.Printf("[Orchestrator] VPC创建成功: %s, 在%d个AZ中创建完成", req.VPCName, len(azs))
+
+	if o.topDAO != nil {
+		for _, az := range successAZs {
+			workflowID := results[az.ID]
+			vpcReg := &models.VPCRegistry{
+				ID:           uuid.New().String(),
+				VPCName:      req.VPCName,
+				Region:       req.Region,
+				AZ:           az.ID,
+				AZVpcID:      workflowID,
+				VRFName:      req.VRFName,
+				VLANId:       req.VLANId,
+				FirewallZone: req.FirewallZone,
+				Status:       "running",
+			}
+			if err := o.topDAO.RegisterVPC(ctx, vpcReg); err != nil {
+				log.Printf("[Orchestrator] 同步VPC拓扑到Top层失败: %v", err)
+			} else {
+				log.Printf("[Orchestrator] 同步VPC拓扑成功: %s -> %s", req.VPCName, az.ID)
+			}
+		}
+	}
 
 	return &models.VPCResponse{
 		Success:   true,
@@ -184,7 +213,6 @@ func (o *Orchestrator) rollbackVPC(ctx context.Context, vpcName string, azs []*m
 func (o *Orchestrator) CreateAZSubnet(ctx context.Context, req *models.SubnetRequest) (*models.SubnetResponse, error) {
 	log.Printf("[Orchestrator] 开始创建AZ级子网: %s (Region: %s, AZ: %s)", req.SubnetName, req.Region, req.AZ)
 
-	// 1. 获取指定AZ的信息
 	az, err := o.registry.GetAZ(ctx, req.Region, req.AZ)
 	if err != nil {
 		return &models.SubnetResponse{
@@ -193,7 +221,6 @@ func (o *Orchestrator) CreateAZSubnet(ctx context.Context, req *models.SubnetReq
 		}, nil
 	}
 
-	// 2. 检查AZ健康状态
 	healthy, err := o.registry.CheckAZHealth(ctx, req.Region, req.AZ)
 	if err != nil || !healthy {
 		return &models.SubnetResponse{
@@ -202,7 +229,6 @@ func (o *Orchestrator) CreateAZSubnet(ctx context.Context, req *models.SubnetReq
 		}, nil
 	}
 
-	// 3. 发送子网创建请求到目标AZ
 	log.Printf("[Orchestrator] 向AZ %s 发送子网创建请求", az.ID)
 	resp, err := o.azClient.CreateSubnet(ctx, az.NSPAddr, req)
 	if err != nil {
@@ -212,5 +238,45 @@ func (o *Orchestrator) CreateAZSubnet(ctx context.Context, req *models.SubnetReq
 		}, nil
 	}
 
+	if resp.Success && o.topDAO != nil {
+		var firewallZone string
+		vpc, err := o.topDAO.GetVPCByNameAndAZ(ctx, req.VPCName, req.AZ)
+		if err == nil && vpc != nil {
+			firewallZone = vpc.FirewallZone
+		}
+
+		subnetReg := &models.SubnetRegistry{
+			ID:           uuid.New().String(),
+			SubnetName:   req.SubnetName,
+			VPCName:      req.VPCName,
+			Region:       req.Region,
+			AZ:           req.AZ,
+			AZSubnetID:   resp.SubnetID,
+			CIDR:         req.CIDR,
+			FirewallZone: firewallZone,
+			Status:       "running",
+		}
+		if err := o.topDAO.RegisterSubnet(ctx, subnetReg); err != nil {
+			log.Printf("[Orchestrator] 同步子网拓扑到Top层失败: %v", err)
+		} else {
+			log.Printf("[Orchestrator] 同步子网拓扑成功: %s -> %s (CIDR: %s, Zone: %s)", req.SubnetName, req.AZ, req.CIDR, firewallZone)
+		}
+	}
+
 	return resp, nil
+}
+
+func (o *Orchestrator) CheckZonePolicies(ctx context.Context, zone string) (int, error) {
+	url := fmt.Sprintf("http://top-nsp-vfw:8082/api/v1/firewall/zone/%s/policy-count", zone)
+	resp, err := http.Get(url)
+	if err != nil {
+		return 0, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, nil
+	}
+
+	return 0, nil
 }

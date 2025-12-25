@@ -317,3 +317,61 @@ func ConfigureLBListenerHandler(asynqClient *asynq.Client, callbackQueue string)
 		return nil
 	}
 }
+
+func CreateFirewallPolicyHandler(asynqClient *asynq.Client, callbackQueue string) func(context.Context, *asynq.Task) error {
+	return func(ctx context.Context, t *asynq.Task) error {
+		var payload TaskPayload
+		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+			return fmt.Errorf("解析任务载荷失败: %v", err)
+		}
+
+		var params map[string]interface{}
+		if err := json.Unmarshal([]byte(payload.TaskParams), &params); err != nil {
+			return fmt.Errorf("解析任务参数失败: %v", err)
+		}
+
+		policyName := params["policy_name"].(string)
+		sourceZone := params["source_zone"].(string)
+		destZone := params["dest_zone"].(string)
+		sourceIP := params["source_ip"].(string)
+		destIP := params["dest_ip"].(string)
+		destPort := params["dest_port"].(string)
+		protocol := params["protocol"].(string)
+		action := params["action"].(string)
+
+		log.Printf("[Worker] [防火墙策略任务] 开始创建策略: %s (TaskID: %s)", policyName, payload.TaskID)
+		log.Printf("[Worker] [防火墙策略任务] 规则: %s:%s -> %s:%s/%s %s", sourceZone, sourceIP, destZone, destIP, destPort, protocol)
+
+		time.Sleep(2 * time.Second)
+
+		configCmd := fmt.Sprintf(`
+security-policy
+ rule name %s
+  source-zone %s
+  destination-zone %s
+  source-address %s
+  destination-address %s
+  destination-port %s
+  protocol %s
+  action %s
+`, policyName, sourceZone, destZone, sourceIP, destIP, destPort, protocol, action)
+
+		result := map[string]interface{}{
+			"message":     fmt.Sprintf("防火墙策略创建成功: %s", policyName),
+			"policy_name": policyName,
+			"source_zone": sourceZone,
+			"dest_zone":   destZone,
+			"config_cmd":  configCmd,
+			"timestamp":   time.Now().Unix(),
+		}
+
+		log.Printf("[Worker] [防火墙策略任务] ✓ 策略创建完成: %s", policyName)
+
+		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
+			log.Printf("[Worker] [防火墙策略任务] 回调失败: %v", err)
+			return err
+		}
+
+		return nil
+	}
+}

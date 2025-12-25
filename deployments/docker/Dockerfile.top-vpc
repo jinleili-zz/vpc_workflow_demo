@@ -1,0 +1,26 @@
+# Top NSP VPC Dockerfile
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /build
+
+ENV GOPROXY=https://goproxy.cn,direct
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o top-nsp-vpc ./cmd/top_nsp
+
+FROM alpine:latest
+
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
+    apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+
+COPY --from=builder /build/top-nsp-vpc /app/
+
+EXPOSE 8080
+
+CMD ["/app/top-nsp-vpc"]

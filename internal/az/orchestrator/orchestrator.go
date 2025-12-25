@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"os"
 
 	"workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"
@@ -519,6 +521,14 @@ func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 		return fmt.Errorf("VPC下存在%d个子网，无法删除", subnetCount)
 	}
 
+	policyCount, err := o.checkZonePolicies(vpc.FirewallZone)
+	if err != nil {
+		log.Printf("[AZ Orchestrator %s] 检查Zone策略失败: %v", o.az, err)
+	}
+	if policyCount > 0 {
+		return fmt.Errorf("Zone %s 中存在%d条防火墙策略，无法删除VPC", vpc.FirewallZone, policyCount)
+	}
+
 	if err := o.vpcDAO.UpdateStatus(ctx, vpc.ID, models.ResourceStatusDeleting, ""); err != nil {
 		return fmt.Errorf("更新VPC状态失败: %v", err)
 	}
@@ -575,6 +585,14 @@ func (o *AZOrchestrator) DeleteVPCByID(ctx context.Context, vpcID string) error 
 	}
 	if subnetCount > 0 {
 		return fmt.Errorf("VPC下存在%d个子网，无法删除", subnetCount)
+	}
+
+	policyCount, err := o.checkZonePolicies(vpc.FirewallZone)
+	if err != nil {
+		log.Printf("[AZ Orchestrator %s] 检查Zone策略失败: %v", o.az, err)
+	}
+	if policyCount > 0 {
+		return fmt.Errorf("Zone %s 中存在%d条防火墙策略，无法删除VPC", vpc.FirewallZone, policyCount)
 	}
 
 	if err := o.vpcDAO.UpdateStatus(ctx, vpcID, models.ResourceStatusDeleted, ""); err != nil {
@@ -638,4 +656,32 @@ func (o *AZOrchestrator) ReplayTask(ctx context.Context, taskID string) error {
 
 	log.Printf("[AZ Orchestrator %s] 任务重做成功: taskID=%s", o.az, taskID)
 	return nil
+}
+
+func (o *AZOrchestrator) checkZonePolicies(zone string) (int, error) {
+	vfwAddr := os.Getenv("AZ_NSP_VFW_ADDR")
+	if vfwAddr == "" {
+		vfwAddr = fmt.Sprintf("http://az-nsp-vfw-%s:8080", o.az)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/firewall/zone/%s/policy-count", vfwAddr, zone)
+	resp, err := http.Get(url)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, nil
+	}
+
+	var result struct {
+		Success bool `json:"success"`
+		Count   int  `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+
+	return result.Count, nil
 }
