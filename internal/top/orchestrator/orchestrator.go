@@ -4,30 +4,32 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"sync"
 
 	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
 	"workflow_qoder/internal/top/registry"
 
+	"github.com/dtm-labs/client/dtmcli"
 	"github.com/google/uuid"
 )
 
 // Orchestrator 服务编排器
 type Orchestrator struct {
-	registry *registry.Registry
-	azClient *client.AZNSPClient
+	registry      *registry.Registry
+	azClient      *client.AZNSPClient
+	dtmServerAddr string
 }
 
 // NewOrchestrator 创建编排器
-func NewOrchestrator(registry *registry.Registry) *Orchestrator {
+func NewOrchestrator(registry *registry.Registry, dtmServerAddr string) *Orchestrator {
 	return &Orchestrator{
-		registry: registry,
-		azClient: client.NewAZNSPClient(),
+		registry:      registry,
+		azClient:      client.NewAZNSPClient(),
+		dtmServerAddr: dtmServerAddr,
 	}
 }
 
-// CreateRegionVPC 创建Region级VPC（分发到所有AZ，支持自动回滚）
+// CreateRegionVPC 创建Region级VPC（使用DTM Saga分布式事务）
 func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCRequest) (*models.VPCResponse, error) {
 	log.Printf("[Orchestrator] 开始创建Region级VPC: %s (Region: %s)", req.VPCName, req.Region)
 
@@ -72,112 +74,47 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 		}, nil
 	}
 
-	// 3. 执行阶段：并行发送VPC创建请求到所有AZ
-	log.Printf("[Orchestrator] 执行阶段：并行创建VPC")
-	type azResult struct {
-		az         *models.AZ
-		workflowID string
-		err        error
-		success    bool
-	}
+	// 3. 使用DTM Saga编排分布式事务
+	log.Printf("[Orchestrator] 开始DTM Saga事务：创建VPC")
+	gid := dtmcli.MustGenGid(o.dtmServerAddr)
+	saga := dtmcli.NewSaga(o.dtmServerAddr, gid).
+		SetConcurrent() // 设置并发模式（所有AZ并行创建）
 
-	var wg sync.WaitGroup
-	resultChan := make(chan *azResult, len(azs))
-
+	// 为每个AZ注册正向操作和补偿操作
 	for _, az := range azs {
-		wg.Add(1)
-		go func(az *models.AZ) {
-			defer wg.Done()
+		actionURL := fmt.Sprintf("%s/api/v1/dtm/vpc", az.NSPAddr)
+		compensateURL := fmt.Sprintf("%s/api/v1/dtm/vpc/compensate", az.NSPAddr)
 
-			log.Printf("[Orchestrator] 向AZ %s 发送VPC创建请求", az.ID)
-			resp, err := o.azClient.CreateVPC(ctx, az.NSPAddr, req)
-
-			result := &azResult{az: az}
-			if err != nil {
-				log.Printf("[Orchestrator] AZ %s 创建失败: %v", az.ID, err)
-				result.err = err
-				result.success = false
-			} else if !resp.Success {
-				log.Printf("[Orchestrator] AZ %s 创建失败: %s", az.ID, resp.Message)
-				result.err = fmt.Errorf("%s", resp.Message)
-				result.success = false
-			} else {
-				log.Printf("[Orchestrator] AZ %s 创建成功: workflow_id=%s", az.ID, resp.WorkflowID)
-				result.workflowID = resp.WorkflowID
-				result.success = true
-			}
-			resultChan <- result
-		}(az)
+		saga.Add(actionURL, compensateURL, req)
+		log.Printf("[Orchestrator] 注册Saga步骤: AZ=%s, Action=%s, Compensate=%s", az.ID, actionURL, compensateURL)
 	}
 
-	// 等待所有AZ完成
-	wg.Wait()
-	close(resultChan)
-
-	// 4. 收集结果
-	successAZs := make([]*models.AZ, 0)
-	failedAZs := make([]*models.AZ, 0)
-	results := make(map[string]string)
-
-	for result := range resultChan {
-		if result.success {
-			successAZs = append(successAZs, result.az)
-			results[result.az.ID] = result.workflowID
-		} else {
-			failedAZs = append(failedAZs, result.az)
-			results[result.az.ID] = fmt.Sprintf("失败: %v", result.err)
-		}
-	}
-
-	// 5. 判断是否需要回滚
-	if len(failedAZs) > 0 {
-		log.Printf("[Orchestrator] 检测到失败: %d个成功, %d个失败", len(successAZs), len(failedAZs))
-
-		// 如果部分成功，触发回滚
-		if len(successAZs) > 0 {
-			log.Printf("[Orchestrator] 触发回滚：清理%d个已成功的AZ", len(successAZs))
-			o.rollbackVPC(ctx, req.VPCName, successAZs)
-		}
-
+	// 提交Saga事务
+	log.Printf("[Orchestrator] 提交DTM Saga事务 (GID: %s)", gid)
+	err = saga.Submit()
+	if err != nil {
+		log.Printf("[Orchestrator] DTM Saga事务失败: %v", err)
 		return &models.VPCResponse{
-			Success:   false,
-			Message:   fmt.Sprintf("VPC创建失败: %d个AZ失败，已回滚成功的%d个AZ", len(failedAZs), len(successAZs)),
-			AZResults: results,
+			Success: false,
+			Message: fmt.Sprintf("VPC创建失败: %v (DTM已自动回滚)", err),
 		}, nil
 	}
 
-	// 6. 全部成功，构造响应
+	// 全部成功
 	vpcID := uuid.New().String()
-	log.Printf("[Orchestrator] VPC创建成功: %s, 在%d个AZ中创建完成", req.VPCName, len(azs))
+	log.Printf("[Orchestrator] VPC创建成功: %s, 在%d个AZ中创建完成 (DTM GID: %s)", req.VPCName, len(azs), gid)
 
 	return &models.VPCResponse{
-		Success:   true,
-		Message:   fmt.Sprintf("VPC已在%d个AZ中成功创建", len(azs)),
-		VPCID:     vpcID,
-		AZResults: results,
+		Success: true,
+		Message: fmt.Sprintf("VPC已在%d个AZ中成功创建", len(azs)),
+		VPCID:   vpcID,
 	}, nil
 }
 
-// rollbackVPC 回滚VPC创建（删除已成功创建的VPC）
+// rollbackVPC 已废弃：DTM自动处理补偿，无需手动回滚
+// 保留此方法以兼容旧代码，但不再使用
 func (o *Orchestrator) rollbackVPC(ctx context.Context, vpcName string, azs []*models.AZ) {
-	log.Printf("[Orchestrator] 开始回滚VPC: %s, 涉及%d个AZ", vpcName, len(azs))
-
-	var wg sync.WaitGroup
-	for _, az := range azs {
-		wg.Add(1)
-		go func(az *models.AZ) {
-			defer wg.Done()
-
-			log.Printf("[Orchestrator] 回滚AZ %s 的VPC: %s", az.ID, vpcName)
-			if err := o.azClient.DeleteVPC(ctx, az.NSPAddr, vpcName); err != nil {
-				log.Printf("[Orchestrator] ⚠️  AZ %s 回滚失败: %v (需要人工介入)", az.ID, err)
-			} else {
-				log.Printf("[Orchestrator] ✓ AZ %s 回滚成功", az.ID)
-			}
-		}(az)
-	}
-	wg.Wait()
-	log.Printf("[Orchestrator] VPC回滚完成: %s", vpcName)
+	log.Printf("[Orchestrator] ⚠️  rollbackVPC已废弃：DTM Saga自动处理补偿，无需手动调用")
 }
 
 // CreateAZSubnet 创建AZ级子网（路由到指定AZ）

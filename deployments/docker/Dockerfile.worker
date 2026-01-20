@@ -3,6 +3,9 @@ FROM golang:1.22-alpine AS builder
 
 WORKDIR /build
 
+# 安装git和ca-certificates（go mod download需要）
+RUN apk --no-cache add git ca-certificates
+
 ENV GOPROXY=https://goproxy.cn,direct
 
 COPY go.mod go.sum ./

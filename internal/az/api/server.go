@@ -44,6 +44,9 @@ func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, asynqInspector 
 		asynqInspector:    asynqInspector,
 	}
 
+	// 初始化DTM Barrier
+	server.initBarrierDB()
+
 	server.setupRoutes()
 
 	return server
@@ -70,6 +73,12 @@ func (s *Server) setupRoutes() {
 		api.GET("/task/:task_id", s.getTaskByID)
 
 		api.GET("/health", s.health)
+
+		// DTM Saga接口
+		api.POST("/dtm/vpc", s.createVPCAction)
+		api.POST("/dtm/vpc/compensate", s.compensateVPCAction)
+		api.POST("/dtm/subnet", s.createSubnetAction)
+		api.POST("/dtm/subnet/compensate", s.compensateSubnetAction)
 	}
 }
 

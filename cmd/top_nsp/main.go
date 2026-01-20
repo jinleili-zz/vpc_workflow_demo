@@ -33,7 +33,7 @@ func main() {
 
 	reg := registry.NewRegistry(redisClient)
 
-	orch := orchestrator.NewOrchestrator(reg)
+	orch := orchestrator.NewOrchestrator(reg, cfg.TopNSP.DTMServerAddr)
 
 	server := api.NewServer(reg, orch)
 

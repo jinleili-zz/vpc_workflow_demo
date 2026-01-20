@@ -38,8 +38,9 @@ type RedisConfig struct {
 
 // TopNSPConfig Top NSP配置
 type TopNSPConfig struct {
-	AZNSPPrefix string
-	AZNSPPort   int
+	AZNSPPrefix   string
+	AZNSPPort     int
+	DTMServerAddr string
 }
 
 // AZNSPConfig AZ NSP配置
@@ -67,8 +68,9 @@ func LoadConfig() *NSPConfig {
 		},
 
 		TopNSP: TopNSPConfig{
-			AZNSPPrefix: getEnv("AZ_NSP_PREFIX", "az-nsp"),
-			AZNSPPort:   getEnvInt("AZ_NSP_PORT", 8080),
+			AZNSPPrefix:   getEnv("AZ_NSP_PREFIX", "az-nsp"),
+			AZNSPPort:     getEnvInt("AZ_NSP_PORT", 8080),
+			DTMServerAddr: getEnv("DTM_SERVER_ADDR", "http://dtm:36789/api/dtmsvr"),
 		},
 
 		AZNSP: AZNSPConfig{

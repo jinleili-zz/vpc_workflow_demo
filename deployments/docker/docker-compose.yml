@@ -89,6 +89,30 @@ services:
       retries: 5
     command: --default-authentication-plugin=mysql_native_password
 
+  dtm:
+    image: yedf/dtm:latest
+    container_name: dtm-server
+    environment:
+      - STORE_DRIVER=mysql
+      - STORE_HOST=mysql
+      - STORE_PORT=3306
+      - STORE_USER=nsp_user
+      - STORE_PASSWORD=nsp_password
+      - STORE_DB=dtm_db
+    ports:
+      - "36789:36789"
+      - "36790:36790"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - nsp-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:36789/api/dtmsvr/newGid"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   top-nsp:
     image: nsp-top:latest
     container_name: top-nsp
@@ -100,11 +124,14 @@ services:
       - REDIS_BROKER_DB=1
       - AZ_NSP_PREFIX=az-nsp
       - AZ_NSP_PORT=8080
+      - DTM_SERVER_ADDR=http://dtm:36789/api/dtmsvr
     ports:
       - "8080:8080"
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
+      dtm:
+        condition: service_healthy
     networks:
       - nsp-network
     healthcheck:
