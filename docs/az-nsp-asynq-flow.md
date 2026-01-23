@@ -3,9 +3,9 @@
 ```mermaid
 flowchart LR
     subgraph AZ_NSP[AZ NSP]
-        API[API 处理器<br/>(创建 VPC/子网请求)]
-        Orchestrator[编排器<br/>(任务链/流程控制)]
-        AsynqClient[asynq.Client<br/>(入队任务)]
+        API[API 处理器]\n(创建 VPC/子网请求)
+        Orchestrator[编排器]\n(任务链/流程控制)
+        AsynqClient[asynq.Client]\n(入队任务)
     end
 
     subgraph Redis[Redis / Asynq Broker]
@@ -13,9 +13,9 @@ flowchart LR
     end
 
     subgraph Workers[Workers]
-        SwitchWorker[交换机 Worker<br/>(create_vrf_on_switch)]
-        VlanWorker[VLAN Worker<br/>(create_vlan_subinterface)]
-        FirewallWorker[防火墙 Worker<br/>(create_firewall_zone)]
+        SwitchWorker[交换机 Worker]\n(create_vrf_on_switch)
+        VlanWorker[VLAN Worker]\n(create_vlan_subinterface)
+        FirewallWorker[防火墙 Worker]\n(create_firewall_zone)
     end
 
     API --> Orchestrator --> AsynqClient -->|enqueue| Queue
