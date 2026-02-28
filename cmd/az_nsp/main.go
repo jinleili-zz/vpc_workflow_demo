@@ -28,6 +28,19 @@ func getEnvOrDefault(key, defaultValue string) string {
 }
 
 func main() {
+	// Get region and az first for logger initialization
+	region := os.Getenv("REGION")
+	az := os.Getenv("AZ")
+	
+	// Initialize logger with service name
+	serviceName := fmt.Sprintf("az-nsp-vpc-%s", az)
+	logCfg := logger.DefaultConfig(serviceName)
+	if err := logger.Init(logCfg); err != nil {
+		fmt.Printf("Failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+	defer logger.Sync()
+
 	logger.Info("========================================")
 	logger.Info("AZ NSP 启动中...")
 	logger.Info("========================================")
@@ -35,8 +48,6 @@ func main() {
 	cfg := config.LoadConfig()
 	cfg.ServiceType = "az"
 
-	region := os.Getenv("REGION")
-	az := os.Getenv("AZ")
 	port := os.Getenv("PORT")
 	topNSPAddr := os.Getenv("TOP_NSP_ADDR")
 

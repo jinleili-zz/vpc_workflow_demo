@@ -31,9 +31,18 @@ func NewOrchestrator(registry *registry.Registry, topDB *sql.DB, sagaEngine *sag
 	if topDB != nil {
 		dao = topdao.NewTopVPCDAO(topDB)
 	}
+	
+	// Create AZ client with trace support
+	var azClient *client.AZNSPClient
+	if tracedHTTP != nil {
+		azClient = client.NewAZNSPClientWithTrace(tracedHTTP)
+	} else {
+		azClient = client.NewAZNSPClient()
+	}
+	
 	return &Orchestrator{
 		registry:   registry,
-		azClient:   client.NewAZNSPClient(),
+		azClient:   azClient,
 		topDAO:     dao,
 		sagaEngine: sagaEngine,
 		tracedHTTP: tracedHTTP,

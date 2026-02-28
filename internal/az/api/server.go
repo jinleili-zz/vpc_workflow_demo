@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/hibiken/asynq"
 	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/yourorg/nsp-common/pkg/trace"
 )
 
 type Server struct {
@@ -31,6 +32,12 @@ type Server struct {
 
 func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, asynqInspector *asynq.Inspector, db *sql.DB) *Server {
 	router := gin.New()
+	router.Use(gin.Recovery())
+	
+	// Add trace middleware for distributed tracing
+	instanceID := fmt.Sprintf("az-nsp-vpc-%s-%s", cfg.Region, cfg.AZ)
+	router.Use(trace.TraceMiddleware(instanceID))
+	router.Use(ginLoggerMiddleware())
 
 	orch := orchestrator.NewAZOrchestrator(db, asynqClient, cfg.Region, cfg.AZ)
 	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ)
@@ -47,6 +54,27 @@ func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, asynqInspector 
 	server.setupRoutes()
 
 	return server
+}
+
+// ginLoggerMiddleware logs HTTP requests with trace context
+func ginLoggerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+
+		c.Next()
+
+		ctx := c.Request.Context()
+		latency := time.Since(start)
+
+		logger.InfoContext(ctx, "http request",
+			"method", c.Request.Method,
+			"path", path,
+			"status", c.Writer.Status(),
+			"latency_ms", latency.Milliseconds(),
+			"client_ip", c.ClientIP(),
+		)
+	}
 }
 
 func (s *Server) setupRoutes() {
@@ -83,7 +111,7 @@ func (s *Server) createVPC(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateVPC(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.VPCResponse{
@@ -98,7 +126,7 @@ func (s *Server) createVPC(c *gin.Context) {
 
 func (s *Server) getVPCStatus(c *gin.Context) {
 	vpcName := c.Param("vpc_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	status, err := s.orchestrator.GetVPCStatus(ctx, vpcName)
 	if err != nil {
@@ -114,7 +142,7 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 
 func (s *Server) deleteVPC(c *gin.Context) {
 	vpcName := c.Param("vpc_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	err := s.orchestrator.DeleteVPC(ctx, vpcName)
 	if err != nil {
@@ -141,7 +169,7 @@ func (s *Server) createSubnet(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateSubnet(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
@@ -156,7 +184,7 @@ func (s *Server) createSubnet(c *gin.Context) {
 
 func (s *Server) getSubnetStatus(c *gin.Context) {
 	subnetName := c.Param("subnet_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	status, err := s.orchestrator.GetSubnetStatus(ctx, subnetName)
 	if err != nil {
@@ -172,7 +200,7 @@ func (s *Server) getSubnetStatus(c *gin.Context) {
 
 func (s *Server) deleteSubnet(c *gin.Context) {
 	subnetName := c.Param("subnet_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	err := s.orchestrator.DeleteSubnet(ctx, subnetName)
 	if err != nil {
@@ -190,7 +218,7 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 }
 
 func (s *Server) listVPCs(c *gin.Context) {
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	vpcs, err := s.orchestrator.ListVPCs(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -208,7 +236,7 @@ func (s *Server) listVPCs(c *gin.Context) {
 
 func (s *Server) getVPCByID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	vpc, err := s.orchestrator.GetVPCByID(ctx, vpcID)
 	if err != nil {
@@ -227,7 +255,7 @@ func (s *Server) getVPCByID(c *gin.Context) {
 
 func (s *Server) deleteVPCByID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	err := s.orchestrator.DeleteVPCByID(ctx, vpcID)
 	if err != nil {
@@ -246,7 +274,7 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 
 func (s *Server) listSubnetsByVPCID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	subnets, err := s.orchestrator.ListSubnetsByVPCID(ctx, vpcID)
 	if err != nil {
@@ -265,7 +293,7 @@ func (s *Server) listSubnetsByVPCID(c *gin.Context) {
 
 func (s *Server) getSubnetByID(c *gin.Context) {
 	subnetID := c.Param("subnet_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	subnet, err := s.orchestrator.GetSubnetByID(ctx, subnetID)
 	if err != nil {
@@ -284,7 +312,7 @@ func (s *Server) getSubnetByID(c *gin.Context) {
 
 func (s *Server) deleteSubnetByID(c *gin.Context) {
 	subnetID := c.Param("subnet_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	err := s.orchestrator.DeleteSubnetByID(ctx, subnetID)
 	if err != nil {
@@ -330,7 +358,7 @@ func (s *Server) HandleTaskCallback() func(context.Context, *asynq.Task) error {
 
 func (s *Server) replayTask(c *gin.Context) {
 	taskID := c.Param("task_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	task, err := s.orchestrator.GetTaskByID(ctx, taskID)
 	if err != nil {
@@ -366,7 +394,7 @@ func (s *Server) replayTask(c *gin.Context) {
 
 func (s *Server) getTaskByID(c *gin.Context) {
 	taskID := c.Param("task_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	task, err := s.orchestrator.GetTaskByID(ctx, taskID)
 	if err != nil {

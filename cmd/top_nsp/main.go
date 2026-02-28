@@ -50,6 +50,7 @@ func main() {
 	bootstrapCfg := bootstrap.DefaultConfig("top-nsp-vpc")
 	bootstrapCfg.PostgresDSN = postgresDSN
 	bootstrapCfg.EnableSaga = true
+	bootstrapCfg.EnableAuth = false // Disable auth for testing
 	bootstrapCfg.SkipAuthPaths = []string{
 		"/api/v1/health",
 		"/api/v1/register/az",
@@ -84,8 +85,11 @@ func main() {
 	// Initialize API server
 	server := api.NewServer(reg, orch)
 
-	// Setup middlewares (trace, auth, logger)
+	// Setup middlewares (trace, auth, logger) BEFORE routes
 	components.SetupGinMiddlewares(server.Engine())
+	
+	// Now setup routes AFTER middlewares
+	server.SetupRoutes()
 
 	// Start server
 	addr := ":" + port

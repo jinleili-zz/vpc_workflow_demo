@@ -20,7 +20,7 @@ type Server struct {
 	router       *gin.Engine
 }
 
-// NewServer 创建Top NSP服务器
+// NewServer 创建Top NSP服务器 (不立即设置路由，等待中间件配置后再调用 SetupRoutes)
 func NewServer(reg *registry.Registry, orch *orchestrator.Orchestrator) *Server {
 	router := gin.New()
 
@@ -30,10 +30,12 @@ func NewServer(reg *registry.Registry, orch *orchestrator.Orchestrator) *Server 
 		router:       router,
 	}
 
-	// 注册路由
-	server.setupRoutes()
-
 	return server
+}
+
+// SetupRoutes 设置路由 (应在中间件配置之后调用)
+func (s *Server) SetupRoutes() {
+	s.setupRoutes()
 }
 
 // Engine 返回底层的gin.Engine

@@ -51,7 +51,8 @@ func (c *AZNSPClient) CreateVPC(ctx context.Context, azAddr string, req *models.
 		resp, err = c.tracedClient.Post(ctx, url, "application/json", bytes.NewBuffer(body))
 	} else {
 		// 使用普通客户端
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+		var httpReq *http.Request
+		httpReq, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
 		if err != nil {
 			return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 		}
@@ -97,7 +98,8 @@ func (c *AZNSPClient) CreateSubnet(ctx context.Context, azAddr string, req *mode
 		resp, err = c.tracedClient.Post(ctx, url, "application/json", bytes.NewBuffer(body))
 	} else {
 		// 使用普通客户端
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+		var httpReq *http.Request
+		httpReq, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
 		if err != nil {
 			return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 		}
@@ -139,7 +141,8 @@ func (c *AZNSPClient) HealthCheck(ctx context.Context, azAddr string) error {
 		resp, err = c.tracedClient.Get(ctx, url)
 	} else {
 		// 使用普通客户端
-		httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		var httpReq *http.Request
+		httpReq, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			return fmt.Errorf("创建HTTP请求失败: %v", err)
 		}
