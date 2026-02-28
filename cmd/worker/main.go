@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"workflow_qoder/internal/config"
+	"workflow_qoder/internal/logging"
 	"workflow_qoder/internal/queue"
 	"workflow_qoder/tasks"
 
@@ -109,6 +110,7 @@ func main() {
 			Concurrency:    workerCount,
 			Queues:         queuesConfig,
 			StrictPriority: true,
+			Logger:         logging.GetAsynqAdapter().GetAsynqLogger(),
 		},
 	)
 

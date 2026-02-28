@@ -14,6 +14,7 @@ import (
 	"github.com/yourorg/nsp-common/pkg/logger"
 	"github.com/yourorg/nsp-common/pkg/saga"
 	"github.com/yourorg/nsp-common/pkg/trace"
+	"workflow_qoder/internal/logging"
 )
 
 // Config holds the bootstrap configuration
@@ -133,6 +134,10 @@ func (c *Components) initLogger() error {
 	}
 	
 	c.Logger = logger.GetLogger()
+	
+	// Setup third-party framework logging adapters
+	logging.SetupAllAdapters()
+	
 	return nil
 }
 
