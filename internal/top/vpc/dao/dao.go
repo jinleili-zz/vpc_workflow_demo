@@ -23,13 +23,13 @@ func NewTopVPCDAO(db *sql.DB) *TopVPCDAO {
 func (d *TopVPCDAO) RegisterVPC(ctx context.Context, vpc *models.VPCRegistry) error {
 	query := `
 		INSERT INTO vpc_registry (id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-		az_vpc_id = VALUES(az_vpc_id),
-		vrf_name = VALUES(vrf_name),
-		vlan_id = VALUES(vlan_id),
-		firewall_zone = VALUES(firewall_zone),
-		status = VALUES(status),
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (vpc_name, az) DO UPDATE SET
+		az_vpc_id = EXCLUDED.az_vpc_id,
+		vrf_name = EXCLUDED.vrf_name,
+		vlan_id = EXCLUDED.vlan_id,
+		firewall_zone = EXCLUDED.firewall_zone,
+		status = EXCLUDED.status,
 		updated_at = CURRENT_TIMESTAMP
 	`
 	_, err := d.db.ExecContext(ctx, query,
@@ -40,7 +40,7 @@ func (d *TopVPCDAO) RegisterVPC(ctx context.Context, vpc *models.VPCRegistry) er
 }
 
 func (d *TopVPCDAO) UpdateVPCStatus(ctx context.Context, vpcName, az, status string) error {
-	query := `UPDATE vpc_registry SET status = ?, updated_at = ? WHERE vpc_name = ? AND az = ?`
+	query := `UPDATE vpc_registry SET status = $1, updated_at = $2 WHERE vpc_name = $3 AND az = $4`
 	_, err := d.db.ExecContext(ctx, query, status, time.Now(), vpcName, az)
 	return err
 }
@@ -48,7 +48,7 @@ func (d *TopVPCDAO) UpdateVPCStatus(ctx context.Context, vpcName, az, status str
 func (d *TopVPCDAO) GetVPCByNameAndAZ(ctx context.Context, vpcName, az string) (*models.VPCRegistry, error) {
 	query := `
 		SELECT id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status, created_at, updated_at
-		FROM vpc_registry WHERE vpc_name = ? AND az = ?
+		FROM vpc_registry WHERE vpc_name = $1 AND az = $2
 	`
 	vpc := &models.VPCRegistry{}
 	err := d.db.QueryRowContext(ctx, query, vpcName, az).Scan(
@@ -65,7 +65,7 @@ func (d *TopVPCDAO) GetVPCByNameAndAZ(ctx context.Context, vpcName, az string) (
 func (d *TopVPCDAO) GetVPCsByZone(ctx context.Context, zone string) ([]*models.VPCRegistry, error) {
 	query := `
 		SELECT id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status, created_at, updated_at
-		FROM vpc_registry WHERE firewall_zone = ? AND status = 'running'
+		FROM vpc_registry WHERE firewall_zone = $1 AND status = 'running'
 	`
 	rows, err := d.db.QueryContext(ctx, query, zone)
 	if err != nil {
@@ -89,7 +89,7 @@ func (d *TopVPCDAO) GetVPCsByZone(ctx context.Context, zone string) ([]*models.V
 }
 
 func (d *TopVPCDAO) DeleteVPC(ctx context.Context, vpcName, az string) error {
-	query := `DELETE FROM vpc_registry WHERE vpc_name = ? AND az = ?`
+	query := `DELETE FROM vpc_registry WHERE vpc_name = $1 AND az = $2`
 	_, err := d.db.ExecContext(ctx, query, vpcName, az)
 	return err
 }
@@ -103,12 +103,12 @@ func (d *TopVPCDAO) RegisterSubnet(ctx context.Context, subnet *models.SubnetReg
 
 	query := `
 		INSERT INTO subnet_registry (id, subnet_name, vpc_name, region, az, az_subnet_id, cidr, firewall_zone, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-		az_subnet_id = VALUES(az_subnet_id),
-		cidr = VALUES(cidr),
-		firewall_zone = VALUES(firewall_zone),
-		status = VALUES(status),
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (subnet_name, az) DO UPDATE SET
+		az_subnet_id = EXCLUDED.az_subnet_id,
+		cidr = EXCLUDED.cidr,
+		firewall_zone = EXCLUDED.firewall_zone,
+		status = EXCLUDED.status,
 		updated_at = CURRENT_TIMESTAMP
 	`
 	_, err = tx.ExecContext(ctx, query,
@@ -122,11 +122,11 @@ func (d *TopVPCDAO) RegisterSubnet(ctx context.Context, subnet *models.SubnetReg
 	start, end := cidrToRange(subnet.CIDR)
 	mappingQuery := `
 		INSERT INTO cidr_zone_mapping (id, cidr, cidr_start, cidr_end, vpc_name, subnet_name, region, az, firewall_zone)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-		cidr_start = VALUES(cidr_start),
-		cidr_end = VALUES(cidr_end),
-		firewall_zone = VALUES(firewall_zone)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (cidr, az) DO UPDATE SET
+		cidr_start = EXCLUDED.cidr_start,
+		cidr_end = EXCLUDED.cidr_end,
+		firewall_zone = EXCLUDED.firewall_zone
 	`
 	_, err = tx.ExecContext(ctx, mappingQuery,
 		uuid.New().String(), subnet.CIDR, start, end,
@@ -140,7 +140,7 @@ func (d *TopVPCDAO) RegisterSubnet(ctx context.Context, subnet *models.SubnetReg
 }
 
 func (d *TopVPCDAO) UpdateSubnetStatus(ctx context.Context, subnetName, az, status string) error {
-	query := `UPDATE subnet_registry SET status = ?, updated_at = ? WHERE subnet_name = ? AND az = ?`
+	query := `UPDATE subnet_registry SET status = $1, updated_at = $2 WHERE subnet_name = $3 AND az = $4`
 	_, err := d.db.ExecContext(ctx, query, status, time.Now(), subnetName, az)
 	return err
 }
@@ -153,19 +153,19 @@ func (d *TopVPCDAO) DeleteSubnet(ctx context.Context, subnetName, az string) err
 	defer tx.Rollback()
 
 	var cidr string
-	err = tx.QueryRowContext(ctx, `SELECT cidr FROM subnet_registry WHERE subnet_name = ? AND az = ?`, subnetName, az).Scan(&cidr)
+	err = tx.QueryRowContext(ctx, `SELECT cidr FROM subnet_registry WHERE subnet_name = $1 AND az = $2`, subnetName, az).Scan(&cidr)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
 
 	if cidr != "" {
-		_, err = tx.ExecContext(ctx, `DELETE FROM cidr_zone_mapping WHERE cidr = ? AND az = ?`, cidr, az)
+		_, err = tx.ExecContext(ctx, `DELETE FROM cidr_zone_mapping WHERE cidr = $1 AND az = $2`, cidr, az)
 		if err != nil {
 			return err
 		}
 	}
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM subnet_registry WHERE subnet_name = ? AND az = ?`, subnetName, az)
+	_, err = tx.ExecContext(ctx, `DELETE FROM subnet_registry WHERE subnet_name = $1 AND az = $2`, subnetName, az)
 	if err != nil {
 		return err
 	}
@@ -188,7 +188,7 @@ func (d *TopVPCDAO) FindZoneByIP(ctx context.Context, ipStr string) (*models.Zon
 	query := `
 		SELECT vpc_name, subnet_name, region, az, firewall_zone, cidr
 		FROM cidr_zone_mapping
-		WHERE cidr_start <= ? AND cidr_end >= ?
+		WHERE cidr_start <= $1 AND cidr_end >= $2
 		ORDER BY (cidr_end - cidr_start) ASC
 		LIMIT 1
 	`

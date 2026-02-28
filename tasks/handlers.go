@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/hibiken/asynq"
+	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
 type TaskPayload struct {
@@ -42,7 +42,7 @@ func notifyTaskCompletion(asynqClient *asynq.Client, callbackQueue, taskID, stat
 		return fmt.Errorf("发送回调任务失败: %v", err)
 	}
 
-	log.Printf("[Worker] 任务回调已入队: taskID=%s, status=%s, queue=%s, asynq_id=%s", taskID, status, callbackQueue, info.ID)
+	logger.Info("任务回调已入队", "taskID", taskID, "status", status, "queue", callbackQueue, "asynqID", info.ID)
 	return nil
 }
 
@@ -61,7 +61,7 @@ func CreateVRFOnSwitchHandler(asynqClient *asynq.Client, callbackQueue string) f
 		vpcName := params["vpc_name"].(string)
 		vrfName := params["vrf_name"].(string)
 
-		log.Printf("[Worker] [VRF任务] 开始创建VRF: %s (VPC: %s, TaskID: %s)", vrfName, vpcName, payload.TaskID)
+		logger.InfoContext(ctx, "开始创建VRF", "vrfName", vrfName, "vpcName", vpcName, "taskID", payload.TaskID)
 
 		time.Sleep(2 * time.Second)
 
@@ -71,10 +71,10 @@ func CreateVRFOnSwitchHandler(asynqClient *asynq.Client, callbackQueue string) f
 			"timestamp": time.Now().Unix(),
 		}
 
-		log.Printf("[Worker] [VRF任务] ✓ VRF创建完成: %s", vrfName)
+		logger.InfoContext(ctx, "VRF创建完成", "vrfName", vrfName)
 
 		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
-			log.Printf("[Worker] [VRF任务] 回调失败: %v", err)
+			logger.InfoContext(ctx, "VRF任务回调失败", "error", err)
 			return err
 		}
 
@@ -98,7 +98,7 @@ func CreateVLANSubInterfaceHandler(asynqClient *asynq.Client, callbackQueue stri
 		vrfName := params["vrf_name"].(string)
 		vlanID := int(params["vlan_id"].(float64))
 
-		log.Printf("[Worker] [VLAN任务] 开始创建VLAN子接口: VLAN %d (VPC: %s, TaskID: %s)", vlanID, vpcName, payload.TaskID)
+		logger.InfoContext(ctx, "开始创建VLAN子接口", "vlanID", vlanID, "vpcName", vpcName, "taskID", payload.TaskID)
 
 		time.Sleep(2 * time.Second)
 
@@ -109,10 +109,10 @@ func CreateVLANSubInterfaceHandler(asynqClient *asynq.Client, callbackQueue stri
 			"timestamp": time.Now().Unix(),
 		}
 
-		log.Printf("[Worker] [VLAN任务] ✓ VLAN子接口创建完成: VLAN %d", vlanID)
+		logger.InfoContext(ctx, "VLAN子接口创建完成", "vlanID", vlanID)
 
 		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
-			log.Printf("[Worker] [VLAN任务] 回调失败: %v", err)
+			logger.InfoContext(ctx, "VLAN任务回调失败", "error", err)
 			return err
 		}
 
@@ -135,7 +135,7 @@ func CreateFirewallZoneHandler(asynqClient *asynq.Client, callbackQueue string) 
 		vpcName := params["vpc_name"].(string)
 		firewallZone := params["firewall_zone"].(string)
 
-		log.Printf("[Worker] [防火墙任务] 开始创建安全区域: %s (VPC: %s, TaskID: %s)", firewallZone, vpcName, payload.TaskID)
+		logger.InfoContext(ctx, "开始创建安全区域", "firewallZone", firewallZone, "vpcName", vpcName, "taskID", payload.TaskID)
 
 		time.Sleep(2 * time.Second)
 
@@ -145,11 +145,11 @@ func CreateFirewallZoneHandler(asynqClient *asynq.Client, callbackQueue string) 
 			"timestamp": time.Now().Unix(),
 		}
 
-		log.Printf("[Worker] [防火墙任务] ✓ 防火墙安全区域创建完成: %s", firewallZone)
-		log.Printf("[Worker] ✓✓✓ VPC %s 所有任务执行完成 ✓✓✓", vpcName)
+		logger.InfoContext(ctx, "防火墙安全区域创建完成", "firewallZone", firewallZone)
+		logger.InfoContext(ctx, "VPC所有任务执行完成", "vpcName", vpcName)
 
 		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
-			log.Printf("[Worker] [防火墙任务] 回调失败: %v", err)
+			logger.InfoContext(ctx, "防火墙任务回调失败", "error", err)
 			return err
 		}
 
@@ -173,19 +173,19 @@ func CreateSubnetOnSwitchHandler(asynqClient *asynq.Client, callbackQueue string
 		vpcName := params["vpc_name"].(string)
 		cidr := params["cidr"].(string)
 
-		log.Printf("[Worker] [子网任务] 开始创建子网: %s (CIDR: %s, VPC: %s, TaskID: %s)", subnetName, cidr, vpcName, payload.TaskID)
+		logger.InfoContext(ctx, "开始创建子网", "subnetName", subnetName, "cidr", cidr, "vpcName", vpcName, "taskID", payload.TaskID)
 
 		time.Sleep(2 * time.Second)
 
 		if cidr == "10.0.99.0/24" {
 			errorMsg := fmt.Sprintf("CIDR冲突: %s 在VPC %s 中已存在", cidr, vpcName)
-			log.Printf("[Worker] [子网任务] ✗ 子网创建失败: %s - %s", subnetName, errorMsg)
+			logger.InfoContext(ctx, "子网创建失败", "subnetName", subnetName, "error", errorMsg)
 			
 			if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "failed", nil, errorMsg); err != nil {
-				log.Printf("[Worker] [子网任务] 回调失败: %v", err)
+				logger.InfoContext(ctx, "子网任务回调失败", "error", err)
 				return err
 			}
-			return fmt.Errorf(errorMsg)
+			return fmt.Errorf("%s", errorMsg)
 		}
 
 		result := map[string]interface{}{
@@ -195,10 +195,10 @@ func CreateSubnetOnSwitchHandler(asynqClient *asynq.Client, callbackQueue string
 			"timestamp": time.Now().Unix(),
 		}
 
-		log.Printf("[Worker] [子网任务] ✓ 子网创建完成: %s", subnetName)
+		logger.InfoContext(ctx, "子网创建完成", "subnetName", subnetName)
 
 		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
-			log.Printf("[Worker] [子网任务] 回调失败: %v", err)
+			logger.InfoContext(ctx, "子网任务回调失败", "error", err)
 			return err
 		}
 
@@ -220,7 +220,7 @@ func ConfigureSubnetRoutingHandler(asynqClient *asynq.Client, callbackQueue stri
 
 		subnetName := params["subnet_name"].(string)
 
-		log.Printf("[Worker] [路由任务] 开始配置子网路由: %s (TaskID: %s)", subnetName, payload.TaskID)
+		logger.InfoContext(ctx, "开始配置子网路由", "subnetName", subnetName, "taskID", payload.TaskID)
 
 		time.Sleep(2 * time.Second)
 
@@ -230,11 +230,11 @@ func ConfigureSubnetRoutingHandler(asynqClient *asynq.Client, callbackQueue stri
 			"timestamp": time.Now().Unix(),
 		}
 
-		log.Printf("[Worker] [路由任务] ✓ 子网路由配置完成: %s", subnetName)
-		log.Printf("[Worker] ✓✓✓ 子网 %s 所有任务执行完成 ✓✓✓", subnetName)
+		logger.InfoContext(ctx, "子网路由配置完成", "subnetName", subnetName)
+		logger.InfoContext(ctx, "子网所有任务执行完成", "subnetName", subnetName)
 
 		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
-			log.Printf("[Worker] [路由任务] 回调失败: %v", err)
+			logger.InfoContext(ctx, "路由任务回调失败", "error", err)
 			return err
 		}
 
@@ -259,7 +259,7 @@ func CreateLBPoolHandler(asynqClient *asynq.Client, callbackQueue string) func(c
 			poolName = name
 		}
 
-		log.Printf("[Worker] [负载均衡任务] 开始创建LB Pool: %s (TaskID: %s)", poolName, payload.TaskID)
+		logger.InfoContext(ctx, "开始创建LB Pool", "poolName", poolName, "taskID", payload.TaskID)
 
 		time.Sleep(2 * time.Second)
 
@@ -269,10 +269,10 @@ func CreateLBPoolHandler(asynqClient *asynq.Client, callbackQueue string) func(c
 			"timestamp": time.Now().Unix(),
 		}
 
-		log.Printf("[Worker] [负载均衡任务] ✓ LB Pool创建完成: %s", poolName)
+		logger.InfoContext(ctx, "LB Pool创建完成", "poolName", poolName)
 
 		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
-			log.Printf("[Worker] [负载均衡任务] 回调失败: %v", err)
+			logger.InfoContext(ctx, "负载均衡任务回调失败", "error", err)
 			return err
 		}
 
@@ -297,7 +297,7 @@ func ConfigureLBListenerHandler(asynqClient *asynq.Client, callbackQueue string)
 			listenerName = name
 		}
 
-		log.Printf("[Worker] [负载均衡任务] 开始配置LB Listener: %s (TaskID: %s)", listenerName, payload.TaskID)
+		logger.InfoContext(ctx, "开始配置LB Listener", "listenerName", listenerName, "taskID", payload.TaskID)
 
 		time.Sleep(2 * time.Second)
 
@@ -307,10 +307,10 @@ func ConfigureLBListenerHandler(asynqClient *asynq.Client, callbackQueue string)
 			"timestamp":     time.Now().Unix(),
 		}
 
-		log.Printf("[Worker] [负载均衡任务] ✓ LB Listener配置完成: %s", listenerName)
+		logger.InfoContext(ctx, "LB Listener配置完成", "listenerName", listenerName)
 
 		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
-			log.Printf("[Worker] [负载均衡任务] 回调失败: %v", err)
+			logger.InfoContext(ctx, "负载均衡任务回调失败", "error", err)
 			return err
 		}
 
@@ -339,8 +339,8 @@ func CreateFirewallPolicyHandler(asynqClient *asynq.Client, callbackQueue string
 		protocol := params["protocol"].(string)
 		action := params["action"].(string)
 
-		log.Printf("[Worker] [防火墙策略任务] 开始创建策略: %s (TaskID: %s)", policyName, payload.TaskID)
-		log.Printf("[Worker] [防火墙策略任务] 规则: %s:%s -> %s:%s/%s %s", sourceZone, sourceIP, destZone, destIP, destPort, protocol)
+		logger.InfoContext(ctx, "开始创建防火墙策略", "policyName", policyName, "taskID", payload.TaskID)
+		logger.InfoContext(ctx, "防火墙策略规则", "sourceZone", sourceZone, "sourceIP", sourceIP, "destZone", destZone, "destIP", destIP, "destPort", destPort, "protocol", protocol)
 
 		time.Sleep(2 * time.Second)
 
@@ -365,10 +365,10 @@ security-policy
 			"timestamp":   time.Now().Unix(),
 		}
 
-		log.Printf("[Worker] [防火墙策略任务] ✓ 策略创建完成: %s", policyName)
+		logger.InfoContext(ctx, "防火墙策略创建完成", "policyName", policyName)
 
 		if err := notifyTaskCompletion(asynqClient, callbackQueue, payload.TaskID, "completed", result, ""); err != nil {
-			log.Printf("[Worker] [防火墙策略任务] 回调失败: %v", err)
+			logger.InfoContext(ctx, "防火墙策略任务回调失败", "error", err)
 			return err
 		}
 

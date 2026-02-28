@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"log"
+	"database/sql"
+	"fmt"
 	"os"
 	"os/signal"
 	"strconv"
@@ -12,16 +13,24 @@ import (
 
 	"workflow_qoder/internal/az/api"
 	"workflow_qoder/internal/config"
-	"workflow_qoder/internal/db"
 	"workflow_qoder/internal/queue"
 
 	"github.com/hibiken/asynq"
+	_ "github.com/lib/pq"
+	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
+func getEnvOrDefault(key, defaultValue string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultValue
+}
+
 func main() {
-	log.Println("========================================")
-	log.Println("AZ NSP 启动中...")
-	log.Println("========================================")
+	logger.Info("========================================")
+	logger.Info("AZ NSP 启动中...")
+	logger.Info("========================================")
 
 	cfg := config.LoadConfig()
 	cfg.ServiceType = "az"
@@ -32,7 +41,8 @@ func main() {
 	topNSPAddr := os.Getenv("TOP_NSP_ADDR")
 
 	if region == "" || az == "" {
-		log.Fatal("必须设置环境变量 REGION 和 AZ")
+		logger.Error("必须设置环境变量 REGION 和 AZ")
+		os.Exit(1)
 	}
 
 	if topNSPAddr == "" {
@@ -50,21 +60,38 @@ func main() {
 	cfg.Port = portInt
 	cfg.AZNSP.TopNSPAddr = topNSPAddr
 
-	log.Printf("[AZ NSP] Region=%s, AZ=%s, Port=%d", region, az, portInt)
-	log.Printf("[AZ NSP] Top NSP地址: %s", topNSPAddr)
+	logger.Info("[AZ NSP] 服务配置", "region", region, "az", az, "port", portInt)
+	logger.Info("[AZ NSP] Top NSP地址", "addr", topNSPAddr)
 
-	mysqlCfg := db.LoadMySQLConfig()
-	if err := db.InitMySQL(mysqlCfg); err != nil {
-		log.Fatalf("[AZ NSP] MySQL初始化失败: %v", err)
+	// Build PostgreSQL DSN
+	pgHost := getEnvOrDefault("POSTGRES_HOST", "postgres")
+	pgPort := getEnvOrDefault("POSTGRES_PORT", "5432")
+	pgUser := getEnvOrDefault("POSTGRES_USER", "nsp_user")
+	pgPassword := getEnvOrDefault("POSTGRES_PASSWORD", "nsp_password")
+	dbName := fmt.Sprintf("nsp_%s_%s_vpc", strings.ReplaceAll(region, "-", "_"), strings.ReplaceAll(az, "-", "_"))
+	postgresDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", pgUser, pgPassword, pgHost, pgPort, dbName)
+
+	// Connect to PostgreSQL
+	var pgDB *sql.DB
+	var err error
+	for i := 0; i < 30; i++ {
+		pgDB, err = sql.Open("postgres", postgresDSN)
+		if err == nil {
+			if err = pgDB.Ping(); err == nil {
+				break
+			}
+			pgDB.Close()
+		}
+		logger.Info("等待 PostgreSQL 就绪...", "attempt", i+1)
+		time.Sleep(2 * time.Second)
 	}
-	defer db.Close()
-
-	mysqlDB := db.GetDB()
-
-	migrationDir := "./internal/db/migrations"
-	if err := db.RunMigrations(mysqlDB, migrationDir); err != nil {
-		log.Printf("[AZ NSP] 数据库迁移失败: %v (可能已执行过)", err)
+	if err != nil {
+		logger.Error("PostgreSQL 连接失败", "error", err)
+		os.Exit(1)
 	}
+	defer pgDB.Close()
+
+	logger.Info("[AZ NSP] PostgreSQL 连接成功", "database", dbName)
 
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
@@ -103,10 +130,10 @@ func main() {
 
 	callbackQueueName := queue.GetCallbackQueueName(region, az)
 
-	server := api.NewServer(cfg, asynqClient, asynqInspector, mysqlDB)
+	server := api.NewServer(cfg, asynqClient, asynqInspector, pgDB)
 
 	if err := server.RegisterToTopNSP(); err != nil {
-		log.Printf("[AZ NSP %s] 注册到Top NSP失败: %v (将在后续心跳中重试)", az, err)
+		logger.Info("[AZ NSP] 注册到Top NSP失败 (将在后续心跳中重试)", "az", az, "error", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -140,17 +167,19 @@ func main() {
 	mux.HandleFunc("task_callback", server.HandleTaskCallback())
 
 	go func() {
-		log.Printf("[AZ NSP %s] 回调处理器启动, 队列=%s", az, callbackQueueName)
+		logger.Info("[AZ NSP] 回调处理器启动", "az", az, "queue", callbackQueueName)
 		if err := asynqServer.Run(mux); err != nil {
-			log.Fatalf("[AZ NSP %s] 回调处理器启动失败: %v", az, err)
+			logger.Error("[AZ NSP] 回调处理器启动失败", "az", az, "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	go func() {
 		addr := ":" + port
-		log.Printf("[AZ NSP %s] API服务启动在端口 %s", az, port)
+		logger.Info("[AZ NSP] API服务启动", "az", az, "port", port)
 		if err := server.Run(addr); err != nil {
-			log.Fatalf("[AZ NSP %s] API服务启动失败: %v", az, err)
+			logger.Error("[AZ NSP] API服务启动失败", "az", az, "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -158,7 +187,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Printf("[AZ NSP %s] 收到退出信号，正在关闭...", az)
+	logger.Info("[AZ NSP] 收到退出信号，正在关闭...", "az", az)
 
 	cancel()
 
@@ -168,5 +197,5 @@ func main() {
 	asynqServer.Shutdown()
 
 	<-shutdownCtx.Done()
-	log.Printf("[AZ NSP %s] 服务已关闭", az)
+	logger.Info("[AZ NSP] 服务已关闭", "az", az)
 }

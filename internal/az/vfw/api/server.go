@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"time"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/hibiken/asynq"
+	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
 type Server struct {
@@ -28,17 +28,17 @@ type Server struct {
 	callbackQueueName string
 }
 
-func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, mysqlDB *sql.DB) *Server {
+func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, db *sql.DB) *Server {
 	router := gin.Default()
 
-	orch := orchestrator.NewVFWOrchestrator(mysqlDB, asynqClient, cfg.Region, cfg.AZ)
+	orch := orchestrator.NewVFWOrchestrator(db, asynqClient, cfg.Region, cfg.AZ)
 	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ) + "_vfw"
 
 	server := &Server{
 		cfg:               cfg,
 		orchestrator:      orch,
 		router:            router,
-		db:                mysqlDB,
+		db:                db,
 		callbackQueueName: callbackQueueName,
 	}
 
@@ -189,16 +189,16 @@ func (s *Server) HandleTaskCallback() func(context.Context, *asynq.Task) error {
 			return fmt.Errorf("解析回调载荷失败: %v", err)
 		}
 
-		log.Printf("[AZ NSP VFW %s] 收到任务回调: taskID=%s, status=%s", s.cfg.AZ, payload.TaskID, payload.Status)
+		logger.InfoContext(ctx, "收到任务回调", "az", s.cfg.AZ, "task_id", payload.TaskID, "status", payload.Status)
 
 		status := models.TaskStatus(payload.Status)
 		err := s.orchestrator.HandleTaskCallback(ctx, payload.TaskID, status, payload.Result, payload.ErrorMessage)
 		if err != nil {
-			log.Printf("[AZ NSP VFW %s] 任务回调处理失败: %v", s.cfg.AZ, err)
+			logger.ErrorContext(ctx, "任务回调处理失败", "az", s.cfg.AZ, "error", err)
 			return err
 		}
 
-		log.Printf("[AZ NSP VFW %s] 任务回调处理成功: taskID=%s", s.cfg.AZ, payload.TaskID)
+		logger.InfoContext(ctx, "任务回调处理成功", "az", s.cfg.AZ, "task_id", payload.TaskID)
 		return nil
 	}
 }
@@ -217,7 +217,7 @@ func (s *Server) health(c *gin.Context) {
 }
 
 func (s *Server) Run(addr string) error {
-	log.Printf("[AZ NSP VFW %s] 服务启动在 %s", s.cfg.AZ, addr)
+	logger.Info("AZ NSP VFW 服务启动", "az", s.cfg.AZ, "addr", addr)
 	return s.router.Run(addr)
 }
 
@@ -255,7 +255,7 @@ func (s *Server) RegisterToTopNSP() error {
 		return fmt.Errorf("注册失败，状态码: %d", resp.StatusCode)
 	}
 
-	log.Printf("[AZ NSP VFW %s] 成功注册到Top NSP VFW: %s", s.cfg.AZ, topNSPVFWAddr)
+	logger.Info("成功注册到Top NSP VFW", "az", s.cfg.AZ, "top_addr", topNSPVFWAddr)
 	return nil
 }
 
@@ -278,21 +278,21 @@ func (s *Server) StartHeartbeat(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[AZ NSP VFW %s] 心跳停止", s.cfg.AZ)
+			logger.Info("心跳停止", "az", s.cfg.AZ)
 			return
 		case <-ticker.C:
 			body, _ := json.Marshal(reqData)
 			resp, err := http.Post(heartbeatURL, "application/json", bytes.NewBuffer(body))
 			if err != nil {
-				log.Printf("[AZ NSP VFW %s] 心跳发送失败: %v", s.cfg.AZ, err)
+				logger.Warn("心跳发送失败", "az", s.cfg.AZ, "error", err)
 				continue
 			}
 			resp.Body.Close()
 
 			if resp.StatusCode == http.StatusOK {
-				log.Printf("[AZ NSP VFW %s] 心跳成功", s.cfg.AZ)
+				logger.Debug("心跳成功", "az", s.cfg.AZ)
 			} else {
-				log.Printf("[AZ NSP VFW %s] 心跳失败，状态码: %d", s.cfg.AZ, resp.StatusCode)
+				logger.Warn("心跳失败", "az", s.cfg.AZ, "status_code", resp.StatusCode)
 			}
 		}
 	}

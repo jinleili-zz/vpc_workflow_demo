@@ -5,9 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
+
+	"github.com/yourorg/nsp-common/pkg/logger"
 
 	"workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"
@@ -38,7 +39,7 @@ func NewAZOrchestrator(db *sql.DB, asynqClient *asynq.Client, region, az string)
 }
 
 func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) (*models.VPCResponse, error) {
-	log.Printf("[AZ Orchestrator %s] 开始创建VPC: %s", o.az, req.VPCName)
+	logger.InfoContext(ctx, "开始创建VPC", "az", o.az, "vpcName", req.VPCName)
 
 	vpcID := uuid.New().String()
 	
@@ -93,7 +94,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 		}, nil
 	}
 
-	log.Printf("[AZ Orchestrator %s] VPC创建流程启动成功: %s (ID: %s)", o.az, req.VPCName, vpcID)
+	logger.InfoContext(ctx, "VPC创建流程启动成功", "az", o.az, "vpcName", req.VPCName, "vpcID", vpcID)
 
 	return &models.VPCResponse{
 		Success:    true,
@@ -167,7 +168,7 @@ func (o *AZOrchestrator) buildVPCTaskParams(req *models.VPCRequest) string {
 }
 
 func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetRequest) (*models.SubnetResponse, error) {
-	log.Printf("[AZ Orchestrator %s] 开始创建子网: %s", o.az, req.SubnetName)
+	logger.InfoContext(ctx, "开始创建子网", "az", o.az, "subnetName", req.SubnetName)
 
 	subnetID := uuid.New().String()
 	
@@ -221,7 +222,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 		}, nil
 	}
 
-	log.Printf("[AZ Orchestrator %s] 子网创建流程启动成功: %s (ID: %s)", o.az, req.SubnetName, subnetID)
+	logger.InfoContext(ctx, "子网创建流程启动成功", "az", o.az, "subnetName", req.SubnetName, "subnetID", subnetID)
 
 	return &models.SubnetResponse{
 		Success:    true,
@@ -328,12 +329,12 @@ func (o *AZOrchestrator) enqueueTask(ctx context.Context, task *models.Task) err
 		return fmt.Errorf("更新任务状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] 任务已入队: %s (AsynqID: %s, Queue: %s, Priority: %d)", o.az, task.TaskName, info.ID, queueName, priority)
+	logger.InfoContext(ctx, "任务已入队", "az", o.az, "taskName", task.TaskName, "asynqID", info.ID, "queue", queueName, "priority", priority)
 	return nil
 }
 
 func (o *AZOrchestrator) HandleTaskCallback(ctx context.Context, taskID string, status models.TaskStatus, result interface{}, errorMsg string) error {
-	log.Printf("[AZ Orchestrator %s] 接收到任务回调: taskID=%s, status=%s", o.az, taskID, status)
+	logger.InfoContext(ctx, "接收到任务回调", "az", o.az, "taskID", taskID, "status", status)
 
 	task, err := o.taskDAO.GetByID(ctx, taskID)
 	if err != nil {
@@ -403,7 +404,7 @@ func (o *AZOrchestrator) handleTaskFailure(ctx context.Context, task *models.Tas
 		}
 	}
 
-	log.Printf("[AZ Orchestrator %s] 任务失败，停止后续任务: resourceID=%s", o.az, task.ResourceID)
+	logger.InfoContext(ctx, "任务失败，停止后续任务", "az", o.az, "resourceID", task.ResourceID)
 	return nil
 }
 
@@ -413,19 +414,19 @@ func (o *AZOrchestrator) checkAndCompleteResource(ctx context.Context, resourceI
 		return fmt.Errorf("获取任务统计失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] 任务统计: total=%d, completed=%d, failed=%d", o.az, total, completed, failed)
+	logger.InfoContext(ctx, "任务统计", "az", o.az, "total", total, "completed", completed, "failed", failed)
 
 	if completed == total && failed == 0 {
 		if resourceType == models.ResourceTypeVPC {
 			if err := o.vpcDAO.UpdateStatus(ctx, resourceID, models.ResourceStatusRunning, ""); err != nil {
 				return fmt.Errorf("更新VPC状态为running失败: %v", err)
 			}
-			log.Printf("[AZ Orchestrator %s] VPC创建完成: resourceID=%s", o.az, resourceID)
+			logger.InfoContext(ctx, "VPC创建完成", "az", o.az, "resourceID", resourceID)
 		} else if resourceType == models.ResourceTypeSubnet {
 			if err := o.subnetDAO.UpdateStatus(ctx, resourceID, models.ResourceStatusRunning, ""); err != nil {
 				return fmt.Errorf("更新子网状态为running失败: %v", err)
 			}
-			log.Printf("[AZ Orchestrator %s] 子网创建完成: resourceID=%s", o.az, resourceID)
+			logger.InfoContext(ctx, "子网创建完成", "az", o.az, "resourceID", resourceID)
 		}
 	}
 
@@ -523,7 +524,7 @@ func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 
 	policyCount, err := o.checkZonePolicies(vpc.FirewallZone)
 	if err != nil {
-		log.Printf("[AZ Orchestrator %s] 检查Zone策略失败: %v", o.az, err)
+		logger.InfoContext(ctx, "检查Zone策略失败", "az", o.az, "error", err)
 	}
 	if policyCount > 0 {
 		return fmt.Errorf("Zone %s 中存在%d条防火墙策略，无法删除VPC", vpc.FirewallZone, policyCount)
@@ -533,7 +534,7 @@ func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 		return fmt.Errorf("更新VPC状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] VPC删除成功: %s", o.az, vpcName)
+	logger.InfoContext(ctx, "VPC删除成功", "az", o.az, "vpcName", vpcName)
 	return nil
 }
 
@@ -554,7 +555,7 @@ func (o *AZOrchestrator) DeleteSubnet(ctx context.Context, subnetName string) er
 		return fmt.Errorf("更新子网状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] 子网删除成功: %s", o.az, subnetName)
+	logger.InfoContext(ctx, "子网删除成功", "az", o.az, "subnetName", subnetName)
 	return nil
 }
 
@@ -589,7 +590,7 @@ func (o *AZOrchestrator) DeleteVPCByID(ctx context.Context, vpcID string) error 
 
 	policyCount, err := o.checkZonePolicies(vpc.FirewallZone)
 	if err != nil {
-		log.Printf("[AZ Orchestrator %s] 检查Zone策略失败: %v", o.az, err)
+		logger.InfoContext(ctx, "检查Zone策略失败", "az", o.az, "error", err)
 	}
 	if policyCount > 0 {
 		return fmt.Errorf("Zone %s 中存在%d条防火墙策略，无法删除VPC", vpc.FirewallZone, policyCount)
@@ -599,7 +600,7 @@ func (o *AZOrchestrator) DeleteVPCByID(ctx context.Context, vpcID string) error 
 		return fmt.Errorf("更新VPC状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] VPC删除成功: %s", o.az, vpcID)
+	logger.InfoContext(ctx, "VPC删除成功", "az", o.az, "vpcID", vpcID)
 	return nil
 }
 
@@ -628,7 +629,7 @@ func (o *AZOrchestrator) DeleteSubnetByID(ctx context.Context, subnetID string) 
 		return fmt.Errorf("更新子网状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] 子网删除成功: %s", o.az, subnetID)
+	logger.InfoContext(ctx, "子网删除成功", "az", o.az, "subnetID", subnetID)
 	return nil
 }
 
@@ -654,7 +655,7 @@ func (o *AZOrchestrator) ReplayTask(ctx context.Context, taskID string) error {
 		return fmt.Errorf("重新入队任务失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] 任务重做成功: taskID=%s", o.az, taskID)
+	logger.InfoContext(ctx, "任务重做成功", "az", o.az, "taskID", taskID)
 	return nil
 }
 

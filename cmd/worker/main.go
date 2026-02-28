@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"os"
 	"os/signal"
 	"strconv"
@@ -15,13 +15,10 @@ import (
 	"workflow_qoder/tasks"
 
 	"github.com/hibiken/asynq"
+	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
 func main() {
-	log.Println("========================================")
-	log.Println("Worker 启动中...")
-	log.Println("========================================")
-
 	cfg := config.LoadConfig()
 
 	region := os.Getenv("REGION")
@@ -29,10 +26,25 @@ func main() {
 	workerType := os.Getenv("WORKER_TYPE")
 
 	if region == "" || az == "" || workerType == "" {
-		log.Fatal("必须设置环境变量 REGION, AZ 和 WORKER_TYPE")
+		fmt.Println("必须设置环境变量 REGION, AZ 和 WORKER_TYPE")
+		os.Exit(1)
 	}
 
-	log.Printf("[Worker] Region=%s, AZ=%s, Type=%s", region, az, workerType)
+	// 初始化 logger
+	logCfg := logger.DefaultConfig(fmt.Sprintf("worker-%s", workerType))
+	if os.Getenv("DEVELOPMENT") == "true" {
+		logCfg = logger.DevelopmentConfig(fmt.Sprintf("worker-%s", workerType))
+	}
+	if err := logger.Init(logCfg); err != nil {
+		panic("初始化日志失败: " + err.Error())
+	}
+	defer logger.Sync()
+
+	logger.Info("========================================")
+	logger.Info("Worker 启动中...")
+	logger.Info("========================================")
+
+	logger.Info("Worker 配置", "region", region, "az", az, "type", workerType)
 
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
@@ -53,7 +65,8 @@ func main() {
 	case "firewall":
 		deviceType = queue.DeviceTypeFirewall
 	default:
-		log.Fatalf("不支持的 WORKER_TYPE: %s (支持: switch, loadbalancer, firewall)", workerType)
+		logger.Error("不支持的 WORKER_TYPE", "workerType", workerType, "supported", "switch, loadbalancer, firewall")
+		os.Exit(1)
 	}
 
 	taskQueueName := queue.GetQueueName(region, az, deviceType)
@@ -116,9 +129,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("[Worker %s-%s-%s] 启动, 并发数=%d, 任务队列=%s, 回调队列=%s", region, az, workerType, workerCount, taskQueueName, callbackQueueName)
+		logger.Info("Worker 启动", "region", region, "az", az, "workerType", workerType, "concurrency", workerCount, "taskQueue", taskQueueName, "callbackQueue", callbackQueueName)
 		if err := asynqServer.Run(mux); err != nil {
-			log.Fatalf("[Worker %s-%s-%s] 启动失败: %v", region, az, workerType, err)
+			logger.Error("Worker 启动失败", "region", region, "az", az, "workerType", workerType, "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -126,7 +140,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Printf("[Worker %s-%s-%s] 收到退出信号，正在关闭...", region, az, workerType)
+	logger.Info("Worker 收到退出信号，正在关闭...", "region", region, "az", az, "workerType", workerType)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -134,5 +148,5 @@ func main() {
 	asynqServer.Shutdown()
 
 	<-ctx.Done()
-	log.Printf("[Worker %s-%s-%s] 已关闭", region, az, workerType)
+	logger.Info("Worker 已关闭", "region", region, "az", az, "workerType", workerType)
 }

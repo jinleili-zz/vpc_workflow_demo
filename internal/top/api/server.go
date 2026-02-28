@@ -1,10 +1,8 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 
 	"workflow_qoder/internal/models"
@@ -12,6 +10,7 @@ import (
 	"workflow_qoder/internal/top/registry"
 
 	"github.com/gin-gonic/gin"
+	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
 // Server Top NSP API服务器
@@ -23,7 +22,7 @@ type Server struct {
 
 // NewServer 创建Top NSP服务器
 func NewServer(reg *registry.Registry, orch *orchestrator.Orchestrator) *Server {
-	router := gin.Default()
+	router := gin.New()
 
 	server := &Server{
 		registry:     reg,
@@ -35,6 +34,11 @@ func NewServer(reg *registry.Registry, orch *orchestrator.Orchestrator) *Server 
 	server.setupRoutes()
 
 	return server
+}
+
+// Engine 返回底层的gin.Engine
+func (s *Server) Engine() *gin.Engine {
+	return s.router
 }
 
 // setupRoutes 设置路由
@@ -79,7 +83,7 @@ func (s *Server) registerAZ(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	// 构造AZ信息
 	az := &models.AZ{
@@ -99,7 +103,7 @@ func (s *Server) registerAZ(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[Top NSP] AZ注册成功: Region=%s, AZ=%s, Addr=%s", req.Region, req.AZ, req.NSPAddr)
+	logger.InfoContext(ctx, "AZ注册成功", "region", req.Region, "az", req.AZ, "addr", req.NSPAddr)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -118,7 +122,7 @@ func (s *Server) heartbeat(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	err := s.registry.Heartbeat(ctx, req.Region, req.AZ)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -135,7 +139,7 @@ func (s *Server) heartbeat(c *gin.Context) {
 
 // listRegions 列出所有Region
 func (s *Server) listRegions(c *gin.Context) {
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	regions, err := s.registry.ListAllRegions(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -154,7 +158,7 @@ func (s *Server) listRegions(c *gin.Context) {
 // listRegionAZs 列出Region的所有AZ
 func (s *Server) listRegionAZs(c *gin.Context) {
 	region := c.Param("region")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	azs, err := s.registry.GetRegionAZs(ctx, region)
 	if err != nil {
@@ -182,7 +186,7 @@ func (s *Server) createVPC(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateRegionVPC(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -198,7 +202,7 @@ func (s *Server) createVPC(c *gin.Context) {
 // getVPCStatus 查询VPC状态
 func (s *Server) getVPCStatus(c *gin.Context) {
 	vpcName := c.Param("vpc_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	azs, err := s.registry.ListAllAZs(ctx)
 	if err != nil {
@@ -210,10 +214,10 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 	}
 
 	type AZStatus struct {
-		AZ           string                 `json:"az"`
-		Status       string                 `json:"status"`
+		AZ           string                  `json:"az"`
+		Status       string                  `json:"status"`
 		Progress     models.ResourceProgress `json:"progress"`
-		ErrorMessage string                 `json:"error_message,omitempty"`
+		ErrorMessage string                  `json:"error_message,omitempty"`
 	}
 
 	azStatuses := make(map[string]*AZStatus)
@@ -225,7 +229,7 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 		statusURL := fmt.Sprintf("%s/api/v1/vpc/%s/status", az.NSPAddr, vpcName)
 		resp, err := http.Get(statusURL)
 		if err != nil {
-			log.Printf("[Top NSP] 查询AZ %s的VPC状态失败: %v", az.ID, err)
+			logger.InfoContext(ctx, "查询AZ的VPC状态失败", "az", az.ID, "error", err)
 			azStatuses[az.ID] = &AZStatus{
 				AZ:           az.ID,
 				Status:       "unknown",
@@ -245,7 +249,7 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 
 		var vpcStatus models.VPCStatusResponse
 		if err := json.NewDecoder(resp.Body).Decode(&vpcStatus); err != nil {
-			log.Printf("[Top NSP] 解析AZ %s的VPC状态失败: %v", az.ID, err)
+			logger.InfoContext(ctx, "解析AZ的VPC状态失败", "az", az.ID, "error", err)
 			continue
 		}
 
@@ -288,7 +292,7 @@ func (s *Server) createSubnet(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateAZSubnet(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -302,7 +306,7 @@ func (s *Server) createSubnet(c *gin.Context) {
 }
 
 func (s *Server) listVPCs(c *gin.Context) {
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	azs, err := s.registry.ListAllAZs(ctx)
 	if err != nil {
@@ -319,7 +323,7 @@ func (s *Server) listVPCs(c *gin.Context) {
 		listURL := fmt.Sprintf("%s/api/v1/vpcs", az.NSPAddr)
 		resp, err := http.Get(listURL)
 		if err != nil {
-			log.Printf("[Top NSP] 查询AZ %s的VPC列表失败: %v", az.ID, err)
+			logger.InfoContext(ctx, "查询AZ的VPC列表失败", "az", az.ID, "error", err)
 			continue
 		}
 		defer resp.Body.Close()
@@ -329,7 +333,7 @@ func (s *Server) listVPCs(c *gin.Context) {
 			VPCs    []map[string]interface{} `json:"vpcs"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			log.Printf("[Top NSP] 解析AZ %s的VPC列表失败: %v", az.ID, err)
+			logger.InfoContext(ctx, "解析AZ的VPC列表失败", "az", az.ID, "error", err)
 			continue
 		}
 
@@ -346,7 +350,7 @@ func (s *Server) listVPCs(c *gin.Context) {
 
 func (s *Server) getVPCByID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	azs, err := s.registry.ListAllAZs(ctx)
 	if err != nil {
@@ -383,7 +387,7 @@ func (s *Server) getVPCByID(c *gin.Context) {
 
 func (s *Server) deleteVPCByID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	azs, err := s.registry.ListAllAZs(ctx)
 	if err != nil {
@@ -439,7 +443,7 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 
 func (s *Server) listSubnetsByVPCID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	azs, err := s.registry.ListAllAZs(ctx)
 	if err != nil {
@@ -481,7 +485,7 @@ func (s *Server) listSubnetsByVPCID(c *gin.Context) {
 
 func (s *Server) getSubnetByID(c *gin.Context) {
 	subnetID := c.Param("subnet_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	azs, err := s.registry.ListAllAZs(ctx)
 	if err != nil {
@@ -518,7 +522,7 @@ func (s *Server) getSubnetByID(c *gin.Context) {
 
 func (s *Server) deleteSubnetByID(c *gin.Context) {
 	subnetID := c.Param("subnet_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	azs, err := s.registry.ListAllAZs(ctx)
 	if err != nil {
@@ -574,7 +578,7 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 
 func (s *Server) replayTask(c *gin.Context) {
 	taskID := c.Param("task_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	azs, err := s.registry.ListAllAZs(ctx)
 	if err != nil {
@@ -621,6 +625,6 @@ func (s *Server) health(c *gin.Context) {
 
 // Run 启动服务器
 func (s *Server) Run(addr string) error {
-	log.Printf("[Top NSP] 服务启动在 %s", addr)
+	logger.Info("服务启动", "service", "top-nsp", "addr", addr)
 	return s.router.Run(addr)
 }

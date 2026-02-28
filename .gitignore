@@ -48,7 +48,11 @@ dist/
 # Go编译输出（二进制文件）
 /top-nsp
 /az-nsp
-bin/top-nsp
-bin/az-nsp
-bin/top_nsp
-bin/az_nsp
+/top_nsp
+/az_nsp
+/top-nsp-vpc
+/az-nsp-vpc
+/top-nsp-vfw
+/az-nsp-vfw
+/worker
+bin/

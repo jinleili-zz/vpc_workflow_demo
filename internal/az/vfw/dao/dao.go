@@ -23,7 +23,7 @@ func (d *FirewallPolicyDAO) Create(ctx context.Context, policy *models.FirewallP
 			id, policy_name, source_zone, dest_zone, source_ip, dest_ip,
 			source_port, dest_port, protocol, action, description,
 			status, total_tasks, completed_tasks, failed_tasks, region, az
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 	`
 	_, err := d.db.ExecContext(ctx, query,
 		policy.ID, policy.PolicyName, policy.SourceZone, policy.DestZone,
@@ -41,7 +41,7 @@ func (d *FirewallPolicyDAO) GetByID(ctx context.Context, id string) (*models.Fir
 			   source_port, dest_port, protocol, action, description,
 			   status, error_message, total_tasks, completed_tasks, failed_tasks,
 			   region, az, created_at, updated_at
-		FROM firewall_policies WHERE id = ?
+		FROM firewall_policies WHERE id = $1
 	`
 	policy := &models.FirewallPolicy{}
 	var desc, errMsg sql.NullString
@@ -73,7 +73,7 @@ func (d *FirewallPolicyDAO) GetByName(ctx context.Context, name, az string) (*mo
 			   source_port, dest_port, protocol, action, description,
 			   status, error_message, total_tasks, completed_tasks, failed_tasks,
 			   region, az, created_at, updated_at
-		FROM firewall_policies WHERE policy_name = ? AND az = ?
+		FROM firewall_policies WHERE policy_name = $1 AND az = $2
 	`
 	policy := &models.FirewallPolicy{}
 	var desc, errMsg sql.NullString
@@ -100,31 +100,31 @@ func (d *FirewallPolicyDAO) GetByName(ctx context.Context, name, az string) (*mo
 }
 
 func (d *FirewallPolicyDAO) UpdateStatus(ctx context.Context, id string, status models.ResourceStatus, errorMsg string) error {
-	query := `UPDATE firewall_policies SET status = ?, error_message = ?, updated_at = ? WHERE id = ?`
+	query := `UPDATE firewall_policies SET status = $1, error_message = $2, updated_at = $3 WHERE id = $4`
 	_, err := d.db.ExecContext(ctx, query, status, errorMsg, time.Now(), id)
 	return err
 }
 
 func (d *FirewallPolicyDAO) UpdateTotalTasks(ctx context.Context, id string, totalTasks int) error {
-	query := `UPDATE firewall_policies SET total_tasks = ?, updated_at = ? WHERE id = ?`
+	query := `UPDATE firewall_policies SET total_tasks = $1, updated_at = $2 WHERE id = $3`
 	_, err := d.db.ExecContext(ctx, query, totalTasks, time.Now(), id)
 	return err
 }
 
 func (d *FirewallPolicyDAO) IncrementCompletedTasks(ctx context.Context, id string) error {
-	query := `UPDATE firewall_policies SET completed_tasks = completed_tasks + 1, updated_at = ? WHERE id = ?`
+	query := `UPDATE firewall_policies SET completed_tasks = completed_tasks + 1, updated_at = $1 WHERE id = $2`
 	_, err := d.db.ExecContext(ctx, query, time.Now(), id)
 	return err
 }
 
 func (d *FirewallPolicyDAO) IncrementFailedTasks(ctx context.Context, id string) error {
-	query := `UPDATE firewall_policies SET failed_tasks = failed_tasks + 1, updated_at = ? WHERE id = ?`
+	query := `UPDATE firewall_policies SET failed_tasks = failed_tasks + 1, updated_at = $1 WHERE id = $2`
 	_, err := d.db.ExecContext(ctx, query, time.Now(), id)
 	return err
 }
 
 func (d *FirewallPolicyDAO) Delete(ctx context.Context, id string) error {
-	query := `DELETE FROM firewall_policies WHERE id = ?`
+	query := `DELETE FROM firewall_policies WHERE id = $1`
 	_, err := d.db.ExecContext(ctx, query, id)
 	return err
 }
@@ -176,7 +176,7 @@ func (d *FirewallPolicyDAO) ListAll(ctx context.Context) ([]*models.FirewallPoli
 func (d *FirewallPolicyDAO) CountByZone(ctx context.Context, zone string) (int, error) {
 	query := `
 		SELECT COUNT(*) FROM firewall_policies 
-		WHERE (source_zone = ? OR dest_zone = ?) AND status NOT IN ('deleted', 'failed')
+		WHERE (source_zone = $1 OR dest_zone = $2) AND status NOT IN ('deleted', 'failed')
 	`
 	var count int
 	err := d.db.QueryRowContext(ctx, query, zone, zone).Scan(&count)
@@ -196,7 +196,7 @@ func (d *VFWTaskDAO) Create(ctx context.Context, task *models.Task) error {
 		INSERT INTO tasks (
 			id, resource_type, resource_id, task_type, task_name, task_order,
 			task_params, status, priority, device_type, retry_count, max_retries, az
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`
 	_, err := d.db.ExecContext(ctx, query,
 		task.ID, task.ResourceType, task.ResourceID, task.TaskType, task.TaskName, task.TaskOrder,
@@ -220,7 +220,7 @@ func (d *VFWTaskDAO) BatchCreate(ctx context.Context, tasks []*models.Task) erro
 		INSERT INTO tasks (
 			id, resource_type, resource_id, task_type, task_name, task_order,
 			task_params, status, priority, device_type, retry_count, max_retries, az
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`
 
 	stmt, err := tx.PrepareContext(ctx, query)
@@ -247,7 +247,7 @@ func (d *VFWTaskDAO) GetByID(ctx context.Context, id string) (*models.Task, erro
 		SELECT id, resource_type, resource_id, task_type, task_name, task_order,
 		       task_params, status, priority, device_type, asynq_task_id, result, error_message,
 		       retry_count, max_retries, az, created_at, queued_at, started_at, completed_at, updated_at
-		FROM tasks WHERE id = ?
+		FROM tasks WHERE id = $1
 	`
 	task := &models.Task{}
 	var asynqTaskID, result, errorMessage, deviceType sql.NullString
@@ -296,7 +296,7 @@ func (d *VFWTaskDAO) GetByResourceID(ctx context.Context, resourceID string) ([]
 		SELECT id, resource_type, resource_id, task_type, task_name, task_order,
 		       task_params, status, priority, device_type, asynq_task_id, result, error_message,
 		       retry_count, max_retries, az, created_at, queued_at, started_at, completed_at, updated_at
-		FROM tasks WHERE resource_id = ? ORDER BY task_order ASC
+		FROM tasks WHERE resource_id = $1 ORDER BY task_order ASC
 	`
 	rows, err := d.db.QueryContext(ctx, query, resourceID)
 	if err != nil {
@@ -357,7 +357,7 @@ func (d *VFWTaskDAO) GetNextPendingTask(ctx context.Context, resourceID string) 
 		       task_params, status, priority, device_type, asynq_task_id, result, error_message,
 		       retry_count, max_retries, az, created_at, queued_at, started_at, completed_at, updated_at
 		FROM tasks 
-		WHERE resource_id = ? AND status = 'pending'
+		WHERE resource_id = $1 AND status = 'pending'
 		ORDER BY task_order ASC LIMIT 1
 	`
 	task := &models.Task{}
@@ -407,22 +407,22 @@ func (d *VFWTaskDAO) GetNextPendingTask(ctx context.Context, resourceID string) 
 
 func (d *VFWTaskDAO) UpdateStatus(ctx context.Context, id string, status models.TaskStatus) error {
 	now := time.Now()
-	query := `UPDATE tasks SET status = ?, updated_at = ?`
-	args := []interface{}{status, now}
+	var query string
+	var args []interface{}
 
 	if status == models.TaskStatusQueued {
-		query += `, queued_at = ?`
-		args = append(args, now)
+		query = `UPDATE tasks SET status = $1, updated_at = $2, queued_at = $3 WHERE id = $4`
+		args = []interface{}{status, now, now, id}
 	} else if status == models.TaskStatusRunning {
-		query += `, started_at = ?`
-		args = append(args, now)
+		query = `UPDATE tasks SET status = $1, updated_at = $2, started_at = $3 WHERE id = $4`
+		args = []interface{}{status, now, now, id}
 	} else if status == models.TaskStatusCompleted || status == models.TaskStatusFailed {
-		query += `, completed_at = ?`
-		args = append(args, now)
+		query = `UPDATE tasks SET status = $1, updated_at = $2, completed_at = $3 WHERE id = $4`
+		args = []interface{}{status, now, now, id}
+	} else {
+		query = `UPDATE tasks SET status = $1, updated_at = $2 WHERE id = $3`
+		args = []interface{}{status, now, id}
 	}
-
-	query += ` WHERE id = ?`
-	args = append(args, id)
 
 	_, err := d.db.ExecContext(ctx, query, args...)
 	return err
@@ -434,15 +434,15 @@ func (d *VFWTaskDAO) UpdateResult(ctx context.Context, id string, status models.
 
 	query := `
 		UPDATE tasks 
-		SET status = ?, result = ?, error_message = ?, completed_at = ?, updated_at = ?
-		WHERE id = ?
+		SET status = $1, result = $2, error_message = $3, completed_at = $4, updated_at = $5
+		WHERE id = $6
 	`
 	_, err := d.db.ExecContext(ctx, query, status, string(resultJSON), errorMsg, now, now, id)
 	return err
 }
 
 func (d *VFWTaskDAO) UpdateAsynqTaskID(ctx context.Context, id, asynqTaskID string) error {
-	query := `UPDATE tasks SET asynq_task_id = ?, updated_at = ? WHERE id = ?`
+	query := `UPDATE tasks SET asynq_task_id = $1, updated_at = $2 WHERE id = $3`
 	_, err := d.db.ExecContext(ctx, query, asynqTaskID, time.Now(), id)
 	return err
 }
@@ -453,7 +453,7 @@ func (d *VFWTaskDAO) GetTaskStats(ctx context.Context, resourceID string) (total
 			COUNT(*) as total,
 			SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
 			SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-		FROM tasks WHERE resource_id = ?
+		FROM tasks WHERE resource_id = $1
 	`
 	err = d.db.QueryRowContext(ctx, query, resourceID).Scan(&total, &completed, &failed)
 	return

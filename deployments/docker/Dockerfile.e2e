@@ -1,0 +1,13 @@
+# Generic Dockerfile for pre-built binaries (e2e testing)
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+
+ARG BINARY_NAME
+COPY ${BINARY_NAME} /app/service
+
+RUN chmod +x /app/service
+
+CMD ["/app/service"]

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 
 	"workflow_qoder/internal/az/vfw/dao"
 	"workflow_qoder/internal/models"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
 type VFWOrchestrator struct {
@@ -34,7 +34,7 @@ func NewVFWOrchestrator(db *sql.DB, asynqClient *asynq.Client, region, az string
 }
 
 func (o *VFWOrchestrator) CreatePolicy(ctx context.Context, req *models.AZFirewallPolicyRequest) (*models.AZFirewallPolicyResponse, error) {
-	log.Printf("[VFW Orchestrator %s] 开始创建防火墙策略: %s", o.az, req.PolicyName)
+	logger.InfoContext(ctx, "开始创建防火墙策略", "az", o.az, "policy_name", req.PolicyName)
 
 	policyID := uuid.New().String()
 
@@ -92,7 +92,7 @@ func (o *VFWOrchestrator) CreatePolicy(ctx context.Context, req *models.AZFirewa
 		}, nil
 	}
 
-	log.Printf("[VFW Orchestrator %s] 防火墙策略创建流程启动成功: %s (ID: %s)", o.az, req.PolicyName, policyID)
+	logger.InfoContext(ctx, "防火墙策略创建流程启动成功", "az", o.az, "policy_name", req.PolicyName, "policy_id", policyID)
 
 	return &models.AZFirewallPolicyResponse{
 		Success:    true,
@@ -193,12 +193,12 @@ func (o *VFWOrchestrator) enqueueTask(ctx context.Context, task *models.Task) er
 		return fmt.Errorf("更新任务状态失败: %v", err)
 	}
 
-	log.Printf("[VFW Orchestrator %s] 任务已入队: %s (AsynqID: %s, Queue: %s)", o.az, task.TaskName, info.ID, queueName)
+	logger.InfoContext(ctx, "任务已入队", "az", o.az, "task_name", task.TaskName, "asynq_id", info.ID, "queue", queueName)
 	return nil
 }
 
 func (o *VFWOrchestrator) HandleTaskCallback(ctx context.Context, taskID string, status models.TaskStatus, result interface{}, errorMsg string) error {
-	log.Printf("[VFW Orchestrator %s] 接收到任务回调: taskID=%s, status=%s", o.az, taskID, status)
+	logger.InfoContext(ctx, "接收到任务回调", "az", o.az, "task_id", taskID, "status", status)
 
 	task, err := o.taskDAO.GetByID(ctx, taskID)
 	if err != nil {
@@ -253,7 +253,7 @@ func (o *VFWOrchestrator) handleTaskFailure(ctx context.Context, task *models.Ta
 		return fmt.Errorf("更新策略状态失败: %v", err)
 	}
 
-	log.Printf("[VFW Orchestrator %s] 任务失败，停止后续任务: resourceID=%s", o.az, task.ResourceID)
+	logger.WarnContext(ctx, "任务失败，停止后续任务", "az", o.az, "resource_id", task.ResourceID)
 	return nil
 }
 
@@ -263,13 +263,13 @@ func (o *VFWOrchestrator) checkAndCompletePolicy(ctx context.Context, resourceID
 		return fmt.Errorf("获取任务统计失败: %v", err)
 	}
 
-	log.Printf("[VFW Orchestrator %s] 任务统计: total=%d, completed=%d, failed=%d", o.az, total, completed, failed)
+	logger.InfoContext(ctx, "任务统计", "az", o.az, "total", total, "completed", completed, "failed", failed)
 
 	if completed == total && failed == 0 {
 		if err := o.policyDAO.UpdateStatus(ctx, resourceID, models.ResourceStatusRunning, ""); err != nil {
 			return fmt.Errorf("更新策略状态为running失败: %v", err)
 		}
-		log.Printf("[VFW Orchestrator %s] 防火墙策略创建完成: resourceID=%s", o.az, resourceID)
+		logger.InfoContext(ctx, "防火墙策略创建完成", "az", o.az, "resource_id", resourceID)
 	}
 
 	return nil
@@ -323,7 +323,7 @@ func (o *VFWOrchestrator) DeletePolicy(ctx context.Context, policyName string) e
 		return fmt.Errorf("更新策略状态失败: %v", err)
 	}
 
-	log.Printf("[VFW Orchestrator %s] 策略删除成功: %s", o.az, policyName)
+	logger.InfoContext(ctx, "策略删除成功", "az", o.az, "policy_name", policyName)
 	return nil
 }
 

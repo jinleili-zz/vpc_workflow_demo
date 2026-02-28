@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"sync"
 
@@ -15,6 +14,7 @@ import (
 	"workflow_qoder/internal/models"
 
 	"github.com/google/uuid"
+	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
 type PolicyService struct {
@@ -37,7 +37,7 @@ func (s *PolicyService) RegisterAZ(region, az, addr string) {
 	defer s.mu.Unlock()
 	key := fmt.Sprintf("%s:%s", region, az)
 	s.azRegistry[key] = addr
-	log.Printf("[PolicyService] 注册AZ: %s -> %s", key, addr)
+	logger.Info("注册AZ", "key", key, "addr", addr)
 }
 
 func (s *PolicyService) GetAZAddr(region, az string) (string, bool) {
@@ -49,7 +49,7 @@ func (s *PolicyService) GetAZAddr(region, az string) (string, bool) {
 }
 
 func (s *PolicyService) CreatePolicy(ctx context.Context, req *models.FirewallPolicyRequest) (*models.FirewallPolicyResponse, error) {
-	log.Printf("[PolicyService] 开始创建防火墙策略: %s", req.PolicyName)
+	logger.InfoContext(ctx, "开始创建防火墙策略", "policy_name", req.PolicyName)
 
 	srcInfo, err := s.vpcDAO.FindZoneByIP(ctx, req.SourceIP)
 	if err != nil {
@@ -79,8 +79,8 @@ func (s *PolicyService) CreatePolicy(ctx context.Context, req *models.FirewallPo
 		}, nil
 	}
 
-	log.Printf("[PolicyService] 源IP %s -> Zone: %s (AZ: %s)", req.SourceIP, srcInfo.FirewallZone, srcInfo.AZ)
-	log.Printf("[PolicyService] 目的IP %s -> Zone: %s (AZ: %s)", req.DestIP, dstInfo.FirewallZone, dstInfo.AZ)
+	logger.InfoContext(ctx, "源IP解析", "source_ip", req.SourceIP, "zone", srcInfo.FirewallZone, "az", srcInfo.AZ)
+	logger.InfoContext(ctx, "目的IP解析", "dest_ip", req.DestIP, "zone", dstInfo.FirewallZone, "az", dstInfo.AZ)
 
 	policyID := uuid.New().String()
 	policy := &models.PolicyRegistry{
@@ -190,7 +190,7 @@ func (s *PolicyService) CreatePolicy(ctx context.Context, req *models.FirewallPo
 
 			result := &azResult{az: az}
 			if err != nil {
-				log.Printf("[PolicyService] AZ %s 创建失败: %v", az, err)
+				logger.WarnContext(ctx, "AZ创建失败", "az", az, "error", err)
 				result.err = err
 				result.success = false
 				s.vfwDAO.UpdateAZRecord(ctx, policyID, az, "", "failed", err.Error())

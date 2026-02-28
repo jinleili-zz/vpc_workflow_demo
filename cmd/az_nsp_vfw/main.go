@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strconv"
@@ -14,27 +13,45 @@ import (
 
 	"workflow_qoder/internal/az/vfw/api"
 	"workflow_qoder/internal/config"
-	"workflow_qoder/internal/queue"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/hibiken/asynq"
+	_ "github.com/lib/pq"
+	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
-func main() {
-	log.Println("========================================")
-	log.Println("AZ NSP VFW 启动中...")
-	log.Println("========================================")
+func getEnvOrDefault(key, defaultValue string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultValue
+}
 
+func main() {
 	cfg := config.LoadConfig()
 
 	region := os.Getenv("REGION")
 	az := os.Getenv("AZ")
 	if region == "" || az == "" {
-		log.Fatal("必须设置环境变量 REGION 和 AZ")
+		fmt.Println("必须设置环境变量 REGION 和 AZ")
+		os.Exit(1)
 	}
 	cfg.Region = region
 	cfg.AZ = az
 	cfg.ServiceType = "az"
+
+	// 初始化 logger
+	logCfg := logger.DefaultConfig(fmt.Sprintf("az-nsp-vfw-%s", az))
+	if os.Getenv("DEVELOPMENT") == "true" {
+		logCfg = logger.DevelopmentConfig(fmt.Sprintf("az-nsp-vfw-%s", az))
+	}
+	if err := logger.Init(logCfg); err != nil {
+		panic("初始化日志失败: " + err.Error())
+	}
+	defer logger.Sync()
+
+	logger.Info("========================================")
+	logger.Info("AZ NSP VFW 启动中...")
+	logger.Info("========================================")
 
 	port := 8080
 	if portStr := os.Getenv("PORT"); portStr != "" {
@@ -44,49 +61,37 @@ func main() {
 	}
 	cfg.Port = port
 
-	log.Printf("[AZ NSP VFW] Region=%s, AZ=%s, Port=%d", region, az, port)
+	logger.Info("[AZ NSP VFW] 服务配置", "region", region, "az", az, "port", port)
 
-	mysqlHost := os.Getenv("MYSQL_HOST")
-	if mysqlHost == "" {
-		mysqlHost = "mysql"
-	}
-	mysqlPort := os.Getenv("MYSQL_PORT")
-	if mysqlPort == "" {
-		mysqlPort = "3306"
-	}
-	mysqlDatabase := os.Getenv("MYSQL_DATABASE")
-	if mysqlDatabase == "" {
-		mysqlDatabase = fmt.Sprintf("nsp_%s_vfw", strings.ReplaceAll(az, "-", "_"))
-	}
-	mysqlUser := os.Getenv("MYSQL_USER")
-	if mysqlUser == "" {
-		mysqlUser = "nsp_user"
-	}
-	mysqlPassword := os.Getenv("MYSQL_PASSWORD")
-	if mysqlPassword == "" {
-		mysqlPassword = "nsp_password"
-	}
+	// Build PostgreSQL DSN
+	pgHost := getEnvOrDefault("POSTGRES_HOST", "postgres")
+	pgPort := getEnvOrDefault("POSTGRES_PORT", "5432")
+	pgUser := getEnvOrDefault("POSTGRES_USER", "nsp_user")
+	pgPassword := getEnvOrDefault("POSTGRES_PASSWORD", "nsp_password")
+	dbName := fmt.Sprintf("nsp_%s_%s_vfw", strings.ReplaceAll(region, "-", "_"), strings.ReplaceAll(az, "-", "_"))
+	postgresDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", pgUser, pgPassword, pgHost, pgPort, dbName)
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-		mysqlUser, mysqlPassword, mysqlHost, mysqlPort, mysqlDatabase)
-
-	var mysqlDB *sql.DB
+	// Connect to PostgreSQL
+	var pgDB *sql.DB
 	var err error
 	for i := 0; i < 30; i++ {
-		mysqlDB, err = sql.Open("mysql", dsn)
+		pgDB, err = sql.Open("postgres", postgresDSN)
 		if err == nil {
-			if err = mysqlDB.Ping(); err == nil {
+			if err = pgDB.Ping(); err == nil {
 				break
 			}
+			pgDB.Close()
 		}
-		log.Printf("[AZ NSP VFW] 等待MySQL就绪... (%d/30)", i+1)
+		logger.Info("[AZ NSP VFW] 等待 PostgreSQL 就绪...", "attempt", i+1)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
-		log.Fatalf("连接MySQL失败: %v", err)
+		logger.Error("PostgreSQL 连接失败", "error", err)
+		os.Exit(1)
 	}
-	defer mysqlDB.Close()
-	log.Printf("[AZ NSP VFW] MySQL连接成功: %s", mysqlDatabase)
+	defer pgDB.Close()
+
+	logger.Info("[AZ NSP VFW] PostgreSQL 连接成功", "database", dbName)
 
 	redisAddr := cfg.GetRedisAddr()
 	addrs := strings.Split(redisAddr, ",")
@@ -106,7 +111,7 @@ func main() {
 	asynqClient := asynq.NewClient(asynqClientOpt)
 	defer asynqClient.Close()
 
-	server := api.NewServer(cfg, asynqClient, mysqlDB)
+	server := api.NewServer(cfg, asynqClient, pgDB)
 
 	callbackQueueName := server.GetCallbackQueueName()
 
@@ -122,14 +127,13 @@ func main() {
 		}
 	}
 
-	queuesConfig := queue.GetAllQueuesConfig(region, az)
-	queuesConfig[callbackQueueName] = 10
-
 	asynqServer := asynq.NewServer(
 		asynqServerOpt,
 		asynq.Config{
 			Concurrency: 10,
-			Queues:      queuesConfig,
+			Queues: map[string]int{
+				callbackQueueName: 10,
+			},
 		},
 	)
 
@@ -138,7 +142,7 @@ func main() {
 
 	go func() {
 		if err := asynqServer.Run(mux); err != nil {
-			log.Printf("[AZ NSP VFW] Asynq服务器启动失败: %v", err)
+			logger.Error("[AZ NSP VFW] Asynq服务器启动失败", "error", err)
 		}
 	}()
 
@@ -146,7 +150,7 @@ func main() {
 
 	for i := 0; i < 10; i++ {
 		if err := server.RegisterToTopNSP(); err != nil {
-			log.Printf("[AZ NSP VFW] 注册失败，重试中... (%d/10): %v", i+1, err)
+			logger.Info("[AZ NSP VFW] 注册失败，重试中...", "attempt", i+1, "error", err)
 			time.Sleep(3 * time.Second)
 			continue
 		}
@@ -161,7 +165,8 @@ func main() {
 	go func() {
 		addr := fmt.Sprintf(":%d", port)
 		if err := server.Run(addr); err != nil {
-			log.Fatalf("[AZ NSP VFW] 服务启动失败: %v", err)
+			logger.Error("[AZ NSP VFW] 服务启动失败", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -169,8 +174,8 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("[AZ NSP VFW] 正在关闭...")
+	logger.Info("[AZ NSP VFW] 正在关闭...")
 	cancel()
 	asynqServer.Shutdown()
-	log.Println("[AZ NSP VFW] 已关闭")
+	logger.Info("[AZ NSP VFW] 已关闭")
 }

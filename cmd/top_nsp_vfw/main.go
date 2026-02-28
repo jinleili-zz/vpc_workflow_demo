@@ -3,20 +3,31 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 
 	"workflow_qoder/internal/top/vfw/api"
 	"workflow_qoder/internal/top/vfw/service"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/yourorg/nsp-common/pkg/logger"
+
+	_ "github.com/lib/pq"
 )
 
 func main() {
-	log.Println("========================================")
-	log.Println("Top NSP VFW 启动中...")
-	log.Println("========================================")
+	// 初始化 logger
+	logCfg := logger.DefaultConfig("top-nsp-vfw")
+	if os.Getenv("DEVELOPMENT") == "true" {
+		logCfg = logger.DevelopmentConfig("top-nsp-vfw")
+	}
+	if err := logger.Init(logCfg); err != nil {
+		panic("初始化日志失败: " + err.Error())
+	}
+	defer logger.Sync()
+
+	logger.Info("========================================")
+	logger.Info("Top NSP VFW 启动中...")
+	logger.Info("========================================")
 
 	port := 8082
 	if portStr := os.Getenv("PORT"); portStr != "" {
@@ -25,56 +36,60 @@ func main() {
 		}
 	}
 
-	mysqlHost := os.Getenv("MYSQL_HOST")
-	if mysqlHost == "" {
-		mysqlHost = "mysql"
-	}
-	mysqlPort := os.Getenv("MYSQL_PORT")
-	if mysqlPort == "" {
-		mysqlPort = "3306"
-	}
-	mysqlUser := os.Getenv("MYSQL_USER")
-	if mysqlUser == "" {
-		mysqlUser = "nsp_user"
-	}
-	mysqlPassword := os.Getenv("MYSQL_PASSWORD")
-	if mysqlPassword == "" {
-		mysqlPassword = "nsp_password"
-	}
+	// Build PostgreSQL DSN
+	pgHost := getEnvOrDefault("POSTGRES_HOST", "postgres")
+	pgPort := getEnvOrDefault("POSTGRES_PORT", "5432")
+	pgUser := getEnvOrDefault("POSTGRES_USER", "nsp_user")
+	pgPassword := getEnvOrDefault("POSTGRES_PASSWORD", "nsp_password")
 
-	vpcDSN := fmt.Sprintf("%s:%s@tcp(%s:%s)/top_nsp_vpc?charset=utf8mb4&parseTime=True&loc=Local",
-		mysqlUser, mysqlPassword, mysqlHost, mysqlPort)
-	vfwDSN := fmt.Sprintf("%s:%s@tcp(%s:%s)/top_nsp_vfw?charset=utf8mb4&parseTime=True&loc=Local",
-		mysqlUser, mysqlPassword, mysqlHost, mysqlPort)
+	vpcDSN := buildPostgresDSN(pgHost, pgPort, pgUser, pgPassword, "top_nsp_vpc")
+	vfwDSN := buildPostgresDSN(pgHost, pgPort, pgUser, pgPassword, "top_nsp_vfw")
 
-	vpcDB, err := sql.Open("mysql", vpcDSN)
+	vpcDB, err := sql.Open("postgres", vpcDSN)
 	if err != nil {
-		log.Fatalf("连接VPC数据库失败: %v", err)
+		logger.Error("连接VPC数据库失败", "error", err)
+		os.Exit(1)
 	}
 	defer vpcDB.Close()
 
 	if err := vpcDB.Ping(); err != nil {
-		log.Fatalf("VPC数据库连接测试失败: %v", err)
+		logger.Error("VPC数据库连接测试失败", "error", err)
+		os.Exit(1)
 	}
-	log.Println("[Top NSP VFW] VPC数据库连接成功")
+	logger.Info("[Top NSP VFW] VPC数据库连接成功")
 
-	vfwDB, err := sql.Open("mysql", vfwDSN)
+	vfwDB, err := sql.Open("postgres", vfwDSN)
 	if err != nil {
-		log.Fatalf("连接VFW数据库失败: %v", err)
+		logger.Error("连接VFW数据库失败", "error", err)
+		os.Exit(1)
 	}
 	defer vfwDB.Close()
 
 	if err := vfwDB.Ping(); err != nil {
-		log.Fatalf("VFW数据库连接测试失败: %v", err)
+		logger.Error("VFW数据库连接测试失败", "error", err)
+		os.Exit(1)
 	}
-	log.Println("[Top NSP VFW] VFW数据库连接成功")
+	logger.Info("[Top NSP VFW] VFW数据库连接成功")
 
 	policyService := service.NewPolicyService(vpcDB, vfwDB)
 
 	server := api.NewServer(policyService)
 
 	addr := fmt.Sprintf(":%d", port)
+	logger.Info("启动服务", "port", port)
 	if err := server.Run(addr); err != nil {
-		log.Fatalf("服务启动失败: %v", err)
+		logger.Error("服务启动失败", "error", err)
+		os.Exit(1)
 	}
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultValue
+}
+
+func buildPostgresDSN(host, port, user, password, dbname string) string {
+	return "postgres://" + user + ":" + password + "@" + host + ":" + port + "/" + dbname + "?sslmode=disable"
 }
