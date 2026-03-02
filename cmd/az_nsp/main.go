@@ -18,6 +18,7 @@ import (
 	"github.com/hibiken/asynq"
 	_ "github.com/lib/pq"
 	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
 )
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -106,42 +107,15 @@ func main() {
 
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
+	redisOpt := config.MakeAsynqRedisOpt(redisAddr, redisBrokerDB)
 
-	addrs := strings.Split(redisAddr, ",")
-	var asynqClientOpt asynq.RedisConnOpt
-	
-	if len(addrs) > 1 {
-		asynqClientOpt = asynq.RedisClusterClientOpt{
-			Addrs: addrs,
-		}
-	} else {
-		asynqClientOpt = asynq.RedisClientOpt{
-			Addr: redisAddr,
-			DB:   redisBrokerDB,
-		}
-	}
-
-	asynqClient := asynq.NewClient(asynqClientOpt)
-	defer asynqClient.Close()
-
-	var asynqInspectorOpt asynq.RedisConnOpt
-	if len(addrs) > 1 {
-		asynqInspectorOpt = asynq.RedisClusterClientOpt{
-			Addrs: addrs,
-		}
-	} else {
-		asynqInspectorOpt = asynq.RedisClientOpt{
-			Addr: redisAddr,
-			DB:   redisBrokerDB,
-		}
-	}
-
-	asynqInspector := asynq.NewInspector(asynqInspectorOpt)
-	defer asynqInspector.Close()
+	// 创建 Broker（用于 orchestrator 入队任务）
+	broker := asynqbroker.NewBroker(redisOpt)
+	defer broker.Close()
 
 	callbackQueueName := queue.GetCallbackQueueName(region, az)
 
-	server := api.NewServer(cfg, asynqClient, asynqInspector, pgDB)
+	server := api.NewServer(cfg, broker, pgDB)
 
 	if err := server.RegisterToTopNSP(); err != nil {
 		logger.Info("[AZ NSP] 注册到Top NSP失败 (将在后续心跳中重试)", "az", az, "error", err)
@@ -152,34 +126,21 @@ func main() {
 
 	go server.StartHeartbeat(ctx)
 
-	var asynqServerOpt asynq.RedisConnOpt
-	if len(addrs) > 1 {
-		asynqServerOpt = asynq.RedisClusterClientOpt{
-			Addrs: addrs,
-		}
-	} else {
-		asynqServerOpt = asynq.RedisClientOpt{
-			Addr: redisAddr,
-			DB:   redisBrokerDB,
-		}
-	}
-
-	asynqServer := asynq.NewServer(
-		asynqServerOpt,
-		asynq.Config{
-			Concurrency: 2,
-			Queues: map[string]int{
-				callbackQueueName: 10,
-			},
+	// 创建 Consumer 消费回调队列
+	callbackConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
+		Concurrency: 2,
+		Queues: map[string]int{
+			callbackQueueName: 10,
 		},
-	)
+	})
 
-	mux := asynq.NewServeMux()
-	mux.HandleFunc("task_callback", server.HandleTaskCallback())
+	callbackConsumer.HandleRaw("task_callback", func(ctx context.Context, t *asynq.Task) error {
+		return server.HandleTaskCallback(ctx, t.Payload())
+	})
 
 	go func() {
 		logger.Info("[AZ NSP] 回调处理器启动", "az", az, "queue", callbackQueueName)
-		if err := asynqServer.Run(mux); err != nil {
+		if err := callbackConsumer.Start(context.Background()); err != nil {
 			logger.Error("[AZ NSP] 回调处理器启动失败", "az", az, "error", err)
 			os.Exit(1)
 		}
@@ -205,7 +166,7 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	asynqServer.Shutdown()
+	callbackConsumer.Stop()
 
 	<-shutdownCtx.Done()
 	logger.Info("[AZ NSP] 服务已关闭", "az", az)

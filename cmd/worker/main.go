@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -15,8 +14,9 @@ import (
 	"workflow_qoder/internal/queue"
 	"workflow_qoder/tasks"
 
-	"github.com/hibiken/asynq"
 	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/yourorg/nsp-common/pkg/taskqueue"
+	"github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
 )
 
 func main() {
@@ -49,6 +49,7 @@ func main() {
 
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
+	redisOpt := config.MakeAsynqRedisOpt(redisAddr, redisBrokerDB)
 
 	workerCount := 2
 	if workerCountEnv := os.Getenv("WORKER_COUNT"); workerCountEnv != "" {
@@ -70,69 +71,44 @@ func main() {
 		os.Exit(1)
 	}
 
-	taskQueueName := queue.GetQueueName(region, az, deviceType)
 	callbackQueueName := queue.GetCallbackQueueName(region, az)
-
-	addrs := strings.Split(redisAddr, ",")
-	var asynqClientOpt asynq.RedisConnOpt
-	
-	if len(addrs) > 1 {
-		asynqClientOpt = asynq.RedisClusterClientOpt{
-			Addrs: addrs,
-		}
-	} else {
-		asynqClientOpt = asynq.RedisClientOpt{
-			Addr: redisAddr,
-			DB:   redisBrokerDB,
-		}
-	}
-
-	asynqClient := asynq.NewClient(asynqClientOpt)
-	defer asynqClient.Close()
-
 	queuesConfig := queue.GetQueueConfig(region, az, deviceType)
 
-	var asynqServerOpt asynq.RedisConnOpt
-	if len(addrs) > 1 {
-		asynqServerOpt = asynq.RedisClusterClientOpt{
-			Addrs: addrs,
-		}
-	} else {
-		asynqServerOpt = asynq.RedisClientOpt{
-			Addr: redisAddr,
-			DB:   redisBrokerDB,
-		}
-	}
+	// 创建 Broker 和 CallbackSender
+	broker := asynqbroker.NewBroker(redisOpt)
+	defer broker.Close()
 
-	asynqServer := asynq.NewServer(
-		asynqServerOpt,
-		asynq.Config{
-			Concurrency:    workerCount,
-			Queues:         queuesConfig,
-			StrictPriority: true,
-			Logger:         logging.GetAsynqAdapter().GetAsynqLogger(),
-		},
-	)
+	cbSender := taskqueue.NewCallbackSenderFromBroker(broker, callbackQueueName)
 
-	mux := asynq.NewServeMux()
+	// 创建 Consumer
+	consumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
+		Concurrency:    workerCount,
+		Queues:         queuesConfig,
+		StrictPriority: true,
+		Logger:         logging.GetAsynqAdapter().GetAsynqLogger(),
+	})
 
+	// 注册 task handler
 	switch deviceType {
 	case queue.DeviceTypeSwitch:
-		mux.HandleFunc("create_vrf_on_switch", tasks.CreateVRFOnSwitchHandler(asynqClient, callbackQueueName))
-		mux.HandleFunc("create_vlan_subinterface", tasks.CreateVLANSubInterfaceHandler(asynqClient, callbackQueueName))
-		mux.HandleFunc("create_subnet_on_switch", tasks.CreateSubnetOnSwitchHandler(asynqClient, callbackQueueName))
-		mux.HandleFunc("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(asynqClient, callbackQueueName))
+		consumer.Handle("create_vrf_on_switch", tasks.CreateVRFOnSwitchHandler(cbSender))
+		consumer.Handle("create_vlan_subinterface", tasks.CreateVLANSubInterfaceHandler(cbSender))
+		consumer.Handle("create_subnet_on_switch", tasks.CreateSubnetOnSwitchHandler(cbSender))
+		consumer.Handle("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(cbSender))
 	case queue.DeviceTypeFirewall:
-		mux.HandleFunc("create_firewall_zone", tasks.CreateFirewallZoneHandler(asynqClient, callbackQueueName))
-		mux.HandleFunc("create_firewall_policy", tasks.CreateFirewallPolicyHandler(asynqClient, callbackQueueName+"_vfw"))
+		cbSenderVFW := taskqueue.NewCallbackSenderFromBroker(broker, callbackQueueName+"_vfw")
+		consumer.Handle("create_firewall_zone", tasks.CreateFirewallZoneHandler(cbSender))
+		consumer.Handle("create_firewall_policy", tasks.CreateFirewallPolicyHandler(cbSenderVFW))
 	case queue.DeviceTypeLoadBalancer:
-		mux.HandleFunc("create_lb_pool", tasks.CreateLBPoolHandler(asynqClient, callbackQueueName))
-		mux.HandleFunc("configure_lb_listener", tasks.ConfigureLBListenerHandler(asynqClient, callbackQueueName))
+		consumer.Handle("create_lb_pool", tasks.CreateLBPoolHandler(cbSender))
+		consumer.Handle("configure_lb_listener", tasks.ConfigureLBListenerHandler(cbSender))
 	}
+
+	taskQueueName := queue.GetQueueName(region, az, deviceType)
 
 	go func() {
 		logger.Info("Worker 启动", "region", region, "az", az, "workerType", workerType, "concurrency", workerCount, "taskQueue", taskQueueName, "callbackQueue", callbackQueueName)
-		if err := asynqServer.Run(mux); err != nil {
+		if err := consumer.Start(context.Background()); err != nil {
 			logger.Error("Worker 启动失败", "region", region, "az", az, "workerType", workerType, "error", err)
 			os.Exit(1)
 		}
@@ -147,7 +123,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	asynqServer.Shutdown()
+	consumer.Stop()
 
 	<-ctx.Done()
 	logger.Info("Worker 已关闭", "region", region, "az", az, "workerType", workerType)

@@ -11,25 +11,25 @@ import (
 	"workflow_qoder/internal/queue"
 
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
 	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/yourorg/nsp-common/pkg/taskqueue"
 )
 
 type VFWOrchestrator struct {
-	policyDAO   *dao.FirewallPolicyDAO
-	taskDAO     *dao.VFWTaskDAO
-	asynqClient *asynq.Client
-	region      string
-	az          string
+	policyDAO *dao.FirewallPolicyDAO
+	taskDAO   *dao.VFWTaskDAO
+	broker    taskqueue.Broker
+	region    string
+	az        string
 }
 
-func NewVFWOrchestrator(db *sql.DB, asynqClient *asynq.Client, region, az string) *VFWOrchestrator {
+func NewVFWOrchestrator(db *sql.DB, broker taskqueue.Broker, region, az string) *VFWOrchestrator {
 	return &VFWOrchestrator{
-		policyDAO:   dao.NewFirewallPolicyDAO(db),
-		taskDAO:     dao.NewVFWTaskDAO(db),
-		asynqClient: asynqClient,
-		region:      region,
-		az:          az,
+		policyDAO: dao.NewFirewallPolicyDAO(db),
+		taskDAO:   dao.NewVFWTaskDAO(db),
+		broker:    broker,
+		region:    region,
+		az:        az,
 	}
 }
 
@@ -176,24 +176,25 @@ func (o *VFWOrchestrator) enqueueTask(ctx context.Context, task *models.Task) er
 
 	queueName := queue.GetPriorityQueueName(o.region, o.az, deviceType, priority)
 
-	asynqTask := asynq.NewTask(task.TaskType, payloadData)
-	info, err := o.asynqClient.Enqueue(
-		asynqTask,
-		asynq.Queue(queueName),
-	)
+	tqTask := &taskqueue.Task{
+		Type:    task.TaskType,
+		Payload: payloadData,
+		Queue:   queueName,
+	}
+	info, err := o.broker.Publish(ctx, tqTask)
 	if err != nil {
 		return fmt.Errorf("入队失败: %v", err)
 	}
 
-	if err := o.taskDAO.UpdateAsynqTaskID(ctx, task.ID, info.ID); err != nil {
-		return fmt.Errorf("更新Asynq任务ID失败: %v", err)
+	if err := o.taskDAO.UpdateAsynqTaskID(ctx, task.ID, info.BrokerTaskID); err != nil {
+		return fmt.Errorf("更新Broker任务ID失败: %v", err)
 	}
 
 	if err := o.taskDAO.UpdateStatus(ctx, task.ID, models.TaskStatusQueued); err != nil {
 		return fmt.Errorf("更新任务状态失败: %v", err)
 	}
 
-	logger.InfoContext(ctx, "任务已入队", "az", o.az, "task_name", task.TaskName, "asynq_id", info.ID, "queue", queueName)
+	logger.InfoContext(ctx, "任务已入队", "az", o.az, "task_name", task.TaskName, "broker_id", info.BrokerTaskID, "queue", queueName)
 	return nil
 }
 

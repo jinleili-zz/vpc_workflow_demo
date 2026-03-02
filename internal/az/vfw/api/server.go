@@ -16,8 +16,8 @@ import (
 	"workflow_qoder/internal/queue"
 
 	"github.com/gin-gonic/gin"
-	"github.com/hibiken/asynq"
 	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/yourorg/nsp-common/pkg/taskqueue"
 )
 
 type Server struct {
@@ -28,10 +28,10 @@ type Server struct {
 	callbackQueueName string
 }
 
-func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, db *sql.DB) *Server {
+func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, db *sql.DB) *Server {
 	router := gin.Default()
 
-	orch := orchestrator.NewVFWOrchestrator(db, asynqClient, cfg.Region, cfg.AZ)
+	orch := orchestrator.NewVFWOrchestrator(db, broker, cfg.Region, cfg.AZ)
 	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ) + "_vfw"
 
 	server := &Server{
@@ -176,31 +176,29 @@ func (s *Server) countPoliciesByZone(c *gin.Context) {
 	})
 }
 
-func (s *Server) HandleTaskCallback() func(context.Context, *asynq.Task) error {
-	return func(ctx context.Context, t *asynq.Task) error {
-		var payload struct {
-			TaskID       string      `json:"task_id"`
-			Status       string      `json:"status"`
-			Result       interface{} `json:"result"`
-			ErrorMessage string      `json:"error_message"`
-		}
-
-		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
-			return fmt.Errorf("解析回调载荷失败: %v", err)
-		}
-
-		logger.InfoContext(ctx, "收到任务回调", "az", s.cfg.AZ, "task_id", payload.TaskID, "status", payload.Status)
-
-		status := models.TaskStatus(payload.Status)
-		err := s.orchestrator.HandleTaskCallback(ctx, payload.TaskID, status, payload.Result, payload.ErrorMessage)
-		if err != nil {
-			logger.ErrorContext(ctx, "任务回调处理失败", "az", s.cfg.AZ, "error", err)
-			return err
-		}
-
-		logger.InfoContext(ctx, "任务回调处理成功", "az", s.cfg.AZ, "task_id", payload.TaskID)
-		return nil
+func (s *Server) HandleTaskCallback(ctx context.Context, payload []byte) error {
+	var cb struct {
+		TaskID       string      `json:"task_id"`
+		Status       string      `json:"status"`
+		Result       interface{} `json:"result"`
+		ErrorMessage string      `json:"error_message"`
 	}
+
+	if err := json.Unmarshal(payload, &cb); err != nil {
+		return fmt.Errorf("解析回调载荷失败: %v", err)
+	}
+
+	logger.InfoContext(ctx, "收到任务回调", "az", s.cfg.AZ, "task_id", cb.TaskID, "status", cb.Status)
+
+	status := models.TaskStatus(cb.Status)
+	err := s.orchestrator.HandleTaskCallback(ctx, cb.TaskID, status, cb.Result, cb.ErrorMessage)
+	if err != nil {
+		logger.ErrorContext(ctx, "任务回调处理失败", "az", s.cfg.AZ, "error", err)
+		return err
+	}
+
+	logger.InfoContext(ctx, "任务回调处理成功", "az", s.cfg.AZ, "task_id", cb.TaskID)
+	return nil
 }
 
 func (s *Server) GetCallbackQueueName() string {

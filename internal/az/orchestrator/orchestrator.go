@@ -9,32 +9,32 @@ import (
 	"os"
 
 	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/yourorg/nsp-common/pkg/taskqueue"
 
 	"workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"
 	"workflow_qoder/internal/queue"
 
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
 )
 
 type AZOrchestrator struct {
-	vpcDAO      *dao.VPCDAO
-	subnetDAO   *dao.SubnetDAO
-	taskDAO     *dao.TaskDAO
-	asynqClient *asynq.Client
-	region      string
-	az          string
+	vpcDAO    *dao.VPCDAO
+	subnetDAO *dao.SubnetDAO
+	taskDAO   *dao.TaskDAO
+	broker    taskqueue.Broker
+	region    string
+	az        string
 }
 
-func NewAZOrchestrator(db *sql.DB, asynqClient *asynq.Client, region, az string) *AZOrchestrator {
+func NewAZOrchestrator(db *sql.DB, broker taskqueue.Broker, region, az string) *AZOrchestrator {
 	return &AZOrchestrator{
-		vpcDAO:      dao.NewVPCDAO(db),
-		subnetDAO:   dao.NewSubnetDAO(db),
-		taskDAO:     dao.NewTaskDAO(db),
-		asynqClient: asynqClient,
-		region:      region,
-		az:          az,
+		vpcDAO:    dao.NewVPCDAO(db),
+		subnetDAO: dao.NewSubnetDAO(db),
+		taskDAO:   dao.NewTaskDAO(db),
+		broker:    broker,
+		region:    region,
+		az:        az,
 	}
 }
 
@@ -312,24 +312,25 @@ func (o *AZOrchestrator) enqueueTask(ctx context.Context, task *models.Task) err
 
 	queueName := queue.GetPriorityQueueName(o.region, o.az, deviceType, priority)
 
-	asynqTask := asynq.NewTask(task.TaskType, payloadData)
-	info, err := o.asynqClient.Enqueue(
-		asynqTask,
-		asynq.Queue(queueName),
-	)
+	tqTask := &taskqueue.Task{
+		Type:    task.TaskType,
+		Payload: payloadData,
+		Queue:   queueName,
+	}
+	info, err := o.broker.Publish(ctx, tqTask)
 	if err != nil {
 		return fmt.Errorf("入队失败: %v", err)
 	}
 
-	if err := o.taskDAO.UpdateAsynqTaskID(ctx, task.ID, info.ID); err != nil {
-		return fmt.Errorf("更新Asynq任务ID失败: %v", err)
+	if err := o.taskDAO.UpdateAsynqTaskID(ctx, task.ID, info.BrokerTaskID); err != nil {
+		return fmt.Errorf("更新Broker任务ID失败: %v", err)
 	}
 
 	if err := o.taskDAO.UpdateStatus(ctx, task.ID, models.TaskStatusQueued); err != nil {
 		return fmt.Errorf("更新任务状态失败: %v", err)
 	}
 
-	logger.InfoContext(ctx, "任务已入队", "az", o.az, "taskName", task.TaskName, "asynqID", info.ID, "queue", queueName, "priority", priority)
+	logger.InfoContext(ctx, "任务已入队", "az", o.az, "taskName", task.TaskName, "brokerID", info.BrokerTaskID, "queue", queueName, "priority", priority)
 	return nil
 }
 

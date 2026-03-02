@@ -17,6 +17,7 @@ import (
 	"github.com/hibiken/asynq"
 	_ "github.com/lib/pq"
 	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
 )
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -94,55 +95,32 @@ func main() {
 	logger.Info("[AZ NSP VFW] PostgreSQL 连接成功", "database", dbName)
 
 	redisAddr := cfg.GetRedisAddr()
-	addrs := strings.Split(redisAddr, ",")
+	redisBrokerDB := cfg.GetRedisBrokerDB()
+	redisOpt := config.MakeAsynqRedisOpt(redisAddr, redisBrokerDB)
 
-	var asynqClientOpt asynq.RedisConnOpt
-	if len(addrs) > 1 {
-		asynqClientOpt = asynq.RedisClusterClientOpt{
-			Addrs: addrs,
-		}
-	} else {
-		asynqClientOpt = asynq.RedisClientOpt{
-			Addr: redisAddr,
-			DB:   cfg.GetRedisBrokerDB(),
-		}
-	}
+	// 创建 Broker（用于 orchestrator 入队任务）
+	broker := asynqbroker.NewBroker(redisOpt)
+	defer broker.Close()
 
-	asynqClient := asynq.NewClient(asynqClientOpt)
-	defer asynqClient.Close()
-
-	server := api.NewServer(cfg, asynqClient, pgDB)
+	server := api.NewServer(cfg, broker, pgDB)
 
 	callbackQueueName := server.GetCallbackQueueName()
 
-	var asynqServerOpt asynq.RedisConnOpt
-	if len(addrs) > 1 {
-		asynqServerOpt = asynq.RedisClusterClientOpt{
-			Addrs: addrs,
-		}
-	} else {
-		asynqServerOpt = asynq.RedisClientOpt{
-			Addr: redisAddr,
-			DB:   cfg.GetRedisBrokerDB(),
-		}
-	}
-
-	asynqServer := asynq.NewServer(
-		asynqServerOpt,
-		asynq.Config{
-			Concurrency: 10,
-			Queues: map[string]int{
-				callbackQueueName: 10,
-			},
+	// 创建 Consumer 消费回调队列
+	callbackConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
+		Concurrency: 10,
+		Queues: map[string]int{
+			callbackQueueName: 10,
 		},
-	)
+	})
 
-	mux := asynq.NewServeMux()
-	mux.HandleFunc("task_callback", server.HandleTaskCallback())
+	callbackConsumer.HandleRaw("task_callback", func(ctx context.Context, t *asynq.Task) error {
+		return server.HandleTaskCallback(ctx, t.Payload())
+	})
 
 	go func() {
-		if err := asynqServer.Run(mux); err != nil {
-			logger.Error("[AZ NSP VFW] Asynq服务器启动失败", "error", err)
+		if err := callbackConsumer.Start(context.Background()); err != nil {
+			logger.Error("[AZ NSP VFW] 回调消费者启动失败", "error", err)
 		}
 	}()
 
@@ -176,6 +154,6 @@ func main() {
 
 	logger.Info("[AZ NSP VFW] 正在关闭...")
 	cancel()
-	asynqServer.Shutdown()
+	callbackConsumer.Stop()
 	logger.Info("[AZ NSP VFW] 已关闭")
 }
