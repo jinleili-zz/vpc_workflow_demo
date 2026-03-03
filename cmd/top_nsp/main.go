@@ -63,17 +63,17 @@ func main() {
 	}
 	defer components.Shutdown()
 
-	logger.Info("========================================")
-	logger.Info("Top NSP VPC 启动中...")
-	logger.Info("========================================")
+	logger.Platform().Info("========================================")
+	logger.Platform().Info("Top NSP VPC 启动中...")
+	logger.Platform().Info("========================================")
 
 	// Wait for PostgreSQL with retry
 	topDB := waitForPostgres(postgresDSN, 30)
 	if topDB != nil {
 		defer topDB.Close()
-		logger.Info("PostgreSQL 连接成功")
+		logger.Platform().Info("PostgreSQL 连接成功")
 	} else {
-		logger.Warn("PostgreSQL 连接失败，将不同步拓扑")
+		logger.Platform().Warn("PostgreSQL 连接失败，将不同步拓扑")
 	}
 
 	// Initialize registry
@@ -93,19 +93,19 @@ func main() {
 
 	// Start server
 	addr := ":" + port
-	logger.Info("启动服务", "port", port)
+	logger.Platform().Info("启动服务", "port", port)
 
 	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		logger.Info("收到关闭信号，正在优雅关闭...")
+		logger.Platform().Info("收到关闭信号，正在优雅关闭...")
 		cancel()
 	}()
 
 	if err := server.Run(addr); err != nil {
-		logger.Error("服务启动失败", "error", err)
+		logger.Platform().Error("服务启动失败", "error", err)
 		os.Exit(1)
 	}
 }
@@ -130,7 +130,7 @@ func waitForPostgres(dsn string, maxRetries int) *sql.DB {
 			}
 			db.Close()
 		}
-		logger.Info("等待 PostgreSQL 就绪...", "attempt", i+1, "max", maxRetries)
+		logger.Platform().Info("等待 PostgreSQL 就绪...", "attempt", i+1, "max", maxRetries)
 		time.Sleep(2 * time.Second)
 	}
 	return nil

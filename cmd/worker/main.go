@@ -41,11 +41,11 @@ func main() {
 	}
 	defer logger.Sync()
 
-	logger.Info("========================================")
-	logger.Info("Worker 启动中...")
-	logger.Info("========================================")
+	logger.Platform().Info("========================================")
+	logger.Platform().Info("Worker 启动中...")
+	logger.Platform().Info("========================================")
 
-	logger.Info("Worker 配置", "region", region, "az", az, "type", workerType)
+	logger.Platform().Info("Worker 配置", "region", region, "az", az, "type", workerType)
 
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
@@ -67,7 +67,7 @@ func main() {
 	case "firewall":
 		deviceType = queue.DeviceTypeFirewall
 	default:
-		logger.Error("不支持的 WORKER_TYPE", "workerType", workerType, "supported", "switch, loadbalancer, firewall")
+		logger.Platform().Error("不支持的 WORKER_TYPE", "workerType", workerType, "supported", "switch, loadbalancer, firewall")
 		os.Exit(1)
 	}
 
@@ -107,9 +107,9 @@ func main() {
 	taskQueueName := queue.GetQueueName(region, az, deviceType)
 
 	go func() {
-		logger.Info("Worker 启动", "region", region, "az", az, "workerType", workerType, "concurrency", workerCount, "taskQueue", taskQueueName, "callbackQueue", callbackQueueName)
+		logger.Platform().Info("Worker 启动", "region", region, "az", az, "workerType", workerType, "concurrency", workerCount, "taskQueue", taskQueueName, "callbackQueue", callbackQueueName)
 		if err := consumer.Start(context.Background()); err != nil {
-			logger.Error("Worker 启动失败", "region", region, "az", az, "workerType", workerType, "error", err)
+			logger.Platform().Error("Worker 启动失败", "region", region, "az", az, "workerType", workerType, "error", err)
 			os.Exit(1)
 		}
 	}()
@@ -118,7 +118,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	logger.Info("Worker 收到退出信号，正在关闭...", "region", region, "az", az, "workerType", workerType)
+	logger.Platform().Info("Worker 收到退出信号，正在关闭...", "region", region, "az", az, "workerType", workerType)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -126,5 +126,5 @@ func main() {
 	consumer.Stop()
 
 	<-ctx.Done()
-	logger.Info("Worker 已关闭", "region", region, "az", az, "workerType", workerType)
+	logger.Platform().Info("Worker 已关闭", "region", region, "az", az, "workerType", workerType)
 }

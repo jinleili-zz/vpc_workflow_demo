@@ -42,9 +42,9 @@ func main() {
 	}
 	defer logger.Sync()
 
-	logger.Info("========================================")
-	logger.Info("AZ NSP 启动中...")
-	logger.Info("========================================")
+	logger.Platform().Info("========================================")
+	logger.Platform().Info("AZ NSP 启动中...")
+	logger.Platform().Info("========================================")
 
 	cfg := config.LoadConfig()
 	cfg.ServiceType = "az"
@@ -53,7 +53,7 @@ func main() {
 	topNSPAddr := os.Getenv("TOP_NSP_ADDR")
 
 	if region == "" || az == "" {
-		logger.Error("必须设置环境变量 REGION 和 AZ")
+		logger.Platform().Error("必须设置环境变量 REGION 和 AZ")
 		os.Exit(1)
 	}
 
@@ -72,8 +72,8 @@ func main() {
 	cfg.Port = portInt
 	cfg.AZNSP.TopNSPAddr = topNSPAddr
 
-	logger.Info("[AZ NSP] 服务配置", "region", region, "az", az, "port", portInt)
-	logger.Info("[AZ NSP] Top NSP地址", "addr", topNSPAddr)
+	logger.Platform().Info("[AZ NSP] 服务配置", "region", region, "az", az, "port", portInt)
+	logger.Platform().Info("[AZ NSP] Top NSP地址", "addr", topNSPAddr)
 
 	// Build PostgreSQL DSN
 	pgHost := getEnvOrDefault("POSTGRES_HOST", "postgres")
@@ -94,16 +94,16 @@ func main() {
 			}
 			pgDB.Close()
 		}
-		logger.Info("等待 PostgreSQL 就绪...", "attempt", i+1)
+		logger.Platform().Info("等待 PostgreSQL 就绪...", "attempt", i+1)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
-		logger.Error("PostgreSQL 连接失败", "error", err)
+		logger.Platform().Error("PostgreSQL 连接失败", "error", err)
 		os.Exit(1)
 	}
 	defer pgDB.Close()
 
-	logger.Info("[AZ NSP] PostgreSQL 连接成功", "database", dbName)
+	logger.Platform().Info("[AZ NSP] PostgreSQL 连接成功", "database", dbName)
 
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
@@ -118,7 +118,7 @@ func main() {
 	server := api.NewServer(cfg, broker, pgDB)
 
 	if err := server.RegisterToTopNSP(); err != nil {
-		logger.Info("[AZ NSP] 注册到Top NSP失败 (将在后续心跳中重试)", "az", az, "error", err)
+		logger.Platform().Info("[AZ NSP] 注册到Top NSP失败 (将在后续心跳中重试)", "az", az, "error", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -139,18 +139,18 @@ func main() {
 	})
 
 	go func() {
-		logger.Info("[AZ NSP] 回调处理器启动", "az", az, "queue", callbackQueueName)
+		logger.Platform().Info("[AZ NSP] 回调处理器启动", "az", az, "queue", callbackQueueName)
 		if err := callbackConsumer.Start(context.Background()); err != nil {
-			logger.Error("[AZ NSP] 回调处理器启动失败", "az", az, "error", err)
+			logger.Platform().Error("[AZ NSP] 回调处理器启动失败", "az", az, "error", err)
 			os.Exit(1)
 		}
 	}()
 
 	go func() {
 		addr := ":" + port
-		logger.Info("[AZ NSP] API服务启动", "az", az, "port", port)
+		logger.Platform().Info("[AZ NSP] API服务启动", "az", az, "port", port)
 		if err := server.Run(addr); err != nil {
-			logger.Error("[AZ NSP] API服务启动失败", "az", az, "error", err)
+			logger.Platform().Error("[AZ NSP] API服务启动失败", "az", az, "error", err)
 			os.Exit(1)
 		}
 	}()
@@ -159,7 +159,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	logger.Info("[AZ NSP] 收到退出信号，正在关闭...", "az", az)
+	logger.Platform().Info("[AZ NSP] 收到退出信号，正在关闭...", "az", az)
 
 	cancel()
 
@@ -169,5 +169,5 @@ func main() {
 	callbackConsumer.Stop()
 
 	<-shutdownCtx.Done()
-	logger.Info("[AZ NSP] 服务已关闭", "az", az)
+	logger.Platform().Info("[AZ NSP] 服务已关闭", "az", az)
 }

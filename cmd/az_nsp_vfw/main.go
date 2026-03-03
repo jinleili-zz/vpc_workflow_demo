@@ -50,9 +50,9 @@ func main() {
 	}
 	defer logger.Sync()
 
-	logger.Info("========================================")
-	logger.Info("AZ NSP VFW 启动中...")
-	logger.Info("========================================")
+	logger.Platform().Info("========================================")
+	logger.Platform().Info("AZ NSP VFW 启动中...")
+	logger.Platform().Info("========================================")
 
 	port := 8080
 	if portStr := os.Getenv("PORT"); portStr != "" {
@@ -62,7 +62,7 @@ func main() {
 	}
 	cfg.Port = port
 
-	logger.Info("[AZ NSP VFW] 服务配置", "region", region, "az", az, "port", port)
+	logger.Platform().Info("[AZ NSP VFW] 服务配置", "region", region, "az", az, "port", port)
 
 	// Build PostgreSQL DSN
 	pgHost := getEnvOrDefault("POSTGRES_HOST", "postgres")
@@ -83,16 +83,16 @@ func main() {
 			}
 			pgDB.Close()
 		}
-		logger.Info("[AZ NSP VFW] 等待 PostgreSQL 就绪...", "attempt", i+1)
+		logger.Platform().Info("[AZ NSP VFW] 等待 PostgreSQL 就绪...", "attempt", i+1)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
-		logger.Error("PostgreSQL 连接失败", "error", err)
+		logger.Platform().Error("PostgreSQL 连接失败", "error", err)
 		os.Exit(1)
 	}
 	defer pgDB.Close()
 
-	logger.Info("[AZ NSP VFW] PostgreSQL 连接成功", "database", dbName)
+	logger.Platform().Info("[AZ NSP VFW] PostgreSQL 连接成功", "database", dbName)
 
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
@@ -120,7 +120,7 @@ func main() {
 
 	go func() {
 		if err := callbackConsumer.Start(context.Background()); err != nil {
-			logger.Error("[AZ NSP VFW] 回调消费者启动失败", "error", err)
+			logger.Platform().Error("[AZ NSP VFW] 回调消费者启动失败", "error", err)
 		}
 	}()
 
@@ -128,7 +128,7 @@ func main() {
 
 	for i := 0; i < 10; i++ {
 		if err := server.RegisterToTopNSP(); err != nil {
-			logger.Info("[AZ NSP VFW] 注册失败，重试中...", "attempt", i+1, "error", err)
+			logger.Platform().Info("[AZ NSP VFW] 注册失败，重试中...", "attempt", i+1, "error", err)
 			time.Sleep(3 * time.Second)
 			continue
 		}
@@ -143,7 +143,7 @@ func main() {
 	go func() {
 		addr := fmt.Sprintf(":%d", port)
 		if err := server.Run(addr); err != nil {
-			logger.Error("[AZ NSP VFW] 服务启动失败", "error", err)
+			logger.Platform().Error("[AZ NSP VFW] 服务启动失败", "error", err)
 			os.Exit(1)
 		}
 	}()
@@ -152,8 +152,8 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	logger.Info("[AZ NSP VFW] 正在关闭...")
+	logger.Platform().Info("[AZ NSP VFW] 正在关闭...")
 	cancel()
 	callbackConsumer.Stop()
-	logger.Info("[AZ NSP VFW] 已关闭")
+	logger.Platform().Info("[AZ NSP VFW] 已关闭")
 }

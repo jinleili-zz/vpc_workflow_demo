@@ -96,7 +96,7 @@ func Initialize(ctx context.Context, cfg *Config) (*Components, error) {
 	// 4. Initialize Traced HTTP Client
 	c.TracedHTTP = trace.NewTracedClient(nil)
 	
-	logger.Info("nsp-common components initialized",
+	logger.Platform().Info("nsp-common components initialized",
 		"service", cfg.ServiceName,
 		"instance", cfg.InstanceID,
 		"auth_enabled", cfg.EnableAuth,
@@ -221,16 +221,16 @@ func GinLoggerMiddleware() gin.HandlerFunc {
 		
 		c.Next()
 		
-		// Log with trace context
+		// Log with trace context using Access logger
 		ctx := c.Request.Context()
 		latency := time.Since(start)
 		
-		logger.InfoContext(ctx, "http request",
-			"method", c.Request.Method,
-			"path", path,
-			"status", c.Writer.Status(),
-			"latency_ms", latency.Milliseconds(),
-			"client_ip", c.ClientIP(),
+		logger.Access().InfoContext(ctx, "http request",
+			logger.FieldHTTPMethod, c.Request.Method,
+			logger.FieldHTTPPath, path,
+			logger.FieldHTTPStatus, c.Writer.Status(),
+			logger.FieldHTTPLatency, latency.Milliseconds(),
+			logger.FieldClientIP, c.ClientIP(),
 		)
 	}
 }

@@ -24,11 +24,11 @@ import (
 //	    Logger: adapter.GetAsynqLogger(),
 //	})
 func SetupAllAdapters() {
-	// Setup Gin logging
+	// Setup Gin logging (using access logger)
 	ginAdapter := NewGinAdapter(nil)
 	ginAdapter.SetupGinLogging()
 	
-	logger.Info("Third-party framework logging adapters configured",
+	logger.Platform().Info("Third-party framework logging adapters configured",
 		"frameworks", []string{"gin", "asynq"})
 }
 
@@ -43,11 +43,12 @@ func SetupGinAdapter() {
 	ginAdapter := NewGinAdapter(nil)
 	ginAdapter.SetupGinLogging()
 	
-	logger.Info("Gin framework logging adapter configured")
+	logger.Platform().Info("Gin framework logging adapter configured")
 }
 
 // GetAsynqAdapter returns a configured Asynq adapter.
 // This is a convenience function for getting an Asynq logger.
+// The adapter uses platform logger for asynq framework logs.
 //
 // Usage:
 //

@@ -25,9 +25,9 @@ func main() {
 	}
 	defer logger.Sync()
 
-	logger.Info("========================================")
-	logger.Info("Top NSP VFW 启动中...")
-	logger.Info("========================================")
+	logger.Platform().Info("========================================")
+	logger.Platform().Info("Top NSP VFW 启动中...")
+	logger.Platform().Info("========================================")
 
 	port := 8082
 	if portStr := os.Getenv("PORT"); portStr != "" {
@@ -47,38 +47,38 @@ func main() {
 
 	vpcDB, err := sql.Open("postgres", vpcDSN)
 	if err != nil {
-		logger.Error("连接VPC数据库失败", "error", err)
+		logger.Platform().Error("连接VPC数据库失败", "error", err)
 		os.Exit(1)
 	}
 	defer vpcDB.Close()
 
 	if err := vpcDB.Ping(); err != nil {
-		logger.Error("VPC数据库连接测试失败", "error", err)
+		logger.Platform().Error("VPC数据库连接测试失败", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("[Top NSP VFW] VPC数据库连接成功")
+	logger.Platform().Info("[Top NSP VFW] VPC数据库连接成功")
 
 	vfwDB, err := sql.Open("postgres", vfwDSN)
 	if err != nil {
-		logger.Error("连接VFW数据库失败", "error", err)
+		logger.Platform().Error("连接VFW数据库失败", "error", err)
 		os.Exit(1)
 	}
 	defer vfwDB.Close()
 
 	if err := vfwDB.Ping(); err != nil {
-		logger.Error("VFW数据库连接测试失败", "error", err)
+		logger.Platform().Error("VFW数据库连接测试失败", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("[Top NSP VFW] VFW数据库连接成功")
+	logger.Platform().Info("[Top NSP VFW] VFW数据库连接成功")
 
 	policyService := service.NewPolicyService(vpcDB, vfwDB)
 
 	server := api.NewServer(policyService)
 
 	addr := fmt.Sprintf(":%d", port)
-	logger.Info("启动服务", "port", port)
+	logger.Platform().Info("启动服务", "port", port)
 	if err := server.Run(addr); err != nil {
-		logger.Error("服务启动失败", "error", err)
+		logger.Platform().Error("服务启动失败", "error", err)
 		os.Exit(1)
 	}
 }
