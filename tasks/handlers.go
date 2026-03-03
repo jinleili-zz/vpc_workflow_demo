@@ -10,27 +10,58 @@ import (
 	"github.com/yourorg/nsp-common/pkg/taskqueue"
 )
 
+// VPCParams VPC 任务参数结构体
+type VPCParams struct {
+	VPCName      string `json:"vpc_name"`
+	VRFName      string `json:"vrf_name"`
+	VLANId       int    `json:"vlan_id"`
+	FirewallZone string `json:"firewall_zone"`
+	Region       string `json:"region"`
+}
+
+// SubnetParams Subnet 任务参数结构体
+type SubnetParams struct {
+	SubnetName string `json:"subnet_name"`
+	VPCName    string `json:"vpc_name"`
+	CIDR       string `json:"cidr"`
+}
+
+// FirewallPolicyParams 防火墙策略任务参数结构体
+type FirewallPolicyParams struct {
+	PolicyName string `json:"policy_name"`
+	SourceZone string `json:"source_zone"`
+	DestZone   string `json:"dest_zone"`
+	SourceIP   string `json:"source_ip"`
+	DestIP     string `json:"dest_ip"`
+	DestPort   string `json:"dest_port"`
+	Protocol   string `json:"protocol"`
+	Action     string `json:"action"`
+}
+
+// LBParams 负载均衡任务参数结构体
+type LBParams struct {
+	PoolName     string `json:"pool_name"`
+	ListenerName string `json:"listener_name"`
+}
+
 func CreateVRFOnSwitchHandler(cbSender *taskqueue.CallbackSender) taskqueue.HandlerFunc {
 	return func(ctx context.Context, tp *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		var params map[string]interface{}
+		var params VPCParams
 		if err := json.Unmarshal(tp.Params, &params); err != nil {
 			return nil, fmt.Errorf("解析任务参数失败: %v", err)
 		}
 
-		vpcName := params["vpc_name"].(string)
-		vrfName := params["vrf_name"].(string)
-
-		logger.InfoContext(ctx, "开始创建VRF", "vrfName", vrfName, "vpcName", vpcName, "taskID", tp.TaskID)
+		logger.InfoContext(ctx, "开始创建VRF", "vrfName", params.VRFName, "vpcName", params.VPCName, "taskID", tp.TaskID)
 
 		time.Sleep(2 * time.Second)
 
 		result := map[string]interface{}{
-			"message":   fmt.Sprintf("交换机上成功创建VRF: %s, 配置命令: ip vrf %s", vrfName, vrfName),
-			"vrf_name":  vrfName,
+			"message":   fmt.Sprintf("交换机上成功创建VRF: %s, 配置命令: ip vrf %s", params.VRFName, params.VRFName),
+			"vrf_name":  params.VRFName,
 			"timestamp": time.Now().Unix(),
 		}
 
-		logger.InfoContext(ctx, "VRF创建完成", "vrfName", vrfName)
+		logger.InfoContext(ctx, "VRF创建完成", "vrfName", params.VRFName)
 
 		if err := cbSender.Success(ctx, tp.TaskID, result); err != nil {
 			logger.InfoContext(ctx, "VRF任务回调失败", "error", err)
@@ -43,27 +74,23 @@ func CreateVRFOnSwitchHandler(cbSender *taskqueue.CallbackSender) taskqueue.Hand
 
 func CreateVLANSubInterfaceHandler(cbSender *taskqueue.CallbackSender) taskqueue.HandlerFunc {
 	return func(ctx context.Context, tp *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		var params map[string]interface{}
+		var params VPCParams
 		if err := json.Unmarshal(tp.Params, &params); err != nil {
 			return nil, fmt.Errorf("解析任务参数失败: %v", err)
 		}
 
-		vpcName := params["vpc_name"].(string)
-		vrfName := params["vrf_name"].(string)
-		vlanID := int(params["vlan_id"].(float64))
-
-		logger.InfoContext(ctx, "开始创建VLAN子接口", "vlanID", vlanID, "vpcName", vpcName, "taskID", tp.TaskID)
+		logger.InfoContext(ctx, "开始创建VLAN子接口", "vlanID", params.VLANId, "vpcName", params.VPCName, "taskID", tp.TaskID)
 
 		time.Sleep(2 * time.Second)
 
 		result := map[string]interface{}{
-			"message":   fmt.Sprintf("交换机上成功创建VLAN子接口: VLAN %d, 接口配置: interface Vlan%d, ip vrf forwarding %s", vlanID, vlanID, vrfName),
-			"vlan_id":   vlanID,
-			"vrf_name":  vrfName,
+			"message":   fmt.Sprintf("交换机上成功创建VLAN子接口: VLAN %d, 接口配置: interface Vlan%d, ip vrf forwarding %s", params.VLANId, params.VLANId, params.VRFName),
+			"vlan_id":   params.VLANId,
+			"vrf_name":  params.VRFName,
 			"timestamp": time.Now().Unix(),
 		}
 
-		logger.InfoContext(ctx, "VLAN子接口创建完成", "vlanID", vlanID)
+		logger.InfoContext(ctx, "VLAN子接口创建完成", "vlanID", params.VLANId)
 
 		if err := cbSender.Success(ctx, tp.TaskID, result); err != nil {
 			logger.InfoContext(ctx, "VLAN任务回调失败", "error", err)
@@ -76,26 +103,23 @@ func CreateVLANSubInterfaceHandler(cbSender *taskqueue.CallbackSender) taskqueue
 
 func CreateFirewallZoneHandler(cbSender *taskqueue.CallbackSender) taskqueue.HandlerFunc {
 	return func(ctx context.Context, tp *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		var params map[string]interface{}
+		var params VPCParams
 		if err := json.Unmarshal(tp.Params, &params); err != nil {
 			return nil, fmt.Errorf("解析任务参数失败: %v", err)
 		}
 
-		vpcName := params["vpc_name"].(string)
-		firewallZone := params["firewall_zone"].(string)
-
-		logger.InfoContext(ctx, "开始创建安全区域", "firewallZone", firewallZone, "vpcName", vpcName, "taskID", tp.TaskID)
+		logger.InfoContext(ctx, "开始创建安全区域", "firewallZone", params.FirewallZone, "vpcName", params.VPCName, "taskID", tp.TaskID)
 
 		time.Sleep(2 * time.Second)
 
 		result := map[string]interface{}{
-			"message":       fmt.Sprintf("防火墙上成功创建安全区域: %s, 配置命令: security-zone name %s, set priority 100", firewallZone, firewallZone),
-			"firewall_zone": firewallZone,
+			"message":       fmt.Sprintf("防火墙上成功创建安全区域: %s, 配置命令: security-zone name %s, set priority 100", params.FirewallZone, params.FirewallZone),
+			"firewall_zone": params.FirewallZone,
 			"timestamp":     time.Now().Unix(),
 		}
 
-		logger.InfoContext(ctx, "防火墙安全区域创建完成", "firewallZone", firewallZone)
-		logger.InfoContext(ctx, "VPC所有任务执行完成", "vpcName", vpcName)
+		logger.InfoContext(ctx, "防火墙安全区域创建完成", "firewallZone", params.FirewallZone)
+		logger.InfoContext(ctx, "VPC所有任务执行完成", "vpcName", params.VPCName)
 
 		if err := cbSender.Success(ctx, tp.TaskID, result); err != nil {
 			logger.InfoContext(ctx, "防火墙任务回调失败", "error", err)
@@ -108,22 +132,18 @@ func CreateFirewallZoneHandler(cbSender *taskqueue.CallbackSender) taskqueue.Han
 
 func CreateSubnetOnSwitchHandler(cbSender *taskqueue.CallbackSender) taskqueue.HandlerFunc {
 	return func(ctx context.Context, tp *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		var params map[string]interface{}
+		var params SubnetParams
 		if err := json.Unmarshal(tp.Params, &params); err != nil {
 			return nil, fmt.Errorf("解析任务参数失败: %v", err)
 		}
 
-		subnetName := params["subnet_name"].(string)
-		vpcName := params["vpc_name"].(string)
-		cidr := params["cidr"].(string)
-
-		logger.InfoContext(ctx, "开始创建子网", "subnetName", subnetName, "cidr", cidr, "vpcName", vpcName, "taskID", tp.TaskID)
+		logger.InfoContext(ctx, "开始创建子网", "subnetName", params.SubnetName, "cidr", params.CIDR, "vpcName", params.VPCName, "taskID", tp.TaskID)
 
 		time.Sleep(2 * time.Second)
 
-		if cidr == "10.0.99.0/24" {
-			errorMsg := fmt.Sprintf("CIDR冲突: %s 在VPC %s 中已存在", cidr, vpcName)
-			logger.InfoContext(ctx, "子网创建失败", "subnetName", subnetName, "error", errorMsg)
+		if params.CIDR == "10.0.99.0/24" {
+			errorMsg := fmt.Sprintf("CIDR冲突: %s 在VPC %s 中已存在", params.CIDR, params.VPCName)
+			logger.InfoContext(ctx, "子网创建失败", "subnetName", params.SubnetName, "error", errorMsg)
 
 			if err := cbSender.Fail(ctx, tp.TaskID, errorMsg); err != nil {
 				logger.InfoContext(ctx, "子网任务回调失败", "error", err)
@@ -133,13 +153,13 @@ func CreateSubnetOnSwitchHandler(cbSender *taskqueue.CallbackSender) taskqueue.H
 		}
 
 		result := map[string]interface{}{
-			"message":     fmt.Sprintf("交换机上成功创建子网: %s, CIDR: %s", subnetName, cidr),
-			"subnet_name": subnetName,
-			"cidr":        cidr,
+			"message":     fmt.Sprintf("交换机上成功创建子网: %s, CIDR: %s", params.SubnetName, params.CIDR),
+			"subnet_name": params.SubnetName,
+			"cidr":        params.CIDR,
 			"timestamp":   time.Now().Unix(),
 		}
 
-		logger.InfoContext(ctx, "子网创建完成", "subnetName", subnetName)
+		logger.InfoContext(ctx, "子网创建完成", "subnetName", params.SubnetName)
 
 		if err := cbSender.Success(ctx, tp.TaskID, result); err != nil {
 			logger.InfoContext(ctx, "子网任务回调失败", "error", err)
@@ -152,25 +172,23 @@ func CreateSubnetOnSwitchHandler(cbSender *taskqueue.CallbackSender) taskqueue.H
 
 func ConfigureSubnetRoutingHandler(cbSender *taskqueue.CallbackSender) taskqueue.HandlerFunc {
 	return func(ctx context.Context, tp *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		var params map[string]interface{}
+		var params SubnetParams
 		if err := json.Unmarshal(tp.Params, &params); err != nil {
 			return nil, fmt.Errorf("解析任务参数失败: %v", err)
 		}
 
-		subnetName := params["subnet_name"].(string)
-
-		logger.InfoContext(ctx, "开始配置子网路由", "subnetName", subnetName, "taskID", tp.TaskID)
+		logger.InfoContext(ctx, "开始配置子网路由", "subnetName", params.SubnetName, "taskID", tp.TaskID)
 
 		time.Sleep(2 * time.Second)
 
 		result := map[string]interface{}{
-			"message":     fmt.Sprintf("成功配置子网路由: %s", subnetName),
-			"subnet_name": subnetName,
+			"message":     fmt.Sprintf("成功配置子网路由: %s", params.SubnetName),
+			"subnet_name": params.SubnetName,
 			"timestamp":   time.Now().Unix(),
 		}
 
-		logger.InfoContext(ctx, "子网路由配置完成", "subnetName", subnetName)
-		logger.InfoContext(ctx, "子网所有任务执行完成", "subnetName", subnetName)
+		logger.InfoContext(ctx, "子网路由配置完成", "subnetName", params.SubnetName)
+		logger.InfoContext(ctx, "子网所有任务执行完成", "subnetName", params.SubnetName)
 
 		if err := cbSender.Success(ctx, tp.TaskID, result); err != nil {
 			logger.InfoContext(ctx, "路由任务回调失败", "error", err)
@@ -183,14 +201,14 @@ func ConfigureSubnetRoutingHandler(cbSender *taskqueue.CallbackSender) taskqueue
 
 func CreateLBPoolHandler(cbSender *taskqueue.CallbackSender) taskqueue.HandlerFunc {
 	return func(ctx context.Context, tp *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		var params map[string]interface{}
+		var params LBParams
 		if err := json.Unmarshal(tp.Params, &params); err != nil {
 			return nil, fmt.Errorf("解析任务参数失败: %v", err)
 		}
 
-		poolName := "default-pool"
-		if name, ok := params["pool_name"].(string); ok {
-			poolName = name
+		poolName := params.PoolName
+		if poolName == "" {
+			poolName = "default-pool"
 		}
 
 		logger.InfoContext(ctx, "开始创建LB Pool", "poolName", poolName, "taskID", tp.TaskID)
@@ -216,14 +234,14 @@ func CreateLBPoolHandler(cbSender *taskqueue.CallbackSender) taskqueue.HandlerFu
 
 func ConfigureLBListenerHandler(cbSender *taskqueue.CallbackSender) taskqueue.HandlerFunc {
 	return func(ctx context.Context, tp *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		var params map[string]interface{}
+		var params LBParams
 		if err := json.Unmarshal(tp.Params, &params); err != nil {
 			return nil, fmt.Errorf("解析任务参数失败: %v", err)
 		}
 
-		listenerName := "default-listener"
-		if name, ok := params["listener_name"].(string); ok {
-			listenerName = name
+		listenerName := params.ListenerName
+		if listenerName == "" {
+			listenerName = "default-listener"
 		}
 
 		logger.InfoContext(ctx, "开始配置LB Listener", "listenerName", listenerName, "taskID", tp.TaskID)
@@ -249,22 +267,13 @@ func ConfigureLBListenerHandler(cbSender *taskqueue.CallbackSender) taskqueue.Ha
 
 func CreateFirewallPolicyHandler(cbSender *taskqueue.CallbackSender) taskqueue.HandlerFunc {
 	return func(ctx context.Context, tp *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		var params map[string]interface{}
+		var params FirewallPolicyParams
 		if err := json.Unmarshal(tp.Params, &params); err != nil {
 			return nil, fmt.Errorf("解析任务参数失败: %v", err)
 		}
 
-		policyName := params["policy_name"].(string)
-		sourceZone := params["source_zone"].(string)
-		destZone := params["dest_zone"].(string)
-		sourceIP := params["source_ip"].(string)
-		destIP := params["dest_ip"].(string)
-		destPort := params["dest_port"].(string)
-		protocol := params["protocol"].(string)
-		action := params["action"].(string)
-
-		logger.InfoContext(ctx, "开始创建防火墙策略", "policyName", policyName, "taskID", tp.TaskID)
-		logger.InfoContext(ctx, "防火墙策略规则", "sourceZone", sourceZone, "sourceIP", sourceIP, "destZone", destZone, "destIP", destIP, "destPort", destPort, "protocol", protocol)
+		logger.InfoContext(ctx, "开始创建防火墙策略", "policyName", params.PolicyName, "taskID", tp.TaskID)
+		logger.InfoContext(ctx, "防火墙策略规则", "sourceZone", params.SourceZone, "sourceIP", params.SourceIP, "destZone", params.DestZone, "destIP", params.DestIP, "destPort", params.DestPort, "protocol", params.Protocol)
 
 		time.Sleep(2 * time.Second)
 
@@ -278,18 +287,18 @@ security-policy
   destination-port %s
   protocol %s
   action %s
-`, policyName, sourceZone, destZone, sourceIP, destIP, destPort, protocol, action)
+`, params.PolicyName, params.SourceZone, params.DestZone, params.SourceIP, params.DestIP, params.DestPort, params.Protocol, params.Action)
 
 		result := map[string]interface{}{
-			"message":     fmt.Sprintf("防火墙策略创建成功: %s", policyName),
-			"policy_name": policyName,
-			"source_zone": sourceZone,
-			"dest_zone":   destZone,
+			"message":     fmt.Sprintf("防火墙策略创建成功: %s", params.PolicyName),
+			"policy_name": params.PolicyName,
+			"source_zone": params.SourceZone,
+			"dest_zone":   params.DestZone,
 			"config_cmd":  configCmd,
 			"timestamp":   time.Now().Unix(),
 		}
 
-		logger.InfoContext(ctx, "防火墙策略创建完成", "policyName", policyName)
+		logger.InfoContext(ctx, "防火墙策略创建完成", "policyName", params.PolicyName)
 
 		if err := cbSender.Success(ctx, tp.TaskID, result); err != nil {
 			logger.InfoContext(ctx, "防火墙策略任务回调失败", "error", err)

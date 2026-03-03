@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/yourorg/nsp-common/pkg/logger"
 	"github.com/yourorg/nsp-common/pkg/taskqueue"
+	"github.com/yourorg/nsp-common/pkg/trace"
 )
 
 type Server struct {
@@ -28,10 +29,10 @@ type Server struct {
 	callbackQueueName string
 }
 
-func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, db *sql.DB) *Server {
+func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, tracedHTTP *trace.TracedClient, db *sql.DB) *Server {
 	router := gin.Default()
 
-	orch := orchestrator.NewVFWOrchestrator(db, broker, cfg.Region, cfg.AZ)
+	orch := orchestrator.NewVFWOrchestrator(db, broker, tracedHTTP, cfg.Region, cfg.AZ)
 	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ) + "_vfw"
 
 	server := &Server{

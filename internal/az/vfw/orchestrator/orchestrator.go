@@ -13,23 +13,26 @@ import (
 	"github.com/google/uuid"
 	"github.com/yourorg/nsp-common/pkg/logger"
 	"github.com/yourorg/nsp-common/pkg/taskqueue"
+	"github.com/yourorg/nsp-common/pkg/trace"
 )
 
 type VFWOrchestrator struct {
-	policyDAO *dao.FirewallPolicyDAO
-	taskDAO   *dao.VFWTaskDAO
-	broker    taskqueue.Broker
-	region    string
-	az        string
+	policyDAO  *dao.FirewallPolicyDAO
+	taskDAO    *dao.VFWTaskDAO
+	broker     taskqueue.Broker
+	tracedHTTP *trace.TracedClient
+	region     string
+	az         string
 }
 
-func NewVFWOrchestrator(db *sql.DB, broker taskqueue.Broker, region, az string) *VFWOrchestrator {
+func NewVFWOrchestrator(db *sql.DB, broker taskqueue.Broker, tracedHTTP *trace.TracedClient, region, az string) *VFWOrchestrator {
 	return &VFWOrchestrator{
-		policyDAO: dao.NewFirewallPolicyDAO(db),
-		taskDAO:   dao.NewVFWTaskDAO(db),
-		broker:    broker,
-		region:    region,
-		az:        az,
+		policyDAO:  dao.NewFirewallPolicyDAO(db),
+		taskDAO:    dao.NewVFWTaskDAO(db),
+		broker:     broker,
+		tracedHTTP: tracedHTTP,
+		region:     region,
+		az:         az,
 	}
 }
 

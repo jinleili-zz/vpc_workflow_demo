@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 
 	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
@@ -190,16 +191,31 @@ func (o *Orchestrator) CreateAZSubnet(ctx context.Context, req *models.SubnetReq
 }
 
 func (o *Orchestrator) CheckZonePolicies(ctx context.Context, zone string) (int, error) {
-	url := fmt.Sprintf("http://top-nsp-vfw:8082/api/v1/firewall/zone/%s/policy-count", zone)
+	vfwAddr := os.Getenv("TOP_NSP_VFW_ADDR")
+	if vfwAddr == "" {
+		vfwAddr = "http://top-nsp-vfw:8082"
+	}
+	url := fmt.Sprintf("%s/api/v1/firewall/zone/%s/policy-count", vfwAddr, zone)
 	resp, err := http.Get(url)
 	if err != nil {
-		return 0, nil
+		logger.InfoContext(ctx, "查询Zone策略数量失败", "zone", zone, "error", err)
+		return 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, nil
+		logger.InfoContext(ctx, "查询Zone策略数量返回非200", "zone", zone, "status", resp.StatusCode)
+		return 0, fmt.Errorf("查询Zone策略数量返回状态码: %d", resp.StatusCode)
 	}
 
-	return 0, nil
+	var result struct {
+		Count int `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		logger.InfoContext(ctx, "解析Zone策略数量响应失败", "zone", zone, "error", err)
+		return 0, fmt.Errorf("解析响应失败: %v", err)
+	}
+
+	logger.InfoContext(ctx, "查询Zone策略数量成功", "zone", zone, "count", result.Count)
+	return result.Count, nil
 }

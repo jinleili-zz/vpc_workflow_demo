@@ -159,9 +159,12 @@ func (d *VPCDAO) ListAll(ctx context.Context) ([]*models.VPCResource, error) {
 }
 
 func (d *VPCDAO) CountSubnetsByVPCID(ctx context.Context, vpcID string) (int, error) {
-	query := `SELECT COUNT(*) FROM subnet_resources WHERE vpc_name = (SELECT vpc_name FROM vpc_resources WHERE id = $1) AND az = (SELECT az FROM vpc_resources WHERE id = $2) AND status != 'deleted'`
+	query := `
+		SELECT COUNT(*) FROM subnet_resources s
+		JOIN vpc_resources v ON s.vpc_name = v.vpc_name AND s.az = v.az
+		WHERE v.id = $1 AND s.status != 'deleted'`
 	var count int
-	err := d.db.QueryRowContext(ctx, query, vpcID, vpcID).Scan(&count)
+	err := d.db.QueryRowContext(ctx, query, vpcID).Scan(&count)
 	return count, err
 }
 
@@ -591,6 +594,13 @@ func (d *TaskDAO) UpdateStatus(ctx context.Context, id string, status models.Tas
 	return err
 }
 
+func (d *TaskDAO) UpdateStatusAndResetRetry(ctx context.Context, id string, status models.TaskStatus) error {
+	now := time.Now()
+	query := `UPDATE tasks SET status = $1, retry_count = 0, updated_at = $2 WHERE id = $3`
+	_, err := d.db.ExecContext(ctx, query, status, now, id)
+	return err
+}
+
 func (d *TaskDAO) UpdateResult(ctx context.Context, id string, status models.TaskStatus, result interface{}, errorMsg string) error {
 	now := time.Now()
 	resultJSON, _ := json.Marshal(result)
@@ -620,8 +630,8 @@ func (d *TaskDAO) GetTaskStats(ctx context.Context, resourceID string) (total, c
 	query := `
 		SELECT 
 			COUNT(*) as total,
-			SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-			SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+			COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as completed,
+			COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed
 		FROM tasks WHERE resource_id = $1
 	`
 	err = d.db.QueryRowContext(ctx, query, resourceID).Scan(&total, &completed, &failed)

@@ -19,6 +19,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/yourorg/nsp-common/pkg/logger"
 	"github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
+	"github.com/yourorg/nsp-common/pkg/trace"
 )
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -115,7 +116,10 @@ func main() {
 
 	callbackQueueName := queue.GetCallbackQueueName(region, az)
 
-	server := api.NewServer(cfg, broker, pgDB)
+	// 创建 Traced HTTP Client
+	tracedHTTP := trace.NewTracedClient(nil)
+
+	server := api.NewServer(cfg, broker, tracedHTTP, pgDB)
 
 	if err := server.RegisterToTopNSP(); err != nil {
 		logger.Platform().Info("[AZ NSP] 注册到Top NSP失败 (将在后续心跳中重试)", "az", az, "error", err)

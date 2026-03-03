@@ -10,6 +10,7 @@ import (
 
 	"github.com/yourorg/nsp-common/pkg/logger"
 	"github.com/yourorg/nsp-common/pkg/taskqueue"
+	"github.com/yourorg/nsp-common/pkg/trace"
 
 	"workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"
@@ -19,22 +20,24 @@ import (
 )
 
 type AZOrchestrator struct {
-	vpcDAO    *dao.VPCDAO
-	subnetDAO *dao.SubnetDAO
-	taskDAO   *dao.TaskDAO
-	broker    taskqueue.Broker
-	region    string
-	az        string
+	vpcDAO     *dao.VPCDAO
+	subnetDAO  *dao.SubnetDAO
+	taskDAO    *dao.TaskDAO
+	broker     taskqueue.Broker
+	tracedHTTP *trace.TracedClient
+	region     string
+	az         string
 }
 
-func NewAZOrchestrator(db *sql.DB, broker taskqueue.Broker, region, az string) *AZOrchestrator {
+func NewAZOrchestrator(db *sql.DB, broker taskqueue.Broker, tracedHTTP *trace.TracedClient, region, az string) *AZOrchestrator {
 	return &AZOrchestrator{
-		vpcDAO:    dao.NewVPCDAO(db),
-		subnetDAO: dao.NewSubnetDAO(db),
-		taskDAO:   dao.NewTaskDAO(db),
-		broker:    broker,
-		region:    region,
-		az:        az,
+		vpcDAO:     dao.NewVPCDAO(db),
+		subnetDAO:  dao.NewSubnetDAO(db),
+		taskDAO:    dao.NewTaskDAO(db),
+		broker:     broker,
+		tracedHTTP: tracedHTTP,
+		region:     region,
+		az:         az,
 	}
 }
 
@@ -64,7 +67,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 		}, nil
 	}
 
-	tasks := o.buildVPCTasks(vpcID, req)
+	tasks := o.buildVPCTasks(ctx, vpcID, req)
 	
 	if err := o.taskDAO.BatchCreate(ctx, tasks); err != nil {
 		return &models.VPCResponse{
@@ -104,7 +107,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	}, nil
 }
 
-func (o *AZOrchestrator) buildVPCTasks(vpcID string, req *models.VPCRequest) []*models.Task {
+func (o *AZOrchestrator) buildVPCTasks(ctx context.Context, vpcID string, req *models.VPCRequest) []*models.Task {
 	tasks := []*models.Task{
 		{
 			ID:           uuid.New().String(),
@@ -113,7 +116,7 @@ func (o *AZOrchestrator) buildVPCTasks(vpcID string, req *models.VPCRequest) []*
 			TaskType:     "create_vrf_on_switch",
 			TaskName:     "创建VRF",
 			TaskOrder:    1,
-			TaskParams:   o.buildVPCTaskParams(req),
+			TaskParams:   o.buildVPCTaskParams(ctx, req),
 			Status:       models.TaskStatusPending,
 			Priority:     int(queue.PriorityNormal),
 			DeviceType:   string(queue.DeviceTypeSwitch),
@@ -128,7 +131,7 @@ func (o *AZOrchestrator) buildVPCTasks(vpcID string, req *models.VPCRequest) []*
 			TaskType:     "create_vlan_subinterface",
 			TaskName:     "创建VLAN子接口",
 			TaskOrder:    2,
-			TaskParams:   o.buildVPCTaskParams(req),
+			TaskParams:   o.buildVPCTaskParams(ctx, req),
 			Status:       models.TaskStatusPending,
 			Priority:     int(queue.PriorityNormal),
 			DeviceType:   string(queue.DeviceTypeSwitch),
@@ -143,7 +146,7 @@ func (o *AZOrchestrator) buildVPCTasks(vpcID string, req *models.VPCRequest) []*
 			TaskType:     "create_firewall_zone",
 			TaskName:     "创建防火墙安全区域",
 			TaskOrder:    3,
-			TaskParams:   o.buildVPCTaskParams(req),
+			TaskParams:   o.buildVPCTaskParams(ctx, req),
 			Status:       models.TaskStatusPending,
 			Priority:     int(queue.PriorityNormal),
 			DeviceType:   string(queue.DeviceTypeFirewall),
@@ -155,7 +158,7 @@ func (o *AZOrchestrator) buildVPCTasks(vpcID string, req *models.VPCRequest) []*
 	return tasks
 }
 
-func (o *AZOrchestrator) buildVPCTaskParams(req *models.VPCRequest) string {
+func (o *AZOrchestrator) buildVPCTaskParams(ctx context.Context, req *models.VPCRequest) string {
 	params := map[string]interface{}{
 		"vpc_name":      req.VPCName,
 		"vrf_name":      req.VRFName,
@@ -163,7 +166,11 @@ func (o *AZOrchestrator) buildVPCTaskParams(req *models.VPCRequest) string {
 		"firewall_zone": req.FirewallZone,
 		"region":        req.Region,
 	}
-	data, _ := json.Marshal(params)
+	data, err := json.Marshal(params)
+	if err != nil {
+		logger.InfoContext(ctx, "序列化VPC任务参数失败", "error", err, "vpcName", req.VPCName)
+		return ""
+	}
 	return string(data)
 }
 
@@ -192,7 +199,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 		}, nil
 	}
 
-	tasks := o.buildSubnetTasks(subnetID, req)
+	tasks := o.buildSubnetTasks(ctx, subnetID, req)
 	
 	if err := o.taskDAO.BatchCreate(ctx, tasks); err != nil {
 		return &models.SubnetResponse{
@@ -232,7 +239,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	}, nil
 }
 
-func (o *AZOrchestrator) buildSubnetTasks(subnetID string, req *models.SubnetRequest) []*models.Task {
+func (o *AZOrchestrator) buildSubnetTasks(ctx context.Context, subnetID string, req *models.SubnetRequest) []*models.Task {
 	tasks := []*models.Task{
 		{
 			ID:           uuid.New().String(),
@@ -241,7 +248,7 @@ func (o *AZOrchestrator) buildSubnetTasks(subnetID string, req *models.SubnetReq
 			TaskType:     "create_subnet_on_switch",
 			TaskName:     "创建子网",
 			TaskOrder:    1,
-			TaskParams:   o.buildSubnetTaskParams(req),
+			TaskParams:   o.buildSubnetTaskParams(ctx, req),
 			Status:       models.TaskStatusPending,
 			Priority:     int(queue.PriorityNormal),
 			DeviceType:   string(queue.DeviceTypeSwitch),
@@ -256,7 +263,7 @@ func (o *AZOrchestrator) buildSubnetTasks(subnetID string, req *models.SubnetReq
 			TaskType:     "configure_subnet_routing",
 			TaskName:     "配置子网路由",
 			TaskOrder:    2,
-			TaskParams:   o.buildSubnetTaskParams(req),
+			TaskParams:   o.buildSubnetTaskParams(ctx, req),
 			Status:       models.TaskStatusPending,
 			Priority:     int(queue.PriorityNormal),
 			DeviceType:   string(queue.DeviceTypeSwitch),
@@ -268,7 +275,7 @@ func (o *AZOrchestrator) buildSubnetTasks(subnetID string, req *models.SubnetReq
 	return tasks
 }
 
-func (o *AZOrchestrator) buildSubnetTaskParams(req *models.SubnetRequest) string {
+func (o *AZOrchestrator) buildSubnetTaskParams(ctx context.Context, req *models.SubnetRequest) string {
 	params := map[string]interface{}{
 		"subnet_name": req.SubnetName,
 		"vpc_name":    req.VPCName,
@@ -276,7 +283,11 @@ func (o *AZOrchestrator) buildSubnetTaskParams(req *models.SubnetRequest) string
 		"az":          req.AZ,
 		"cidr":        req.CIDR,
 	}
-	data, _ := json.Marshal(params)
+	data, err := json.Marshal(params)
+	if err != nil {
+		logger.InfoContext(ctx, "序列化子网任务参数失败", "error", err, "subnetName", req.SubnetName)
+		return ""
+	}
 	return string(data)
 }
 
@@ -298,7 +309,10 @@ func (o *AZOrchestrator) enqueueTask(ctx context.Context, task *models.Task) err
 		"resource_id": task.ResourceID,
 		"task_params": task.TaskParams,
 	}
-	payloadData, _ := json.Marshal(payload)
+	payloadData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("序列化任务payload失败: %v", err)
+	}
 
 	deviceType := queue.DeviceType(task.DeviceType)
 	if deviceType == "" {
@@ -523,7 +537,7 @@ func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 		return fmt.Errorf("VPC下存在%d个子网，无法删除", subnetCount)
 	}
 
-	policyCount, err := o.checkZonePolicies(vpc.FirewallZone)
+	policyCount, err := o.checkZonePolicies(ctx, vpc.FirewallZone)
 	if err != nil {
 		logger.InfoContext(ctx, "检查Zone策略失败", "az", o.az, "error", err)
 	}
@@ -589,7 +603,7 @@ func (o *AZOrchestrator) DeleteVPCByID(ctx context.Context, vpcID string) error 
 		return fmt.Errorf("VPC下存在%d个子网，无法删除", subnetCount)
 	}
 
-	policyCount, err := o.checkZonePolicies(vpc.FirewallZone)
+	policyCount, err := o.checkZonePolicies(ctx, vpc.FirewallZone)
 	if err != nil {
 		logger.InfoContext(ctx, "检查Zone策略失败", "az", o.az, "error", err)
 	}
@@ -648,7 +662,7 @@ func (o *AZOrchestrator) ReplayTask(ctx context.Context, taskID string) error {
 		return fmt.Errorf("任务状态不是failed，无法重做 (当前状态: %s)", task.Status)
 	}
 
-	if err := o.taskDAO.UpdateStatus(ctx, taskID, models.TaskStatusPending); err != nil {
+	if err := o.taskDAO.UpdateStatusAndResetRetry(ctx, taskID, models.TaskStatusPending); err != nil {
 		return fmt.Errorf("更新任务状态为pending失败: %v", err)
 	}
 
@@ -660,14 +674,14 @@ func (o *AZOrchestrator) ReplayTask(ctx context.Context, taskID string) error {
 	return nil
 }
 
-func (o *AZOrchestrator) checkZonePolicies(zone string) (int, error) {
+func (o *AZOrchestrator) checkZonePolicies(ctx context.Context, zone string) (int, error) {
 	vfwAddr := os.Getenv("AZ_NSP_VFW_ADDR")
 	if vfwAddr == "" {
 		vfwAddr = fmt.Sprintf("http://az-nsp-vfw-%s:8080", o.az)
 	}
 
 	url := fmt.Sprintf("%s/api/v1/firewall/zone/%s/policy-count", vfwAddr, zone)
-	resp, err := http.Get(url)
+	resp, err := o.tracedHTTP.Get(ctx, url)
 	if err != nil {
 		return 0, err
 	}

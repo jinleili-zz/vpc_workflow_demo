@@ -333,26 +333,68 @@ RedisAddr: os.Getenv("REDIS_ADDR"),
 
 ## 三、问题汇总
 
-| 编号 | 严重级别 | 类型 | 文件位置 | 描述 |
-|------|---------|------|---------|------|
-| P1 | 🔴 严重 | Panic 风险 | `tasks/handlers.go:20` | 不安全类型断言 |
-| P2 | 🔴 严重 | 竞态条件 | `az/orchestrator/orchestrator.go:349` | 任务计数无事务保护 |
-| P3 | 🔴 严重 | 资源泄漏 | `top/api/server.go:241` | for 循环中 defer 泄漏 response body |
-| P4 | 🟠 高 | 设计缺陷 | `top/orchestrator/orchestrator.go:79` | SAGA 同步步骤对应异步 AZ 接口 |
-| P5 | 🟠 高 | 设计缺陷 | `top/api/server.go:232` | HTTP 调用未使用 TracedHTTP，无 trace/auth/timeout |
-| P6 | 🟠 高 | 功能缺失 | `az/orchestrator/orchestrator.go:534` | Delete 操作未触发设备任务 |
-| P7 | 🟠 高 | 性能 | `top/api/server.go:230` | 多 AZ 查询串行而非并行 |
-| P8 | 🟡 中 | 命名 | `go.mod:1` | 模块名拼写疑似错误（workflow_qoder） |
-| P9 | 🟡 中 | 错误处理 | `az/orchestrator/orchestrator.go:166` | json.Marshal 错误静默丢弃 |
-| P10 | 🟡 中 | SQL | `db/dao/dao.go:162` | 双重子查询，效率低 |
-| P11 | 🟡 中 | 链路追踪 | `az/orchestrator/orchestrator.go:664` | checkZonePolicies 未使用 TracedHTTP |
-| P12 | 🟡 中 | 代码规范 | `az/orchestrator/orchestrator.go:61` | 错误返回模式与 Go 惯例不符 |
-| P13 | 🟡 中 | 逻辑缺陷 | `az/orchestrator/orchestrator.go:641` | ReplayTask 未重置 RetryCount |
-| P14 | 🟡 中 | 逻辑缺陷 | `az/orchestrator/orchestrator.go:60` | 缺少 VPC 创建幂等性检查 |
-| P15 | 🟡 中 | 功能缺失 | `top/orchestrator/orchestrator.go:192` | CheckZonePolicies 实现为空，永远返回 0 |
-| P16 | 🟡 中 | 配置 | `top/orchestrator/orchestrator.go:193` | VFW 地址硬编码 |
-| P17 | 🟢 低 | 规范 | `internal/config/config.go` | 未复用 nsp-common config 包 |
-| P18 | 🟢 低 | 规范 | `tasks/handlers.go` | 中英文日志混用 |
-| P19 | 🟢 低 | 扩展性 | `db/dao/dao.go:126` | 列表接口缺分页 |
-| P20 | 🟢 低 | SQL | `db/dao/dao.go:619` | SUM 在无数据时返回 NULL 导致 Scan 报错 |
-| P21 | 🟢 低 | 配置 | `internal/config/config.go` | Redis/PostgreSQL 地址散落环境变量，建议统一用 nsp-common config 管理 |
+| 编号 | 严重级别 | 类型 | 文件位置 | 描述 | 修复决策 | 当前状态 |
+|------|---------|------|---------|------|---------|----------|
+| P1 | 🔴 严重 | Panic 风险 | `tasks/handlers.go:20` | 不安全类型断言 | **已修复** | ✅ 定义强类型 struct |
+| P2 | 🔴 严重 | 竞态条件 | `az/orchestrator/orchestrator.go:349` | 任务计数无事务保护 | 暂缓 | ⏳ 当前串行执行，风险可控 |
+| P3 | 🔴 严重 | 资源泄漏 | `top/api/server.go:241` | for 循环中 defer 泄漏 response body | **已修复** | ✅ 改为立即 Close |
+| P4 | 🟠 高 | 设计缺陷 | `top/orchestrator/orchestrator.go:79` | SAGA 同步步骤对应异步 AZ 接口 | 暂缓 | ⏳ 需架构评审 |
+| P5 | 🟠 高 | 设计缺陷 | `top/api/server.go:232` | HTTP 调用未使用 TracedHTTP | **已修复** | ✅ 注入 TracedHTTP |
+| P6 | 🟠 高 | 功能缺失 | `az/orchestrator/orchestrator.go:534` | Delete 操作未触发设备任务 | 暂缓 | ⏳ Demo 阶段 |
+| P7 | 🟠 高 | 性能 | `top/api/server.go:230` | 多 AZ 查询串行而非并行 | **待修复** | ⏳ 影响查询性能 |
+| P8 | 🟡 中 | 命名 | `go.mod:1` | 模块名拼写疑似错误 | 不修复 | ⏳ 影响范围大 |
+| P9 | 🟡 中 | 错误处理 | `az/orchestrator/orchestrator.go:166` | json.Marshal 错误静默丢弃 | **已修复** | ✅ 检查并记录错误 |
+| P10 | 🟡 中 | SQL | `db/dao/dao.go:162` | 双重子查询效率低 | **已修复** | ✅ 改为 JOIN |
+| P11 | 🟡 中 | 链路追踪 | `az/orchestrator/orchestrator.go:664` | checkZonePolicies 未使用 TracedHTTP | **已修复** | ✅ 注入 TracedHTTP |
+| P12 | 🟡 中 | 代码规范 | `az/orchestrator/orchestrator.go:61` | 错误返回模式与 Go 惯例不符 | 不修复 | ⏳ 改动成本高 |
+| P13 | 🟡 中 | 逻辑缺陷 | `az/orchestrator/orchestrator.go:641` | ReplayTask 未重置 RetryCount | **已修复** | ✅ 新增 Reset 方法 |
+| P14 | 🟡 中 | 逻辑缺陷 | `az/orchestrator/orchestrator.go:60` | 缺少 VPC 创建幂等性检查 | 暂缓 | ⏳ DB 唯一约束保护 |
+| P15 | 🟡 中 | 功能缺失 | `top/orchestrator/orchestrator.go:192` | CheckZonePolicies 实现为空 | **已修复** | ✅ 解析 response body |
+| P16 | 🟡 中 | 配置 | `top/orchestrator/orchestrator.go:193` | VFW 地址硬编码 | **已修复** | ✅ 支持环境变量配置 |
+| P17 | 🟢 低 | 规范 | `internal/config/config.go` | 未复用 nsp-common config 包 | 不修复 | ⏳ Demo 阶段 |
+| P18 | 🟢 低 | 规范 | `tasks/handlers.go` | 中英文日志混用 | 不修复 | ⏳ Demo 阶段 |
+| P19 | 🟢 低 | 扩展性 | `db/dao/dao.go:126` | 列表接口缺分页 | 不修复 | ⏳ Demo 阶段 |
+| P20 | 🟢 低 | SQL | `db/dao/dao.go:619` | SUM 在无数据时返回 NULL | **已修复** | ✅ 使用 COALESCE |
+| P21 | 🟢 低 | 配置 | `internal/config/config.go` | Redis/PostgreSQL 地址散落环境变量 | 不修复 | ⏳ Demo 阶段 |
+
+---
+
+## 四、修复计划
+
+### 第一优先级（必须修复 - 会导致运行时错误或资源问题）
+
+| 编号 | 问题 | 修复方案 | 当前状态 |
+|------|------|---------|----------|
+| **P1** | 不安全类型断言 | 定义强类型 struct，用 `json.Unmarshal` 解析 | ✅ 已完成 |
+| **P3** | for 循环中 defer 泄漏 | 将循环体抽取为独立函数，或直接调用 `resp.Body.Close()` | ✅ 已完成 |
+| **P15** | CheckZonePolicies 返回 0 | 解析 response body，正确返回策略数量 | ✅ 已完成 |
+| **P20** | SUM 返回 NULL | 使用 `COALESCE(SUM(...), 0)` 包装 | ✅ 已完成 |
+
+### 第二优先级（建议修复 - 影响可观测性和性能）
+
+| 编号 | 问题 | 修复方案 | 当前状态 |
+|------|------|---------|----------|
+| **P5** | HTTP 调用未使用 TracedHTTP | 将 `TracedHTTP` 注入到 Server/Orchestrator，替换裸 `http.Get` | ✅ 已完成 |
+| **P7** | 多 AZ 查询串行 | 使用 `sync.WaitGroup` + goroutine 并行查询，加 context 超时控制 | ⏳ 待修复 |
+| **P11** | checkZonePolicies 未使用 TracedHTTP | 同 P5，注入 TracedHTTP | ✅ 已完成 |
+| **P16** | VFW 地址硬编码 | 通过配置或环境变量传入 | ✅ 已完成 |
+
+### 第三优先级（可选修复 - 代码质量改进）
+
+| 编号 | 问题 | 修复方案 | 当前状态 |
+|------|------|---------|----------|
+| **P9** | json.Marshal 错误静默丢弃 | 检查错误并记录日志或返回错误 | ✅ 已完成 |
+| **P10** | 双重子查询效率低 | 改用 JOIN 语句优化 | ✅ 已完成 |
+| **P13** | ReplayTask 未重置 RetryCount | 在更新状态时同时重置 `retry_count = 0` | ✅ 已完成 |
+
+### 暂缓修复（需评审或 Demo 阶段不处理）
+
+| 编号 | 原因 | 当前状态 |
+|------|------|----------|
+| P2 | 当前工作流串行执行，竞态风险可控；需架构评审后决定是否引入事务 | ⏳ 暂缓 |
+| P4 | SAGA 同步/异步语义涉及架构调整，需单独讨论 | ⏳ 暂缓 |
+| P6 | Delete 回滚任务需要设计反向任务链，Demo 阶段暂不实现 | ⏳ 暂缓 |
+| P8 | 模块名修改影响全项目 import，收益不大 | ⏳ 暂缓 |
+| P12 | 错误返回模式统一需要大量改动 | ⏳ 暂缓 |
+| P14 | 数据库唯一约束已提供基本保护 | ⏳ 暂缓 |
+| P17-P19, P21 | Demo 阶段，非核心功能 | ⏳ 暂缓 |

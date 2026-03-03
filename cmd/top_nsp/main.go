@@ -83,7 +83,7 @@ func main() {
 	orch := orchestrator.NewOrchestrator(reg, topDB, components.SagaEngine, components.TracedHTTP)
 
 	// Initialize API server
-	server := api.NewServer(reg, orch)
+	server := api.NewServer(reg, orch, components.TracedHTTP)
 
 	// Setup middlewares (trace, auth, logger) BEFORE routes
 	components.SetupGinMiddlewares(server.Engine())

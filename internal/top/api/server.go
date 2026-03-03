@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"workflow_qoder/internal/models"
 	"workflow_qoder/internal/top/orchestrator"
@@ -11,22 +12,25 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/yourorg/nsp-common/pkg/trace"
 )
 
 // Server Top NSP API服务器
 type Server struct {
 	registry     *registry.Registry
 	orchestrator *orchestrator.Orchestrator
+	tracedHTTP   *trace.TracedClient
 	router       *gin.Engine
 }
 
 // NewServer 创建Top NSP服务器 (不立即设置路由，等待中间件配置后再调用 SetupRoutes)
-func NewServer(reg *registry.Registry, orch *orchestrator.Orchestrator) *Server {
+func NewServer(reg *registry.Registry, orch *orchestrator.Orchestrator, tracedHTTP *trace.TracedClient) *Server {
 	router := gin.New()
 
 	server := &Server{
 		registry:     reg,
 		orchestrator: orch,
+		tracedHTTP:   tracedHTTP,
 		router:       router,
 	}
 
@@ -201,7 +205,7 @@ func (s *Server) createVPC(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// getVPCStatus 查询VPC状态
+// getVPCStatus 查询VPC状态（并行查询所有AZ）
 func (s *Server) getVPCStatus(c *gin.Context) {
 	vpcName := c.Param("vpc_name")
 	ctx := c.Request.Context()
@@ -223,52 +227,68 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 	}
 
 	azStatuses := make(map[string]*AZStatus)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	overallStatus := "running"
 	hasCreating := false
 	hasFailed := false
 
 	for _, az := range azs {
-		statusURL := fmt.Sprintf("%s/api/v1/vpc/%s/status", az.NSPAddr, vpcName)
-		resp, err := http.Get(statusURL)
-		if err != nil {
-			logger.InfoContext(ctx, "查询AZ的VPC状态失败", "az", az.ID, "error", err)
+		wg.Add(1)
+		go func(az *models.AZ) {
+			defer wg.Done()
+
+			statusURL := fmt.Sprintf("%s/api/v1/vpc/%s/status", az.NSPAddr, vpcName)
+			resp, err := s.tracedHTTP.Get(ctx, statusURL)
+			if err != nil {
+				logger.InfoContext(ctx, "查询AZ的VPC状态失败", "az", az.ID, "error", err)
+				mu.Lock()
+				azStatuses[az.ID] = &AZStatus{
+					AZ:           az.ID,
+					Status:       "unknown",
+					ErrorMessage: fmt.Sprintf("查询失败: %v", err),
+				}
+				mu.Unlock()
+				return
+			}
+
+			if resp.StatusCode == http.StatusNotFound {
+				resp.Body.Close()
+				mu.Lock()
+				azStatuses[az.ID] = &AZStatus{
+					AZ:     az.ID,
+					Status: "not_found",
+				}
+				mu.Unlock()
+				return
+			}
+
+			var vpcStatus models.VPCStatusResponse
+			if err := json.NewDecoder(resp.Body).Decode(&vpcStatus); err != nil {
+				resp.Body.Close()
+				logger.InfoContext(ctx, "解析AZ的VPC状态失败", "az", az.ID, "error", err)
+				return
+			}
+			resp.Body.Close()
+
+			mu.Lock()
 			azStatuses[az.ID] = &AZStatus{
 				AZ:           az.ID,
-				Status:       "unknown",
-				ErrorMessage: fmt.Sprintf("查询失败: %v", err),
+				Status:       string(vpcStatus.Status),
+				Progress:     vpcStatus.Progress,
+				ErrorMessage: vpcStatus.ErrorMessage,
 			}
-			continue
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == http.StatusNotFound {
-			azStatuses[az.ID] = &AZStatus{
-				AZ:     az.ID,
-				Status: "not_found",
+			if vpcStatus.Status == models.ResourceStatusCreating {
+				hasCreating = true
 			}
-			continue
-		}
-
-		var vpcStatus models.VPCStatusResponse
-		if err := json.NewDecoder(resp.Body).Decode(&vpcStatus); err != nil {
-			logger.InfoContext(ctx, "解析AZ的VPC状态失败", "az", az.ID, "error", err)
-			continue
-		}
-
-		azStatuses[az.ID] = &AZStatus{
-			AZ:           az.ID,
-			Status:       string(vpcStatus.Status),
-			Progress:     vpcStatus.Progress,
-			ErrorMessage: vpcStatus.ErrorMessage,
-		}
-
-		if vpcStatus.Status == models.ResourceStatusCreating {
-			hasCreating = true
-		}
-		if vpcStatus.Status == models.ResourceStatusFailed {
-			hasFailed = true
-		}
+			if vpcStatus.Status == models.ResourceStatusFailed {
+				hasFailed = true
+			}
+			mu.Unlock()
+		}(az)
 	}
+
+	wg.Wait()
 
 	if hasFailed {
 		overallStatus = "failed"
@@ -320,29 +340,41 @@ func (s *Server) listVPCs(c *gin.Context) {
 	}
 
 	var allVPCs []interface{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
 	for _, az := range azs {
-		listURL := fmt.Sprintf("%s/api/v1/vpcs", az.NSPAddr)
-		resp, err := http.Get(listURL)
-		if err != nil {
-			logger.InfoContext(ctx, "查询AZ的VPC列表失败", "az", az.ID, "error", err)
-			continue
-		}
-		defer resp.Body.Close()
+		wg.Add(1)
+		go func(az *models.AZ) {
+			defer wg.Done()
 
-		var result struct {
-			Success bool                     `json:"success"`
-			VPCs    []map[string]interface{} `json:"vpcs"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			logger.InfoContext(ctx, "解析AZ的VPC列表失败", "az", az.ID, "error", err)
-			continue
-		}
+			listURL := fmt.Sprintf("%s/api/v1/vpcs", az.NSPAddr)
+			resp, err := s.tracedHTTP.Get(ctx, listURL)
+			if err != nil {
+				logger.InfoContext(ctx, "查询AZ的VPC列表失败", "az", az.ID, "error", err)
+				return
+			}
 
-		for _, vpc := range result.VPCs {
-			allVPCs = append(allVPCs, vpc)
-		}
+			var result struct {
+				Success bool                     `json:"success"`
+				VPCs    []map[string]interface{} `json:"vpcs"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				resp.Body.Close()
+				logger.InfoContext(ctx, "解析AZ的VPC列表失败", "az", az.ID, "error", err)
+				return
+			}
+			resp.Body.Close()
+
+			mu.Lock()
+			for _, vpc := range result.VPCs {
+				allVPCs = append(allVPCs, vpc)
+			}
+			mu.Unlock()
+		}(az)
 	}
+
+	wg.Wait()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -363,22 +395,51 @@ func (s *Server) getVPCByID(c *gin.Context) {
 		return
 	}
 
-	for _, az := range azs {
-		getURL := fmt.Sprintf("%s/api/v1/vpc/id/%s", az.NSPAddr, vpcID)
-		resp, err := http.Get(getURL)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
+	type result struct {
+		found  bool
+		data   map[string]interface{}
+	}
 
-		if resp.StatusCode == http.StatusOK {
-			var result map[string]interface{}
-			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-				continue
+	resChan := make(chan result, 1)
+	var wg sync.WaitGroup
+
+	for _, az := range azs {
+		wg.Add(1)
+		go func(az *models.AZ) {
+			defer wg.Done()
+
+			getURL := fmt.Sprintf("%s/api/v1/vpc/id/%s", az.NSPAddr, vpcID)
+			resp, err := s.tracedHTTP.Get(ctx, getURL)
+			if err != nil {
+				return
 			}
-			c.JSON(http.StatusOK, result)
-			return
-		}
+
+			if resp.StatusCode == http.StatusOK {
+				var data map[string]interface{}
+				if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+					resp.Body.Close()
+					return
+				}
+				resp.Body.Close()
+				select {
+				case resChan <- result{found: true, data: data}:
+				default:
+				}
+				return
+			}
+			resp.Body.Close()
+		}(az)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resChan)
+	}()
+
+	res, ok := <-resChan
+	if ok && res.found {
+		c.JSON(http.StatusOK, res.data)
+		return
 	}
 
 	c.JSON(http.StatusNotFound, gin.H{
@@ -400,30 +461,41 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 		return
 	}
 
-	deleted := false
+	var deleted bool
 	var lastError string
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
 	for _, az := range azs {
-		deleteURL := fmt.Sprintf("%s/api/v1/vpc/id/%s", az.NSPAddr, vpcID)
-		req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
+		wg.Add(1)
+		go func(az *models.AZ) {
+			defer wg.Done()
 
-		var result map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			continue
-		}
+			deleteURL := fmt.Sprintf("%s/api/v1/vpc/id/%s", az.NSPAddr, vpcID)
+			req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
+			resp, err := s.tracedHTTP.Do(req.WithContext(ctx))
+			if err != nil {
+				return
+			}
 
-		if resp.StatusCode == http.StatusOK {
-			deleted = true
-		} else if msg, ok := result["message"].(string); ok {
-			lastError = msg
-		}
+			var result map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				resp.Body.Close()
+				return
+			}
+			resp.Body.Close()
+
+			mu.Lock()
+			if resp.StatusCode == http.StatusOK {
+				deleted = true
+			} else if msg, ok := result["message"].(string); ok && lastError == "" {
+				lastError = msg
+			}
+			mu.Unlock()
+		}(az)
 	}
+
+	wg.Wait()
 
 	if deleted {
 		c.JSON(http.StatusOK, gin.H{
@@ -457,27 +529,39 @@ func (s *Server) listSubnetsByVPCID(c *gin.Context) {
 	}
 
 	var allSubnets []interface{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
 	for _, az := range azs {
-		listURL := fmt.Sprintf("%s/api/v1/vpc/id/%s/subnets", az.NSPAddr, vpcID)
-		resp, err := http.Get(listURL)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
+		wg.Add(1)
+		go func(az *models.AZ) {
+			defer wg.Done()
 
-		var result struct {
-			Success bool                     `json:"success"`
-			Subnets []map[string]interface{} `json:"subnets"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			continue
-		}
+			listURL := fmt.Sprintf("%s/api/v1/vpc/id/%s/subnets", az.NSPAddr, vpcID)
+			resp, err := s.tracedHTTP.Get(ctx, listURL)
+			if err != nil {
+				return
+			}
 
-		for _, subnet := range result.Subnets {
-			allSubnets = append(allSubnets, subnet)
-		}
+			var result struct {
+				Success bool                     `json:"success"`
+				Subnets []map[string]interface{} `json:"subnets"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				resp.Body.Close()
+				return
+			}
+			resp.Body.Close()
+
+			mu.Lock()
+			for _, subnet := range result.Subnets {
+				allSubnets = append(allSubnets, subnet)
+			}
+			mu.Unlock()
+		}(az)
 	}
+
+	wg.Wait()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -498,22 +582,51 @@ func (s *Server) getSubnetByID(c *gin.Context) {
 		return
 	}
 
-	for _, az := range azs {
-		getURL := fmt.Sprintf("%s/api/v1/subnet/id/%s", az.NSPAddr, subnetID)
-		resp, err := http.Get(getURL)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
+	type result struct {
+		found bool
+		data  map[string]interface{}
+	}
 
-		if resp.StatusCode == http.StatusOK {
-			var result map[string]interface{}
-			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-				continue
+	resChan := make(chan result, 1)
+	var wg sync.WaitGroup
+
+	for _, az := range azs {
+		wg.Add(1)
+		go func(az *models.AZ) {
+			defer wg.Done()
+
+			getURL := fmt.Sprintf("%s/api/v1/subnet/id/%s", az.NSPAddr, subnetID)
+			resp, err := s.tracedHTTP.Get(ctx, getURL)
+			if err != nil {
+				return
 			}
-			c.JSON(http.StatusOK, result)
-			return
-		}
+
+			if resp.StatusCode == http.StatusOK {
+				var data map[string]interface{}
+				if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+					resp.Body.Close()
+					return
+				}
+				resp.Body.Close()
+				select {
+				case resChan <- result{found: true, data: data}:
+				default:
+				}
+				return
+			}
+			resp.Body.Close()
+		}(az)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resChan)
+	}()
+
+	res, ok := <-resChan
+	if ok && res.found {
+		c.JSON(http.StatusOK, res.data)
+		return
 	}
 
 	c.JSON(http.StatusNotFound, gin.H{
@@ -535,30 +648,41 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 		return
 	}
 
-	deleted := false
+	var deleted bool
 	var lastError string
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
 	for _, az := range azs {
-		deleteURL := fmt.Sprintf("%s/api/v1/subnet/id/%s", az.NSPAddr, subnetID)
-		req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
+		wg.Add(1)
+		go func(az *models.AZ) {
+			defer wg.Done()
 
-		var result map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			continue
-		}
+			deleteURL := fmt.Sprintf("%s/api/v1/subnet/id/%s", az.NSPAddr, subnetID)
+			req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
+			resp, err := s.tracedHTTP.Do(req.WithContext(ctx))
+			if err != nil {
+				return
+			}
 
-		if resp.StatusCode == http.StatusOK {
-			deleted = true
-		} else if msg, ok := result["message"].(string); ok {
-			lastError = msg
-		}
+			var result map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				resp.Body.Close()
+				return
+			}
+			resp.Body.Close()
+
+			mu.Lock()
+			if resp.StatusCode == http.StatusOK {
+				deleted = true
+			} else if msg, ok := result["message"].(string); ok && lastError == "" {
+				lastError = msg
+			}
+			mu.Unlock()
+		}(az)
 	}
+
+	wg.Wait()
 
 	if deleted {
 		c.JSON(http.StatusOK, gin.H{
@@ -591,24 +715,52 @@ func (s *Server) replayTask(c *gin.Context) {
 		return
 	}
 
-	for _, az := range azs {
-		replayURL := fmt.Sprintf("%s/api/v1/task/replay/%s", az.NSPAddr, taskID)
-		req, _ := http.NewRequest(http.MethodPost, replayURL, nil)
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
+	type result struct {
+		found bool
+		data  map[string]interface{}
+	}
 
-		if resp.StatusCode == http.StatusOK {
-			var result map[string]interface{}
-			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-				continue
+	resChan := make(chan result, 1)
+	var wg sync.WaitGroup
+
+	for _, az := range azs {
+		wg.Add(1)
+		go func(az *models.AZ) {
+			defer wg.Done()
+
+			replayURL := fmt.Sprintf("%s/api/v1/task/replay/%s", az.NSPAddr, taskID)
+			req, _ := http.NewRequest(http.MethodPost, replayURL, nil)
+			resp, err := s.tracedHTTP.Do(req.WithContext(ctx))
+			if err != nil {
+				return
 			}
-			c.JSON(http.StatusOK, result)
-			return
-		}
+
+			if resp.StatusCode == http.StatusOK {
+				var data map[string]interface{}
+				if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+					resp.Body.Close()
+					return
+				}
+				resp.Body.Close()
+				select {
+				case resChan <- result{found: true, data: data}:
+				default:
+				}
+				return
+			}
+			resp.Body.Close()
+		}(az)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resChan)
+	}()
+
+	res, ok := <-resChan
+	if ok && res.found {
+		c.JSON(http.StatusOK, res.data)
+		return
 	}
 
 	c.JSON(http.StatusNotFound, gin.H{

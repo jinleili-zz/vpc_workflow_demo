@@ -18,6 +18,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/yourorg/nsp-common/pkg/logger"
 	"github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
+	"github.com/yourorg/nsp-common/pkg/trace"
 )
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -102,7 +103,10 @@ func main() {
 	broker := asynqbroker.NewBroker(redisOpt)
 	defer broker.Close()
 
-	server := api.NewServer(cfg, broker, pgDB)
+	// 创建 Traced HTTP Client
+	tracedHTTP := trace.NewTracedClient(nil)
+
+	server := api.NewServer(cfg, broker, tracedHTTP, pgDB)
 
 	callbackQueueName := server.GetCallbackQueueName()
 

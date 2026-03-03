@@ -29,7 +29,7 @@ type Server struct {
 	callbackQueueName string
 }
 
-func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, db *sql.DB) *Server {
+func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, tracedHTTP *trace.TracedClient, db *sql.DB) *Server {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	
@@ -38,7 +38,7 @@ func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, db *sql.DB) *Serv
 	router.Use(trace.TraceMiddleware(instanceID))
 	router.Use(ginLoggerMiddleware())
 
-	orch := orchestrator.NewAZOrchestrator(db, broker, cfg.Region, cfg.AZ)
+	orch := orchestrator.NewAZOrchestrator(db, broker, tracedHTTP, cfg.Region, cfg.AZ)
 	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ)
 
 	server := &Server{
