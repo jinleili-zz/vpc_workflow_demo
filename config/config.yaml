@@ -1,0 +1,39 @@
+# NSP 服务配置
+# 此配置文件用于演示 nsp-common/config 模块的功能
+
+# 服务基本信息
+# service_type 在代码中设置，不从配置文件读取
+region: "cn-north-1"
+az: ""  # 可用区，AZ NSP 需要设置
+port: 8080
+
+# Redis 配置
+redis:
+  host: "localhost"
+  port: 6379
+  password: ""
+  data_db: 0
+  broker_db: 1
+  max_idle: 3
+  max_active: 10
+  idle_timeout: 240
+
+# PostgreSQL 配置
+postgresql:
+  host: "localhost"
+  port: 5432
+  user: "nsp_user"
+  password: "nsp_password"
+  # database 名称根据服务类型动态设置:
+  # top-nsp: top_nsp_vpc
+  # az-nsp: nsp_{az}_vpc
+
+# Top NSP 特有配置
+top_nsp:
+  az_nsp_prefix: "az-nsp"
+  az_nsp_port: 8080
+
+# AZ NSP 特有配置
+az_nsp:
+  top_nsp_addr: "http://top-nsp:8080"
+  worker_count: 2
