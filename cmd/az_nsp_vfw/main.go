@@ -70,7 +70,7 @@ func main() {
 	pgPort := getEnvOrDefault("POSTGRES_PORT", "5432")
 	pgUser := getEnvOrDefault("POSTGRES_USER", "nsp_user")
 	pgPassword := getEnvOrDefault("POSTGRES_PASSWORD", "nsp_password")
-	dbName := fmt.Sprintf("nsp_%s_%s_vfw", strings.ReplaceAll(region, "-", "_"), strings.ReplaceAll(az, "-", "_"))
+	dbName := fmt.Sprintf("nsp_%s_vfw", strings.ReplaceAll(az, "-", "_"))
 	postgresDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", pgUser, pgPassword, pgHost, pgPort, dbName)
 
 	// Connect to PostgreSQL

@@ -1,14 +1,18 @@
 # AZ NSP VFW Dockerfile
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /build
 
 ENV GOPROXY=https://goproxy.cn,direct
 
-COPY go.mod go.sum ./
+# 复制 nsp-common 模块
+COPY nsp_platform/nsp-common /nsp_platform/nsp-common
+
+# 复制主项目
+COPY vpc_workflow_demo/go.mod vpc_workflow_demo/go.sum ./
 RUN go mod download
 
-COPY . .
+COPY vpc_workflow_demo/ .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o az-nsp-vfw ./cmd/az_nsp_vfw
 
