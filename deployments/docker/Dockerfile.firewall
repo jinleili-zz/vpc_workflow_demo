@@ -1,0 +1,35 @@
+# Firewall Worker Dockerfile
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /build
+
+# 设置 Go 代理（国内网络加速）
+ENV GOPROXY=https://goproxy.cn,direct
+
+# 复制go mod文件
+COPY go.mod go.sum ./
+RUN go mod download
+
+# 复制源代码
+COPY . .
+
+# 编译Firewall Worker
+RUN CGO_ENABLED=0 GOOS=linux go build -o firewall-worker ./cmd/firewall_worker
+
+# 运行阶段
+FROM alpine:latest
+
+# 使用国内镜像源加速
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
+    apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+
+# 从builder阶段复制二进制文件
+COPY --from=builder /build/firewall-worker /app/
+
+# 创建日志目录
+RUN mkdir -p /app/logs
+
+# 运行
+CMD ["/app/firewall-worker"]

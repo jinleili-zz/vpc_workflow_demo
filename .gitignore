@@ -44,3 +44,15 @@ dist/
 # Environment files
 .env
 .env.local
+
+# Go编译输出（二进制文件）
+/top-nsp
+/az-nsp
+/top_nsp
+/az_nsp
+/top-nsp-vpc
+/az-nsp-vpc
+/top-nsp-vfw
+/az-nsp-vfw
+/worker
+bin/
