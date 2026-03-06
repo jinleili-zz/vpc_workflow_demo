@@ -14,9 +14,9 @@ import (
 	topdao "workflow_qoder/internal/top/vpc/dao"
 
 	"github.com/google/uuid"
-	"github.com/yourorg/nsp-common/pkg/logger"
-	"github.com/yourorg/nsp-common/pkg/saga"
-	"github.com/yourorg/nsp-common/pkg/trace"
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/saga"
+	"github.com/paic/nsp-common/pkg/trace"
 )
 
 type Orchestrator struct {

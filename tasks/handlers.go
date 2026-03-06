@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/yourorg/nsp-common/pkg/logger"
-	"github.com/yourorg/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/taskqueue"
 )
 
 // VPCParams VPC 任务参数结构体

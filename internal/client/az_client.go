@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/yourorg/nsp-common/pkg/trace"
+	"github.com/paic/nsp-common/pkg/trace"
 	"workflow_qoder/internal/models"
 )
 

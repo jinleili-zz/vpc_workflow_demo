@@ -17,23 +17,16 @@ import (
 
 	"github.com/hibiken/asynq"
 	_ "github.com/lib/pq"
-	"github.com/yourorg/nsp-common/pkg/logger"
-	"github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
-	"github.com/yourorg/nsp-common/pkg/trace"
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
+	"github.com/paic/nsp-common/pkg/trace"
 )
-
-func getEnvOrDefault(key, defaultValue string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return defaultValue
-}
 
 func main() {
 	// Get region and az first for logger initialization
 	region := os.Getenv("REGION")
 	az := os.Getenv("AZ")
-	
+
 	// Initialize logger with service name
 	serviceName := fmt.Sprintf("az-nsp-vpc-%s", az)
 	logCfg := logger.DefaultConfig(serviceName)
@@ -47,46 +40,60 @@ func main() {
 	logger.Platform().Info("AZ NSP 启动中...")
 	logger.Platform().Info("========================================")
 
-	cfg := config.LoadConfig()
+	// 使用 nsp-common/config 加载配置
+	// 支持从 config.yaml 文件加载，环境变量覆盖（NSP_前缀），以及热更新
+	configLoader, err := config.NewConfigLoader("./config/config.yaml", "NSP", true)
+	if err != nil {
+		logger.Platform().Error("加载配置失败", "error", err)
+		os.Exit(1)
+	}
+	defer configLoader.Close()
+
+	cfg := configLoader.GetConfig()
 	cfg.ServiceType = "az"
 
+	// 从环境变量获取端口和必要配置（高优先级覆盖配置文件）
 	port := os.Getenv("PORT")
+	if port == "" {
+		port = fmt.Sprintf("%d", cfg.Port)
+	}
+
 	topNSPAddr := os.Getenv("TOP_NSP_ADDR")
+	if topNSPAddr == "" {
+		topNSPAddr = cfg.AZNSP.TopNSPAddr
+	}
+
+	if region == "" {
+		region = cfg.Region
+	}
+	if az == "" {
+		az = cfg.AZ
+	}
 
 	if region == "" || az == "" {
-		logger.Platform().Error("必须设置环境变量 REGION 和 AZ")
+		logger.Platform().Error("必须设置环境变量 REGION 和 AZ，或在配置文件中指定")
 		os.Exit(1)
 	}
 
-	if topNSPAddr == "" {
-		topNSPAddr = "http://top-nsp:8080"
-	}
-
-	if port == "" {
-		port = "8080"
-	}
-
-	portInt, _ := strconv.Atoi(port)
-
 	cfg.Region = region
 	cfg.AZ = az
-	cfg.Port = portInt
 	cfg.AZNSP.TopNSPAddr = topNSPAddr
+
+	portInt, _ := strconv.Atoi(port)
+	cfg.Port = portInt
 
 	logger.Platform().Info("[AZ NSP] 服务配置", "region", region, "az", az, "port", portInt)
 	logger.Platform().Info("[AZ NSP] Top NSP地址", "addr", topNSPAddr)
+	logger.Platform().Info("[AZ NSP] Redis配置", "host", cfg.Redis.Host, "port", cfg.Redis.Port)
+	logger.Platform().Info("[AZ NSP] PostgreSQL配置", "host", cfg.PostgreSQL.Host, "port", cfg.PostgreSQL.Port)
 
-	// Build PostgreSQL DSN
-	pgHost := getEnvOrDefault("POSTGRES_HOST", "postgres")
-	pgPort := getEnvOrDefault("POSTGRES_PORT", "5432")
-	pgUser := getEnvOrDefault("POSTGRES_USER", "nsp_user")
-	pgPassword := getEnvOrDefault("POSTGRES_PASSWORD", "nsp_password")
+	// 使用配置文件中的 PostgreSQL 配置构建 DSN
 	dbName := fmt.Sprintf("nsp_%s_vpc", strings.ReplaceAll(az, "-", "_"))
-	postgresDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", pgUser, pgPassword, pgHost, pgPort, dbName)
+	postgresDSN := cfg.GetPostgresDSN(dbName)
+	logger.Platform().Info("[AZ NSP] PostgreSQL DSN", "database", dbName)
 
 	// Connect to PostgreSQL
 	var pgDB *sql.DB
-	var err error
 	for i := 0; i < 30; i++ {
 		pgDB, err = sql.Open("postgres", postgresDSN)
 		if err == nil {

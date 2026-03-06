@@ -10,8 +10,9 @@ import (
 
 // NewRedisClient 创建Redis客户端（数据存储）
 func NewRedisClient(cfg *NSPConfig) redis.UniversalClient {
-	addrs := strings.Split(cfg.Redis.Addr, ",")
-	
+	addr := cfg.GetRedisAddr()
+	addrs := strings.Split(addr, ",")
+
 	if len(addrs) > 1 {
 		return redis.NewClusterClient(&redis.ClusterOptions{
 			Addrs:        addrs,
@@ -21,9 +22,9 @@ func NewRedisClient(cfg *NSPConfig) redis.UniversalClient {
 			MinIdleConns: cfg.Redis.MaxIdle,
 		})
 	}
-	
+
 	return redis.NewClient(&redis.Options{
-		Addr:         cfg.Redis.Addr,
+		Addr:         addr,
 		Password:     cfg.Redis.Password,
 		DB:           cfg.Redis.DataDB,
 		MaxRetries:   3,

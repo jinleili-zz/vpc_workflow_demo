@@ -9,7 +9,7 @@ import (
 	"workflow_qoder/internal/top/vfw/api"
 	"workflow_qoder/internal/top/vfw/service"
 
-	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/logger"
 
 	_ "github.com/lib/pq"
 )

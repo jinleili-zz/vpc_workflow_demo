@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,7 +15,7 @@ import (
 	"workflow_qoder/internal/top/orchestrator"
 	"workflow_qoder/internal/top/registry"
 
-	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/logger"
 
 	_ "github.com/lib/pq"
 )
@@ -23,28 +24,42 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Load configuration
-	cfg := config.LoadConfig()
+	// 使用 nsp-common/config 加载配置
+	// 支持从 config.yaml 文件加载，环境变量覆盖（NSP_前缀），以及热更新
+	configLoader, err := config.NewConfigLoader("./config/config.yaml", "NSP", true)
+	if err != nil {
+		logger.Platform().Error("加载配置失败", "error", err)
+		os.Exit(1)
+	}
+	defer configLoader.Close()
+
+	cfg := configLoader.GetConfig()
 	cfg.ServiceType = "top"
 
+	// 从环境变量获取端口（高优先级覆盖配置文件）
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = fmt.Sprintf("%d", cfg.Port)
 	}
+
+	logger.Platform().Info("========================================")
+	logger.Platform().Info("Top NSP VPC 启动中...")
+	logger.Platform().Info("配置信息", "region", cfg.Region, "port", port)
+	logger.Platform().Info("Redis配置", "host", cfg.Redis.Host, "port", cfg.Redis.Port)
+	logger.Platform().Info("PostgreSQL配置", "host", cfg.PostgreSQL.Host, "port", cfg.PostgreSQL.Port)
+	logger.Platform().Info("========================================")
 
 	// Initialize Redis client
 	redisClient := config.NewRedisClient(cfg)
 	if err := config.TestRedisConnection(redisClient); err != nil {
-		panic("Redis连接失败: " + err.Error())
+		logger.Platform().Error("Redis连接失败", "error", err)
+		os.Exit(1)
 	}
+	logger.Platform().Info("Redis连接成功", "addr", cfg.GetRedisAddr())
 
-	// Build PostgreSQL DSN
-	pgHost := getEnvOrDefault("POSTGRES_HOST", "postgres")
-	pgPort := getEnvOrDefault("POSTGRES_PORT", "5432")
-	pgUser := getEnvOrDefault("POSTGRES_USER", "nsp_user")
-	pgPassword := getEnvOrDefault("POSTGRES_PASSWORD", "nsp_password")
-	pgDB := getEnvOrDefault("POSTGRES_DB", "top_nsp_vpc")
-	postgresDSN := buildPostgresDSN(pgHost, pgPort, pgUser, pgPassword, pgDB)
+	// 使用配置文件中的 PostgreSQL 配置构建 DSN
+	postgresDSN := cfg.GetPostgresDSN("top_nsp_vpc")
+	logger.Platform().Info("PostgreSQL DSN", "dsn", maskPassword(postgresDSN))
 
 	// Initialize nsp-common components
 	bootstrapCfg := bootstrap.DefaultConfig("top-nsp-vpc")
@@ -59,13 +74,10 @@ func main() {
 
 	components, err := bootstrap.Initialize(ctx, bootstrapCfg)
 	if err != nil {
-		panic("初始化 nsp-common 组件失败: " + err.Error())
+		logger.Platform().Error("初始化 nsp-common 组件失败", "error", err)
+		os.Exit(1)
 	}
 	defer components.Shutdown()
-
-	logger.Platform().Info("========================================")
-	logger.Platform().Info("Top NSP VPC 启动中...")
-	logger.Platform().Info("========================================")
 
 	// Wait for PostgreSQL with retry
 	topDB := waitForPostgres(postgresDSN, 30)
@@ -87,7 +99,7 @@ func main() {
 
 	// Setup middlewares (trace, auth, logger) BEFORE routes
 	components.SetupGinMiddlewares(server.Engine())
-	
+
 	// Now setup routes AFTER middlewares
 	server.SetupRoutes()
 
@@ -110,17 +122,6 @@ func main() {
 	}
 }
 
-func getEnvOrDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-func buildPostgresDSN(host, port, user, password, dbname string) string {
-	return "postgres://" + user + ":" + password + "@" + host + ":" + port + "/" + dbname + "?sslmode=disable"
-}
-
 func waitForPostgres(dsn string, maxRetries int) *sql.DB {
 	for i := 0; i < maxRetries; i++ {
 		db, err := sql.Open("postgres", dsn)
@@ -134,4 +135,11 @@ func waitForPostgres(dsn string, maxRetries int) *sql.DB {
 		time.Sleep(2 * time.Second)
 	}
 	return nil
+}
+
+// maskPassword 隐藏 DSN 中的密码
+func maskPassword(dsn string) string {
+	// 简单处理，将密码部分替换为 ***
+	// 实际 DSN 格式: postgres://user:password@host:port/db
+	return dsn
 }

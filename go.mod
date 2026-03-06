@@ -7,12 +7,12 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hibiken/asynq v0.26.0
 	github.com/lib/pq v1.10.9
+	github.com/paic/nsp-common v0.0.0
 	github.com/redis/go-redis/v9 v9.17.3
-	github.com/yourorg/nsp-common v0.0.0
 )
 
 // Development: use local nsp-common module
-replace github.com/yourorg/nsp-common => ../nsp_platform/nsp-common
+replace github.com/paic/nsp-common => ../nsp_platform/nsp-common
 
 require (
 	github.com/bytedance/sonic v1.11.6 // indirect
