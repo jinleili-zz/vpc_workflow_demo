@@ -3,7 +3,7 @@
 package logging
 
 import (
-	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/logger"
 )
 
 // SetupAllAdapters configures all third-party frameworks to use nsp-common logger.

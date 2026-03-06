@@ -12,7 +12,7 @@
 `vpc_workflow_demo` 通过 `go.mod` 的 `replace` 指令引用 nsp-common 本地模块：
 
 ```go
-replace github.com/yourorg/nsp-common => ../nsp_platform/nsp-common
+replace github.com/paic/nsp-common => ../nsp_platform/nsp-common
 ```
 
 ### 已集成的 nsp-common 模块

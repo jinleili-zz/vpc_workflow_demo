@@ -13,10 +13,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
-	"github.com/yourorg/nsp-common/pkg/auth"
-	"github.com/yourorg/nsp-common/pkg/logger"
-	"github.com/yourorg/nsp-common/pkg/saga"
-	"github.com/yourorg/nsp-common/pkg/trace"
+	"github.com/paic/nsp-common/pkg/auth"
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/saga"
+	"github.com/paic/nsp-common/pkg/trace"
 
 	"workflow_qoder/internal/bootstrap"
 	"workflow_qoder/internal/db/dao"

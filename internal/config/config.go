@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 
-	"github.com/yourorg/nsp-common/pkg/config"
+	"github.com/paic/nsp-common/pkg/config"
 )
 
 // NSPConfig NSP服务配置

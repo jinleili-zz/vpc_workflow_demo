@@ -16,9 +16,9 @@ import (
 	"workflow_qoder/internal/queue"
 
 	"github.com/gin-gonic/gin"
-	"github.com/yourorg/nsp-common/pkg/logger"
-	"github.com/yourorg/nsp-common/pkg/taskqueue"
-	"github.com/yourorg/nsp-common/pkg/trace"
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/trace"
 )
 
 type Server struct {
