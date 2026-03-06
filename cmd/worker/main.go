@@ -71,7 +71,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	callbackQueueName := queue.GetCallbackQueueName(region, az)
+	callbackQueueName := queue.GetCallbackQueueName(region, az, "vpc")
 	queuesConfig := queue.GetQueueConfig(region, az, deviceType)
 
 	// 创建 Broker 和 CallbackSender
@@ -96,7 +96,7 @@ func main() {
 		consumer.Handle("create_subnet_on_switch", tasks.CreateSubnetOnSwitchHandler(cbSender))
 		consumer.Handle("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(cbSender))
 	case queue.DeviceTypeFirewall:
-		cbSenderVFW := taskqueue.NewCallbackSenderFromBroker(broker, callbackQueueName+"_vfw")
+		cbSenderVFW := taskqueue.NewCallbackSenderFromBroker(broker, queue.GetCallbackQueueName(region, az, "vfw"))
 		consumer.Handle("create_firewall_zone", tasks.CreateFirewallZoneHandler(cbSender))
 		consumer.Handle("create_firewall_policy", tasks.CreateFirewallPolicyHandler(cbSenderVFW))
 	case queue.DeviceTypeLoadBalancer:

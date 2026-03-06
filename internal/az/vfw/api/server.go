@@ -33,7 +33,7 @@ func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, tracedHTTP *trace
 	router := gin.Default()
 
 	orch := orchestrator.NewVFWOrchestrator(db, broker, tracedHTTP, cfg.Region, cfg.AZ)
-	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ) + "_vfw"
+	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ, "vfw")
 
 	server := &Server{
 		cfg:               cfg,

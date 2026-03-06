@@ -121,7 +121,7 @@ func main() {
 	broker := asynqbroker.NewBroker(redisOpt)
 	defer broker.Close()
 
-	callbackQueueName := queue.GetCallbackQueueName(region, az)
+	callbackQueueName := queue.GetCallbackQueueName(region, az, "vpc")
 
 	// 创建 Traced HTTP Client
 	tracedHTTP := trace.NewTracedClient(nil)
