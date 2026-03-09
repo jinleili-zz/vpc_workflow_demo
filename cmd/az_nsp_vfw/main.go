@@ -97,6 +97,17 @@ func main() {
 
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
+
+	// 从环境变量覆盖 Redis 地址（支持集群格式）
+	if redisAddrEnv := os.Getenv("REDIS_ADDR"); redisAddrEnv != "" {
+		redisAddr = redisAddrEnv
+	}
+	if brokerDB := os.Getenv("REDIS_BROKER_DB"); brokerDB != "" {
+		if v, err := strconv.Atoi(brokerDB); err == nil {
+			redisBrokerDB = v
+		}
+	}
+
 	redisOpt := config.MakeAsynqRedisOpt(redisAddr, redisBrokerDB)
 
 	// 创建 Broker（用于 orchestrator 入队任务）

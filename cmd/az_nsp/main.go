@@ -75,6 +75,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 从环境变量覆盖 Redis 地址（支持集群格式：host1:port1,host2:port2）
+	if redisAddrEnv := os.Getenv("REDIS_ADDR"); redisAddrEnv != "" {
+		cfg.Redis.Host = redisAddrEnv
+		cfg.Redis.Port = 0
+	}
+	if brokerDB := os.Getenv("REDIS_BROKER_DB"); brokerDB != "" {
+		if v, err := strconv.Atoi(brokerDB); err == nil {
+			cfg.Redis.BrokerDB = v
+		}
+	}
+
+	// 从环境变量覆盖 PostgreSQL 配置
+	if pgHost := os.Getenv("POSTGRES_HOST"); pgHost != "" {
+		cfg.PostgreSQL.Host = pgHost
+	}
+	if pgPort := os.Getenv("POSTGRES_PORT"); pgPort != "" {
+		if p, err := strconv.Atoi(pgPort); err == nil {
+			cfg.PostgreSQL.Port = p
+		}
+	}
+	if pgUser := os.Getenv("POSTGRES_USER"); pgUser != "" {
+		cfg.PostgreSQL.User = pgUser
+	}
+	if pgPassword := os.Getenv("POSTGRES_PASSWORD"); pgPassword != "" {
+		cfg.PostgreSQL.Password = pgPassword
+	}
+
 	cfg.Region = region
 	cfg.AZ = az
 	cfg.AZNSP.TopNSPAddr = topNSPAddr

@@ -47,6 +47,17 @@ func main() {
 
 	logger.Platform().Info("Worker 配置", "region", region, "az", az, "type", workerType)
 
+	// 从环境变量覆盖 Redis 地址（支持集群格式）
+	if redisAddrEnv := os.Getenv("REDIS_ADDR"); redisAddrEnv != "" {
+		cfg.Redis.Host = redisAddrEnv
+		cfg.Redis.Port = 0
+	}
+	if brokerDB := os.Getenv("REDIS_BROKER_DB"); brokerDB != "" {
+		if v, err := strconv.Atoi(brokerDB); err == nil {
+			cfg.Redis.BrokerDB = v
+		}
+	}
+
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
 	redisOpt := config.MakeAsynqRedisOpt(redisAddr, redisBrokerDB)
