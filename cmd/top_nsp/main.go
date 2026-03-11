@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -40,6 +41,32 @@ func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = fmt.Sprintf("%d", cfg.Port)
+	}
+
+	// 从环境变量覆盖 Redis 地址（支持集群格式：host1:port1,host2:port2）
+	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
+		cfg.Redis.Host = redisAddr
+		cfg.Redis.Port = 0 // 端口已包含在 Host 中
+	}
+
+	// 从环境变量覆盖 PostgreSQL 配置
+	if pgHost := os.Getenv("POSTGRES_HOST"); pgHost != "" {
+		cfg.PostgreSQL.Host = pgHost
+	}
+	if pgPort := os.Getenv("POSTGRES_PORT"); pgPort != "" {
+		if p, err := strconv.Atoi(pgPort); err == nil {
+			cfg.PostgreSQL.Port = p
+		}
+	}
+	if pgUser := os.Getenv("POSTGRES_USER"); pgUser != "" {
+		cfg.PostgreSQL.User = pgUser
+	}
+	if pgPassword := os.Getenv("POSTGRES_PASSWORD"); pgPassword != "" {
+		cfg.PostgreSQL.Password = pgPassword
+	}
+	if pgDB := os.Getenv("POSTGRES_DB"); pgDB != "" {
+		// POSTGRES_DB 用于 top-nsp 主数据库（其他数据库名由代码构建）
+		_ = pgDB
 	}
 
 	logger.Platform().Info("========================================")

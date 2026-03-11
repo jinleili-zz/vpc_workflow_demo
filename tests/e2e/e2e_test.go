@@ -487,9 +487,49 @@ func TestE2E_13_DeleteSubnet(t *testing.T) {
 }
 
 // ============================================================
-// Test 14: Delete VPC
+// Test 14: Delete Firewall Policy (must be done before VPC delete)
 // ============================================================
-func TestE2E_14_DeleteVPC(t *testing.T) {
+func TestE2E_14_DeleteFirewallPolicy(t *testing.T) {
+	// Find the policy ID
+	code, result := httpGet(t, topNSPVFWAddr+"/api/v1/firewall/policies")
+	if code != 200 {
+		t.Fatalf("expected 200, got %d", code)
+	}
+
+	policies, ok := result["policies"].([]interface{})
+	if !ok || len(policies) == 0 {
+		t.Log("No policies to delete, skipping")
+		return
+	}
+
+	var policyID string
+	for _, p := range policies {
+		pol, _ := p.(map[string]interface{})
+		if pol["policy_name"] == "e2e-fw-policy" {
+			policyID, _ = pol["id"].(string)
+			break
+		}
+	}
+	if policyID == "" {
+		t.Fatal("could not find e2e-fw-policy ID")
+	}
+
+	code, result = httpDelete(t, fmt.Sprintf("%s/api/v1/firewall/policy/%s", topNSPVFWAddr, policyID))
+	t.Logf("Delete policy response (code=%d): %v", code, result)
+
+	if code != 200 {
+		t.Fatalf("expected 200, got %d", code)
+	}
+
+	// Also delete from AZ VFW (top-level delete doesn't propagate to AZ level)
+	code, result = httpDelete(t, fmt.Sprintf("%s/api/v1/firewall/policy/%s", azNSPVFWAddr, "e2e-fw-policy"))
+	t.Logf("Delete AZ policy response (code=%d): %v", code, result)
+}
+
+// ============================================================
+// Test 15: Delete VPC
+// ============================================================
+func TestE2E_15_DeleteVPC(t *testing.T) {
 	vpcID := findVPCID(t, "e2e-test-vpc")
 
 	code, result := httpDelete(t, fmt.Sprintf("%s/api/v1/vpc/id/%s", topNSPVPCAddr, vpcID))
@@ -501,9 +541,9 @@ func TestE2E_14_DeleteVPC(t *testing.T) {
 }
 
 // ============================================================
-// Test 15: Verify VPC deletion
+// Test 16: Verify VPC deletion
 // ============================================================
-func TestE2E_15_VerifyDeletion(t *testing.T) {
+func TestE2E_16_VerifyDeletion(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	code, result := httpGet(t, topNSPVPCAddr+"/api/v1/vpcs")

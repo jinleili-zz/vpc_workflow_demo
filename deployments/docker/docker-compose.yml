@@ -84,6 +84,9 @@ services:
       - nsp-network
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./init-postgres.sh:/docker-entrypoint-initdb.d/init-postgres.sh
+      - ../../internal/db/migrations/001_init_postgresql.sql:/migrations/001_init_postgresql.sql
+      - ./saga-migration.sql:/migrations/saga.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nsp_user -d nsp_top"]
       interval: 10s
@@ -105,6 +108,15 @@ services:
       - POSTGRES_USER=nsp_user
       - POSTGRES_PASSWORD=nsp_password
       - POSTGRES_DB=nsp_top
+      - NSP_REDIS_HOST=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - NSP_REDIS_PORT=0
+      - NSP_REDIS_BROKER_DB=1
+      - NSP_POSTGRESQL_HOST=postgres
+      - NSP_POSTGRESQL_PORT=5432
+      - NSP_POSTGRESQL_USER=nsp_user
+      - NSP_POSTGRESQL_PASSWORD=nsp_password
+      - NSP_TOP_NSP_AZ_NSP_PREFIX=az-nsp-vpc
+      - NSP_TOP_NSP_AZ_NSP_PORT=8080
       - AZ_NSP_PREFIX=az-nsp-vpc
       - AZ_NSP_PORT=8080
     ports:
@@ -165,6 +177,13 @@ services:
       - POSTGRES_USER=nsp_user
       - POSTGRES_PASSWORD=nsp_password
       - POSTGRES_DB=nsp_cn_beijing_1a_vpc
+      - NSP_REDIS_HOST=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - NSP_REDIS_PORT=0
+      - NSP_REDIS_BROKER_DB=1
+      - NSP_POSTGRESQL_HOST=postgres
+      - NSP_POSTGRESQL_PORT=5432
+      - NSP_POSTGRESQL_USER=nsp_user
+      - NSP_POSTGRESQL_PASSWORD=nsp_password
       - TOP_NSP_ADDR=http://top-nsp-vpc:8080
       - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-beijing-1a:8080
       - NSP_ADDR=http://az-nsp-vpc-cn-beijing-1a:8080
@@ -261,6 +280,13 @@ services:
       - POSTGRES_USER=nsp_user
       - POSTGRES_PASSWORD=nsp_password
       - POSTGRES_DB=nsp_cn_beijing_1b_vpc
+      - NSP_REDIS_HOST=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - NSP_REDIS_PORT=0
+      - NSP_REDIS_BROKER_DB=1
+      - NSP_POSTGRESQL_HOST=postgres
+      - NSP_POSTGRESQL_PORT=5432
+      - NSP_POSTGRESQL_USER=nsp_user
+      - NSP_POSTGRESQL_PASSWORD=nsp_password
       - TOP_NSP_ADDR=http://top-nsp-vpc:8080
       - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-beijing-1b:8080
       - NSP_ADDR=http://az-nsp-vpc-cn-beijing-1b:8080
@@ -357,6 +383,13 @@ services:
       - POSTGRES_USER=nsp_user
       - POSTGRES_PASSWORD=nsp_password
       - POSTGRES_DB=nsp_cn_shanghai_1a_vpc
+      - NSP_REDIS_HOST=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - NSP_REDIS_PORT=0
+      - NSP_REDIS_BROKER_DB=1
+      - NSP_POSTGRESQL_HOST=postgres
+      - NSP_POSTGRESQL_PORT=5432
+      - NSP_POSTGRESQL_USER=nsp_user
+      - NSP_POSTGRESQL_PASSWORD=nsp_password
       - TOP_NSP_ADDR=http://top-nsp-vpc:8080
       - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-shanghai-1a:8080
       - NSP_ADDR=http://az-nsp-vpc-cn-shanghai-1a:8080

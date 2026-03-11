@@ -39,7 +39,7 @@ func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, tracedHTTP *trace
 	router.Use(ginLoggerMiddleware())
 
 	orch := orchestrator.NewAZOrchestrator(db, broker, tracedHTTP, cfg.Region, cfg.AZ)
-	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ)
+	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ, "vpc")
 
 	server := &Server{
 		cfg:               cfg,

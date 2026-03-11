@@ -24,6 +24,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 WORKDIR /app
 
 COPY --from=builder /build/az-nsp-vfw /app/
+COPY --from=builder /build/config /app/config
 
 RUN mkdir -p /app/logs
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/paic/nsp-common/pkg/config"
 )
@@ -160,7 +161,12 @@ func (c *NSPConfig) GetRedisBrokerAddr() string {
 }
 
 // GetRedisAddr 获取简单的Redis地址（用于Asynq）
+// 若 Host 中已包含逗号分隔的集群地址（格式：host1:port1,host2:port2），直接返回
+// 否则拼接 host:port
 func (c *NSPConfig) GetRedisAddr() string {
+	if strings.Contains(c.Redis.Host, ",") || strings.Contains(c.Redis.Host, ":") {
+		return c.Redis.Host
+	}
 	return fmt.Sprintf("%s:%d", c.Redis.Host, c.Redis.Port)
 }
 
