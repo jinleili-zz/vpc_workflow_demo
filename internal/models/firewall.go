@@ -125,6 +125,7 @@ type VPCRegistry struct {
 	VLANId       int       `json:"vlan_id"`
 	FirewallZone string    `json:"firewall_zone"`
 	Status       string    `json:"status"`
+	SagaTxID     string    `json:"saga_tx_id,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

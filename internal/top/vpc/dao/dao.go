@@ -22,19 +22,20 @@ func NewTopVPCDAO(db *sql.DB) *TopVPCDAO {
 
 func (d *TopVPCDAO) RegisterVPC(ctx context.Context, vpc *models.VPCRegistry) error {
 	query := `
-		INSERT INTO vpc_registry (id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO vpc_registry (id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status, saga_tx_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (vpc_name, az) DO UPDATE SET
 		az_vpc_id = EXCLUDED.az_vpc_id,
 		vrf_name = EXCLUDED.vrf_name,
 		vlan_id = EXCLUDED.vlan_id,
 		firewall_zone = EXCLUDED.firewall_zone,
 		status = EXCLUDED.status,
+		saga_tx_id = EXCLUDED.saga_tx_id,
 		updated_at = CURRENT_TIMESTAMP
 	`
 	_, err := d.db.ExecContext(ctx, query,
 		vpc.ID, vpc.VPCName, vpc.Region, vpc.AZ, vpc.AZVpcID,
-		vpc.VRFName, vpc.VLANId, vpc.FirewallZone, vpc.Status,
+		vpc.VRFName, vpc.VLANId, vpc.FirewallZone, vpc.Status, vpc.SagaTxID,
 	)
 	return err
 }
@@ -47,14 +48,14 @@ func (d *TopVPCDAO) UpdateVPCStatus(ctx context.Context, vpcName, az, status str
 
 func (d *TopVPCDAO) GetVPCByNameAndAZ(ctx context.Context, vpcName, az string) (*models.VPCRegistry, error) {
 	query := `
-		SELECT id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status, created_at, updated_at
+		SELECT id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status, saga_tx_id, created_at, updated_at
 		FROM vpc_registry WHERE vpc_name = $1 AND az = $2
 	`
 	vpc := &models.VPCRegistry{}
 	err := d.db.QueryRowContext(ctx, query, vpcName, az).Scan(
 		&vpc.ID, &vpc.VPCName, &vpc.Region, &vpc.AZ, &vpc.AZVpcID,
 		&vpc.VRFName, &vpc.VLANId, &vpc.FirewallZone, &vpc.Status,
-		&vpc.CreatedAt, &vpc.UpdatedAt,
+		&vpc.SagaTxID, &vpc.CreatedAt, &vpc.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -64,7 +65,7 @@ func (d *TopVPCDAO) GetVPCByNameAndAZ(ctx context.Context, vpcName, az string) (
 
 func (d *TopVPCDAO) GetVPCsByZone(ctx context.Context, zone string) ([]*models.VPCRegistry, error) {
 	query := `
-		SELECT id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status, created_at, updated_at
+		SELECT id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status, saga_tx_id, created_at, updated_at
 		FROM vpc_registry WHERE firewall_zone = $1 AND status = 'running'
 	`
 	rows, err := d.db.QueryContext(ctx, query, zone)
@@ -79,7 +80,7 @@ func (d *TopVPCDAO) GetVPCsByZone(ctx context.Context, zone string) ([]*models.V
 		if err := rows.Scan(
 			&vpc.ID, &vpc.VPCName, &vpc.Region, &vpc.AZ, &vpc.AZVpcID,
 			&vpc.VRFName, &vpc.VLANId, &vpc.FirewallZone, &vpc.Status,
-			&vpc.CreatedAt, &vpc.UpdatedAt,
+			&vpc.SagaTxID, &vpc.CreatedAt, &vpc.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -207,7 +208,7 @@ func (d *TopVPCDAO) FindZoneByIP(ctx context.Context, ipStr string) (*models.Zon
 
 func (d *TopVPCDAO) ListAllVPCs(ctx context.Context) ([]*models.VPCRegistry, error) {
 	query := `
-		SELECT id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status, created_at, updated_at
+		SELECT id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id, firewall_zone, status, saga_tx_id, created_at, updated_at
 		FROM vpc_registry WHERE status != 'deleted'
 		ORDER BY created_at DESC
 	`
@@ -223,7 +224,36 @@ func (d *TopVPCDAO) ListAllVPCs(ctx context.Context) ([]*models.VPCRegistry, err
 		if err := rows.Scan(
 			&vpc.ID, &vpc.VPCName, &vpc.Region, &vpc.AZ, &vpc.AZVpcID,
 			&vpc.VRFName, &vpc.VLANId, &vpc.FirewallZone, &vpc.Status,
-			&vpc.CreatedAt, &vpc.UpdatedAt,
+			&vpc.SagaTxID, &vpc.CreatedAt, &vpc.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		vpcs = append(vpcs, vpc)
+	}
+	return vpcs, rows.Err()
+}
+
+// GetVPCsByName 根据 vpc_name 查询所有 AZ 的 VPC 注册记录
+func (d *TopVPCDAO) GetVPCsByName(ctx context.Context, vpcName string) ([]*models.VPCRegistry, error) {
+	query := `
+		SELECT id, vpc_name, region, az, az_vpc_id, vrf_name, vlan_id,
+		       firewall_zone, status, saga_tx_id, created_at, updated_at
+		FROM vpc_registry WHERE vpc_name = $1 AND status != 'deleted'
+		ORDER BY az
+	`
+	rows, err := d.db.QueryContext(ctx, query, vpcName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var vpcs []*models.VPCRegistry
+	for rows.Next() {
+		vpc := &models.VPCRegistry{}
+		if err := rows.Scan(
+			&vpc.ID, &vpc.VPCName, &vpc.Region, &vpc.AZ, &vpc.AZVpcID,
+			&vpc.VRFName, &vpc.VLANId, &vpc.FirewallZone, &vpc.Status,
+			&vpc.SagaTxID, &vpc.CreatedAt, &vpc.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
