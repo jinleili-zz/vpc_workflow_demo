@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
@@ -20,6 +21,7 @@ import (
 )
 
 type Orchestrator struct {
+	ctx        context.Context     // 长生命周期 context，用于后台 goroutine
 	registry   *registry.Registry
 	azClient   *client.AZNSPClient // 保留，用于健康检查
 	topDAO     *topdao.TopVPCDAO
@@ -27,7 +29,7 @@ type Orchestrator struct {
 	tracedHTTP *trace.TracedClient // 新增
 }
 
-func NewOrchestrator(registry *registry.Registry, topDB *sql.DB, sagaEngine *saga.Engine, tracedHTTP *trace.TracedClient) *Orchestrator {
+func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sql.DB, sagaEngine *saga.Engine, tracedHTTP *trace.TracedClient) *Orchestrator {
 	var dao *topdao.TopVPCDAO
 	if topDB != nil {
 		dao = topdao.NewTopVPCDAO(topDB)
@@ -42,6 +44,7 @@ func NewOrchestrator(registry *registry.Registry, topDB *sql.DB, sagaEngine *sag
 	}
 	
 	return &Orchestrator{
+		ctx:        ctx,
 		registry:   registry,
 		azClient:   azClient,
 		topDAO:     dao,
@@ -70,21 +73,29 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 	// 3. 构建 SAGA 事务定义
 	builder := saga.NewSaga(fmt.Sprintf("region-vpc-create-%s", req.VPCName)).
 		WithPayload(map[string]any{"vpc_name": req.VPCName, "region": req.Region}).
-		WithTimeout(300) // 5 分钟超时
+		WithTimeout(900) // 15 分钟超时，给 worker 足够时间
 
-	// 为每个 AZ 添加一个步骤（串行执行）
+	// 为每个 AZ 添加一个步骤（串行执行，使用 Async + Poll 等待 worker 完成）
 	for _, az := range azs {
 		payloadBytes, _ := json.Marshal(req)
 		var payloadMap map[string]any
 		json.Unmarshal(payloadBytes, &payloadMap)
 		builder.AddStep(saga.Step{
 			Name:             fmt.Sprintf("创建VPC-%s", az.ID),
-			Type:             saga.StepTypeSync,
+			Type:             saga.StepTypeAsync,
 			ActionMethod:     "POST",
 			ActionURL:        fmt.Sprintf("%s/api/v1/vpc", az.NSPAddr),
 			ActionPayload:    payloadMap,
 			CompensateMethod: "DELETE",
 			CompensateURL:    fmt.Sprintf("%s/api/v1/vpc/%s", az.NSPAddr, req.VPCName),
+			PollMethod:       "GET",
+			PollURL:          fmt.Sprintf("%s/api/v1/vpc/%s/status", az.NSPAddr, req.VPCName),
+			PollIntervalSec:  5,
+			PollMaxTimes:     120,
+			PollSuccessPath:  "$.status",
+			PollSuccessValue: "running",
+			PollFailurePath:  "$.status",
+			PollFailureValue: "failed",
 		})
 	}
 
@@ -114,12 +125,16 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 				VLANId:       req.VLANId,
 				FirewallZone: req.FirewallZone,
 				Status:       "creating",
+				SagaTxID:     txID,
 			}
 			if err := o.topDAO.RegisterVPC(ctx, vpcReg); err != nil {
 				logger.InfoContext(ctx, "预注册VPC到Top层失败", "az", az.ID, "error", err)
 			}
 		}
 	}
+
+	// 6. 启动后台 goroutine 监听 SAGA 事务状态
+	go o.watchSagaTransaction(txID, req.VPCName, azs)
 
 	return &models.VPCResponse{
 		Success:    true,
@@ -218,4 +233,71 @@ func (o *Orchestrator) CheckZonePolicies(ctx context.Context, zone string) (int,
 
 	logger.InfoContext(ctx, "查询Zone策略数量成功", "zone", zone, "count", result.Count)
 	return result.Count, nil
+}
+
+// watchSagaTransaction 后台监听 SAGA 事务状态，完成后回写 vpc_registry
+func (o *Orchestrator) watchSagaTransaction(txID, vpcName string, azs []*models.AZ) {
+	if o.topDAO == nil || o.sagaEngine == nil {
+		return
+	}
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	timeout := time.After(15 * time.Minute)
+
+	for {
+		select {
+		case <-o.ctx.Done():
+			logger.Info("SAGA监听因context取消而退出", "tx_id", txID, "vpc_name", vpcName)
+			return
+		case <-timeout:
+			logger.Info("SAGA监听超时，标记VPC失败", "tx_id", txID, "vpc_name", vpcName)
+			for _, az := range azs {
+				o.topDAO.UpdateVPCStatus(o.ctx, vpcName, az.ID, "failed")
+			}
+			return
+		case <-ticker.C:
+			status, err := o.sagaEngine.Query(o.ctx, txID)
+			if err != nil || status == nil {
+				continue
+			}
+
+			switch saga.TxStatus(status.Status) {
+			case saga.TxStatusSucceeded:
+				for _, az := range azs {
+					o.topDAO.UpdateVPCStatus(o.ctx, vpcName, az.ID, "running")
+				}
+				logger.Info("VPC创建完成，状态已更新", "tx_id", txID, "vpc_name", vpcName)
+				return
+
+			case saga.TxStatusFailed:
+				for i, step := range status.Steps {
+					if i < len(azs) {
+						if saga.StepStatus(step.Status) == saga.StepStatusSucceeded {
+							o.topDAO.UpdateVPCStatus(o.ctx, vpcName, azs[i].ID, "running")
+						} else {
+							o.topDAO.UpdateVPCStatus(o.ctx, vpcName, azs[i].ID, "failed")
+						}
+					}
+				}
+				logger.Info("VPC创建失败，状态已更新", "tx_id", txID, "vpc_name", vpcName, "error", status.LastError)
+				return
+				// pending / running / compensating → 继续轮询
+			}
+		}
+	}
+}
+
+// GetVPCStatusFromDB 从 Top 层数据库查询 VPC 各 AZ 状态
+func (o *Orchestrator) GetVPCStatusFromDB(ctx context.Context, vpcName string) ([]*models.VPCRegistry, error) {
+	if o.topDAO == nil {
+		return nil, fmt.Errorf("topDAO is nil")
+	}
+	return o.topDAO.GetVPCsByName(ctx, vpcName)
+}
+
+// HasTopDAO 检查 topDAO 是否可用
+func (o *Orchestrator) HasTopDAO() bool {
+	return o.topDAO != nil
 }

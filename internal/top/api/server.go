@@ -205,11 +205,50 @@ func (s *Server) createVPC(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// getVPCStatus 查询VPC状态（并行查询所有AZ）
+// getVPCStatus 查询VPC状态（优先从DB查询，降级为并行查询所有AZ）
 func (s *Server) getVPCStatus(c *gin.Context) {
 	vpcName := c.Param("vpc_name")
 	ctx := c.Request.Context()
 
+	// 快路径：从 Top 层数据库查询
+	if s.orchestrator.HasTopDAO() {
+		vpcs, err := s.orchestrator.GetVPCStatusFromDB(ctx, vpcName)
+		if err == nil && len(vpcs) > 0 {
+			azStatuses := make(map[string]interface{})
+			overallStatus := "running"
+			hasCreating := false
+			hasFailed := false
+
+			for _, vpc := range vpcs {
+				azStatuses[vpc.AZ] = map[string]interface{}{
+					"az":     vpc.AZ,
+					"status": vpc.Status,
+				}
+				if vpc.Status == "creating" {
+					hasCreating = true
+				}
+				if vpc.Status == "failed" {
+					hasFailed = true
+				}
+			}
+
+			if hasFailed {
+				overallStatus = "failed"
+			} else if hasCreating {
+				overallStatus = "creating"
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"vpc_name":       vpcName,
+				"overall_status": overallStatus,
+				"az_statuses":    azStatuses,
+				"source":         "database",
+			})
+			return
+		}
+	}
+
+	// 慢路径（降级）：扇出查询各 AZ
 	azs, err := s.registry.ListAllAZs(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -300,6 +339,7 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 		"vpc_name":       vpcName,
 		"overall_status": overallStatus,
 		"az_statuses":    azStatuses,
+		"source":         "fallback",
 	})
 }
 

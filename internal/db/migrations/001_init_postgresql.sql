@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS vpc_registry (
     firewall_zone VARCHAR(128),
     
     status VARCHAR(32) DEFAULT 'pending',
+    saga_tx_id VARCHAR(64) DEFAULT '',
     
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -190,6 +191,7 @@ CREATE TABLE IF NOT EXISTS vpc_registry (
 
 CREATE INDEX IF NOT EXISTS idx_vpc_registry_region ON vpc_registry(region);
 CREATE INDEX IF NOT EXISTS idx_vpc_registry_zone ON vpc_registry(firewall_zone);
+CREATE INDEX IF NOT EXISTS idx_vpc_registry_saga_tx_id ON vpc_registry(saga_tx_id);
 
 DROP TRIGGER IF EXISTS update_vpc_registry_updated_at ON vpc_registry;
 CREATE TRIGGER update_vpc_registry_updated_at
