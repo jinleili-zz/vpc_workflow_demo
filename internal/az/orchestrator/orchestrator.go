@@ -578,6 +578,10 @@ func (o *AZOrchestrator) ListVPCs(ctx context.Context) ([]*models.VPCResource, e
 	return o.vpcDAO.ListAll(ctx)
 }
 
+func (o *AZOrchestrator) GetAZ() string {
+	return o.az
+}
+
 func (o *AZOrchestrator) GetVPCByID(ctx context.Context, vpcID string) (*models.VPCResource, error) {
 	return o.vpcDAO.GetByID(ctx, vpcID)
 }

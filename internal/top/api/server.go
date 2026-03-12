@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -61,6 +62,7 @@ func (s *Server) setupRoutes() {
 		api.GET("/vpcs", s.listVPCs)
 		api.POST("/vpc", s.createVPC)
 		api.GET("/vpc/:vpc_name/status", s.getVPCStatus)
+		api.DELETE("/vpc/:vpc_name", s.deleteVPCByName)
 		api.GET("/vpc/id/:vpc_id", s.getVPCByID)
 		api.DELETE("/vpc/id/:vpc_id", s.deleteVPCByID)
 		api.GET("/vpc/id/:vpc_id/subnets", s.listSubnetsByVPCID)
@@ -210,41 +212,24 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 	vpcName := c.Param("vpc_name")
 	ctx := c.Request.Context()
 
-	// 快路径：从 Top 层数据库查询
+	// 快路径：从 Top 层数据库查询（一个 VPC 一条记录）
 	if s.orchestrator.HasTopDAO() {
-		vpcs, err := s.orchestrator.GetVPCStatusFromDB(ctx, vpcName)
+		vpc, err := s.orchestrator.GetVPCByName(ctx, vpcName)
 		if err != nil {
-			// DB 查询失败，记录日志并降级到扇出查询
 			logger.InfoContext(ctx, "DB查询VPC状态失败，降级为扇出查询", "vpc_name", vpcName, "error", err)
 		}
-		if err == nil && len(vpcs) > 0 {
+		if err == nil && vpc != nil {
 			azStatuses := make(map[string]interface{})
-			overallStatus := "running"
-			hasCreating := false
-			hasFailed := false
-
-			for _, vpc := range vpcs {
-				azStatuses[vpc.AZ] = map[string]interface{}{
-					"az":     vpc.AZ,
-					"status": vpc.Status,
+			for azID, detail := range vpc.AZDetails {
+				azStatuses[azID] = map[string]interface{}{
+					"az":     azID,
+					"status": detail.Status,
 				}
-				if vpc.Status == "creating" {
-					hasCreating = true
-				}
-				if vpc.Status == "failed" {
-					hasFailed = true
-				}
-			}
-
-			if hasFailed {
-				overallStatus = "failed"
-			} else if hasCreating {
-				overallStatus = "creating"
 			}
 
 			c.JSON(http.StatusOK, gin.H{
 				"vpc_name":       vpcName,
-				"overall_status": overallStatus,
+				"overall_status": vpc.Status,
 				"az_statuses":    azStatuses,
 				"source":         "database",
 			})
@@ -374,6 +359,23 @@ func (s *Server) createSubnet(c *gin.Context) {
 func (s *Server) listVPCs(c *gin.Context) {
 	ctx := c.Request.Context()
 
+	// 快路径：从 DB 直查（每个 VPC 一条记录）
+	if s.orchestrator.HasTopDAO() {
+		vpcs, err := s.orchestrator.ListAllVPCs(ctx)
+		if err != nil {
+			logger.InfoContext(ctx, "DB查询VPC列表失败，降级为扇出查询", "error", err)
+		}
+		if err == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"vpcs":    vpcs,
+				"source":  "database",
+			})
+			return
+		}
+	}
+
+	// 降级：扇出查询各 AZ
 	azs, err := s.registry.ListAllAZs(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -492,6 +494,105 @@ func (s *Server) getVPCByID(c *gin.Context) {
 	})
 }
 
+// deleteVPCByName 按 vpc_name 删除 VPC（扇出到所有相关 AZ，然后更新 Top 层 vpc_registry）
+func (s *Server) deleteVPCByName(c *gin.Context) {
+	vpcName := c.Param("vpc_name")
+	ctx := c.Request.Context()
+
+	// 先从 DB 获取 VPC 信息，确定涉及的 AZ
+	var targetAZs []*models.AZ
+	if s.orchestrator.HasTopDAO() {
+		vpc, err := s.orchestrator.GetVPCByName(ctx, vpcName)
+		if err != nil || vpc == nil {
+			c.JSON(http.StatusNotFound, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("VPC不存在: %s", vpcName),
+			})
+			return
+		}
+		for azID := range vpc.AZDetails {
+			az, err := s.registry.GetAZ(ctx, vpc.Region, azID)
+			if err == nil && az != nil {
+				targetAZs = append(targetAZs, az)
+			}
+		}
+	}
+
+	// 降级：如果没有 DB 或没找到目标 AZ，扇出到所有 AZ
+	if len(targetAZs) == 0 {
+		azs, err := s.registry.ListAllAZs(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("获取AZ列表失败: %v", err),
+			})
+			return
+		}
+		targetAZs = azs
+	}
+
+	var deletedAZs []string
+	var lastError string
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, az := range targetAZs {
+		wg.Add(1)
+		go func(az *models.AZ) {
+			defer wg.Done()
+
+			deleteURL := fmt.Sprintf("%s/api/v1/vpc/%s", az.NSPAddr, vpcName)
+			req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
+			resp, err := s.tracedHTTP.Do(req.WithContext(ctx))
+			if err != nil {
+				mu.Lock()
+				if lastError == "" {
+					lastError = fmt.Sprintf("AZ %s 请求失败: %v", az.ID, err)
+				}
+				mu.Unlock()
+				return
+			}
+
+			var result map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				resp.Body.Close()
+				return
+			}
+			resp.Body.Close()
+
+			mu.Lock()
+			if resp.StatusCode == http.StatusOK {
+				deletedAZs = append(deletedAZs, az.ID)
+			} else if msg, ok := result["message"].(string); ok && lastError == "" {
+				lastError = msg
+			}
+			mu.Unlock()
+		}(az)
+	}
+
+	wg.Wait()
+
+	if len(deletedAZs) > 0 {
+		// 同步更新 Top 层 vpc_registry
+		s.syncVPCDeletionStatus(ctx, vpcName, deletedAZs)
+
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": fmt.Sprintf("VPC已成功删除，%d个AZ已清理", len(deletedAZs)),
+		})
+	} else if lastError != "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": lastError,
+		})
+	} else {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "VPC不存在",
+		})
+	}
+}
+
 func (s *Server) deleteVPCByID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
 	ctx := c.Request.Context()
@@ -506,6 +607,8 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 	}
 
 	var deleted bool
+	var deletedVPCName string
+	var deletedAZs []string
 	var lastError string
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -532,6 +635,12 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 			mu.Lock()
 			if resp.StatusCode == http.StatusOK {
 				deleted = true
+				if name, ok := result["vpc_name"].(string); ok && name != "" {
+					deletedVPCName = name
+				}
+				if azID, ok := result["az"].(string); ok && azID != "" {
+					deletedAZs = append(deletedAZs, azID)
+				}
 			} else if msg, ok := result["message"].(string); ok && lastError == "" {
 				lastError = msg
 			}
@@ -542,6 +651,9 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 	wg.Wait()
 
 	if deleted {
+		// 同步更新 Top 层 vpc_registry
+		s.syncVPCDeletionStatus(ctx, deletedVPCName, deletedAZs)
+
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": "VPC已成功删除",
@@ -556,6 +668,36 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 			"success": false,
 			"message": "VPC不存在",
 		})
+	}
+}
+
+// syncVPCDeletionStatus 将 AZ 层的删除结果同步到 Top 层 vpc_registry
+func (s *Server) syncVPCDeletionStatus(ctx context.Context, vpcName string, deletedAZs []string) {
+	if !s.orchestrator.HasTopDAO() || vpcName == "" {
+		return
+	}
+	vpc, err := s.orchestrator.GetVPCByName(ctx, vpcName)
+	if err != nil || vpc == nil {
+		return
+	}
+
+	azDetails := make(map[string]models.AZDetail)
+	for azID, detail := range vpc.AZDetails {
+		azDetails[azID] = detail
+	}
+	for _, azID := range deletedAZs {
+		azDetails[azID] = models.AZDetail{Status: "deleted"}
+	}
+
+	overallStatus := "deleted"
+	for _, d := range azDetails {
+		if d.Status != "deleted" {
+			overallStatus = "partial_deleted"
+			break
+		}
+	}
+	if err := s.orchestrator.UpdateVPCStatus(ctx, vpcName, overallStatus, azDetails); err != nil {
+		logger.InfoContext(ctx, "更新Top层VPC状态失败", "vpc_name", vpcName, "error", err)
 	}
 }
 

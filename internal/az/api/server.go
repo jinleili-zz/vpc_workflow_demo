@@ -152,8 +152,10 @@ func (s *Server) deleteVPC(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "VPC已成功删除",
+		"success":  true,
+		"message":  "VPC已成功删除",
+		"vpc_name": vpcName,
+		"az":       s.orchestrator.GetAZ(),
 	})
 }
 
@@ -255,6 +257,9 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
 	ctx := c.Request.Context()
 
+	// 先获取 VPC 信息用于响应
+	vpc, _ := s.orchestrator.GetVPCByID(ctx, vpcID)
+
 	err := s.orchestrator.DeleteVPCByID(ctx, vpcID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -264,10 +269,15 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"success": true,
 		"message": "VPC已成功删除",
-	})
+		"az":      s.orchestrator.GetAZ(),
+	}
+	if vpc != nil {
+		resp["vpc_name"] = vpc.VPCName
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func (s *Server) listSubnetsByVPCID(c *gin.Context) {

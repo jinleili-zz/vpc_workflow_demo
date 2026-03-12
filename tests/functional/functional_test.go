@@ -321,29 +321,36 @@ func TestTopVPCRegistryDAO(t *testing.T) {
 		ID:           "reg-vpc-001",
 		VPCName:      "vpc-registry-test",
 		Region:       "region-1",
-		AZ:           "az-1",
-		AZVpcID:      "az-vpc-id-001",
 		VRFName:      "vrf-1",
 		VLANId:       200,
 		FirewallZone: "zone-trust",
 		Status:       "running",
+		AZDetails: map[string]models.AZDetail{
+			"az-1": {Status: "running", AZVpcID: "az-vpc-id-001"},
+		},
 	}
 	if err := topVPCDAO.RegisterVPC(ctx, entry); err != nil {
 		t.Fatalf("RegisterVPC 失败: %v", err)
 	}
 
-	// GetVPCByNameAndAZ
-	got, err := topVPCDAO.GetVPCByNameAndAZ(ctx, "vpc-registry-test", "az-1")
+	// GetVPCByName
+	got, err := topVPCDAO.GetVPCByName(ctx, "vpc-registry-test")
 	if err != nil {
-		t.Fatalf("GetVPCByNameAndAZ 失败: %v", err)
+		t.Fatalf("GetVPCByName 失败: %v", err)
 	}
 	if got.VRFName != "vrf-1" || got.VLANId != 200 {
 		t.Errorf("VPC 数据不一致: VRF=%s VLAN=%d", got.VRFName, got.VLANId)
 	}
+	if detail, ok := got.AZDetails["az-1"]; !ok || detail.Status != "running" {
+		t.Errorf("AZDetails 不一致: %+v", got.AZDetails)
+	}
 
-	// UpdateVPCStatus
-	if err := topVPCDAO.UpdateVPCStatus(ctx, "vpc-registry-test", "az-1", "updated"); err != nil {
-		t.Fatalf("UpdateVPCStatus 失败: %v", err)
+	// UpdateVPCOverallStatus
+	newDetails := map[string]models.AZDetail{
+		"az-1": {Status: "updated", AZVpcID: "az-vpc-id-001"},
+	}
+	if err := topVPCDAO.UpdateVPCOverallStatus(ctx, "vpc-registry-test", "updated", newDetails); err != nil {
+		t.Fatalf("UpdateVPCOverallStatus 失败: %v", err)
 	}
 
 	// RegisterSubnet
@@ -380,7 +387,7 @@ func TestTopVPCRegistryDAO(t *testing.T) {
 	}
 
 	// DeleteVPC
-	if err := topVPCDAO.DeleteVPC(ctx, "vpc-registry-test", "az-1"); err != nil {
+	if err := topVPCDAO.DeleteVPC(ctx, "vpc-registry-test"); err != nil {
 		t.Fatalf("DeleteVPC 失败: %v", err)
 	}
 }
