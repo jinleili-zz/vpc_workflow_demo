@@ -114,24 +114,25 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 
 	logger.InfoContext(ctx, "SAGA事务已提交", "transaction_id", txID, "vpc_name", req.VPCName)
 
-	// 5. 预注册 VPC 到 vpc_registry（供后续子网创建查询 firewall_zone）
+	// 5. 预注册 VPC 到 vpc_registry（一个 VPC 一条记录）
 	if o.topDAO != nil {
+		azDetails := make(map[string]models.AZDetail)
 		for _, az := range azs {
-			vpcReg := &models.VPCRegistry{
-				ID:           uuid.New().String(),
-				VPCName:      req.VPCName,
-				Region:       req.Region,
-				AZ:           az.ID,
-				AZVpcID:      "", // SAGA 完成后由回调更新
-				VRFName:      req.VRFName,
-				VLANId:       req.VLANId,
-				FirewallZone: req.FirewallZone,
-				Status:       "creating",
-				SagaTxID:     txID,
-			}
-			if err := o.topDAO.RegisterVPC(ctx, vpcReg); err != nil {
-				logger.InfoContext(ctx, "预注册VPC到Top层失败", "az", az.ID, "error", err)
-			}
+			azDetails[az.ID] = models.AZDetail{Status: "creating"}
+		}
+		vpcReg := &models.VPCRegistry{
+			ID:           uuid.New().String(),
+			VPCName:      req.VPCName,
+			Region:       req.Region,
+			VRFName:      req.VRFName,
+			VLANId:       req.VLANId,
+			FirewallZone: req.FirewallZone,
+			Status:       "creating",
+			SagaTxID:     txID,
+			AZDetails:    azDetails,
+		}
+		if err := o.topDAO.RegisterVPC(ctx, vpcReg); err != nil {
+			logger.InfoContext(ctx, "预注册VPC到Top层失败", "error", err)
 		}
 	}
 
@@ -185,7 +186,7 @@ func (o *Orchestrator) CreateAZSubnet(ctx context.Context, req *models.SubnetReq
 
 	if resp.Success && o.topDAO != nil {
 		var firewallZone string
-		vpc, err := o.topDAO.GetVPCByNameAndAZ(ctx, req.VPCName, req.AZ)
+		vpc, err := o.topDAO.GetVPCByName(ctx, req.VPCName)
 		if err == nil && vpc != nil {
 			firewallZone = vpc.FirewallZone
 		}
@@ -262,10 +263,12 @@ func (o *Orchestrator) watchSagaTransaction(txID, vpcName string, azs []*models.
 			logger.Info("SAGA监听超时，标记VPC失败", "tx_id", txID, "vpc_name", vpcName)
 			// 使用独立 context 确保 DB 操作能完成，避免因主 context 取消导致 DB 写入失败
 			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			azDetails := make(map[string]models.AZDetail)
 			for _, az := range azs {
-				if err := o.topDAO.UpdateVPCStatus(dbCtx, vpcName, az.ID, "failed"); err != nil {
-					logger.Info("超时标记VPC失败时DB更新失败", "vpc_name", vpcName, "az", az.ID, "error", err)
-				}
+				azDetails[az.ID] = models.AZDetail{Status: "failed", Error: "timeout"}
+			}
+			if err := o.topDAO.UpdateVPCOverallStatus(dbCtx, vpcName, "failed", azDetails); err != nil {
+				logger.Info("超时标记VPC失败时DB更新失败", "vpc_name", vpcName, "error", err)
 			}
 			cancel()
 			return
@@ -282,27 +285,32 @@ func (o *Orchestrator) watchSagaTransaction(txID, vpcName string, azs []*models.
 
 			switch saga.TxStatus(status.Status) {
 			case saga.TxStatusSucceeded:
+				azDetails := make(map[string]models.AZDetail)
 				for _, az := range azs {
-					if err := o.topDAO.UpdateVPCStatus(o.ctx, vpcName, az.ID, "running"); err != nil {
-						logger.Info("更新VPC状态失败", "vpc_name", vpcName, "az", az.ID, "error", err)
-					}
+					azDetails[az.ID] = models.AZDetail{Status: "running"}
+				}
+				if err := o.topDAO.UpdateVPCOverallStatus(o.ctx, vpcName, "running", azDetails); err != nil {
+					logger.Info("更新VPC状态失败", "vpc_name", vpcName, "error", err)
 				}
 				logger.Info("VPC创建完成，状态已更新", "tx_id", txID, "vpc_name", vpcName)
 				return
 
 			case saga.TxStatusFailed:
+				azDetails := make(map[string]models.AZDetail)
 				for i, step := range status.Steps {
 					if i < len(azs) {
-						var stepStatus string
+						d := models.AZDetail{}
 						if saga.StepStatus(step.Status) == saga.StepStatusSucceeded {
-							stepStatus = "running"
+							d.Status = "running"
 						} else {
-							stepStatus = "failed"
+							d.Status = "failed"
+							d.Error = step.LastError
 						}
-						if err := o.topDAO.UpdateVPCStatus(o.ctx, vpcName, azs[i].ID, stepStatus); err != nil {
-							logger.Info("更新VPC状态失败", "vpc_name", vpcName, "az", azs[i].ID, "error", err)
-						}
+						azDetails[azs[i].ID] = d
 					}
+				}
+				if err := o.topDAO.UpdateVPCOverallStatus(o.ctx, vpcName, "failed", azDetails); err != nil {
+					logger.Info("更新VPC状态失败", "vpc_name", vpcName, "error", err)
 				}
 				logger.Info("VPC创建失败，状态已更新", "tx_id", txID, "vpc_name", vpcName, "error", status.LastError)
 				return
@@ -312,12 +320,28 @@ func (o *Orchestrator) watchSagaTransaction(txID, vpcName string, azs []*models.
 	}
 }
 
-// GetVPCStatusFromDB 从 Top 层数据库查询 VPC 各 AZ 状态
-func (o *Orchestrator) GetVPCStatusFromDB(ctx context.Context, vpcName string) ([]*models.VPCRegistry, error) {
+// GetVPCByName 从 Top 层数据库查询单个 VPC 记录
+func (o *Orchestrator) GetVPCByName(ctx context.Context, vpcName string) (*models.VPCRegistry, error) {
 	if o.topDAO == nil {
 		return nil, fmt.Errorf("topDAO is nil")
 	}
-	return o.topDAO.GetVPCsByName(ctx, vpcName)
+	return o.topDAO.GetVPCByName(ctx, vpcName)
+}
+
+// ListAllVPCs 从 Top 层数据库查询所有 VPC
+func (o *Orchestrator) ListAllVPCs(ctx context.Context) ([]*models.VPCRegistry, error) {
+	if o.topDAO == nil {
+		return nil, fmt.Errorf("topDAO is nil")
+	}
+	return o.topDAO.ListAllVPCs(ctx)
+}
+
+// UpdateVPCStatus 更新 Top 层 vpc_registry 的整体状态和 per-AZ 详情
+func (o *Orchestrator) UpdateVPCStatus(ctx context.Context, vpcName, status string, azDetails map[string]models.AZDetail) error {
+	if o.topDAO == nil {
+		return fmt.Errorf("topDAO is nil")
+	}
+	return o.topDAO.UpdateVPCOverallStatus(ctx, vpcName, status, azDetails)
 }
 
 // HasTopDAO 检查 topDAO 是否可用

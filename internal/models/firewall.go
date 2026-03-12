@@ -115,19 +115,24 @@ type FirewallPolicyStatusResponse struct {
 	UpdatedAt    time.Time        `json:"updated_at"`
 }
 
+type AZDetail struct {
+	Status  string `json:"status"`
+	AZVpcID string `json:"az_vpc_id,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
 type VPCRegistry struct {
-	ID           string    `json:"id"`
-	VPCName      string    `json:"vpc_name"`
-	Region       string    `json:"region"`
-	AZ           string    `json:"az"`
-	AZVpcID      string    `json:"az_vpc_id"`
-	VRFName      string    `json:"vrf_name"`
-	VLANId       int       `json:"vlan_id"`
-	FirewallZone string    `json:"firewall_zone"`
-	Status       string    `json:"status"`
-	SagaTxID     string    `json:"saga_tx_id,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           string               `json:"id"`
+	VPCName      string               `json:"vpc_name"`
+	Region       string               `json:"region"`
+	VRFName      string               `json:"vrf_name"`
+	VLANId       int                  `json:"vlan_id"`
+	FirewallZone string               `json:"firewall_zone"`
+	Status       string               `json:"status"`
+	SagaTxID     string               `json:"saga_tx_id,omitempty"`
+	AZDetails    map[string]AZDetail  `json:"az_details"`
+	CreatedAt    time.Time            `json:"created_at"`
+	UpdatedAt    time.Time            `json:"updated_at"`
 }
 
 type SubnetRegistry struct {

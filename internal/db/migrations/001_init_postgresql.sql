@@ -168,25 +168,22 @@ COMMENT ON COLUMN tasks.device_type IS '设备类型: switch, loadbalancer, fire
 -- PART 4: Top Level Tables (Top 层数据库)
 -- =====================================================
 
--- VPC 注册表 (Top层拓扑)
+-- VPC 注册表 (Top层拓扑) - 一个 VPC 一条记录，per-AZ 详情存于 az_details JSONB
 CREATE TABLE IF NOT EXISTS vpc_registry (
     id VARCHAR(64) PRIMARY KEY,
-    vpc_name VARCHAR(128) NOT NULL,
+    vpc_name VARCHAR(128) NOT NULL UNIQUE,
     region VARCHAR(64) NOT NULL,
-    az VARCHAR(64) NOT NULL,
-    az_vpc_id VARCHAR(64),
     
     vrf_name VARCHAR(128),
     vlan_id INT,
     firewall_zone VARCHAR(128),
     
-    status VARCHAR(32) DEFAULT 'pending',
+    status VARCHAR(32) DEFAULT 'creating',
     saga_tx_id VARCHAR(64) DEFAULT '',
+    az_details JSONB DEFAULT '{}',
     
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    CONSTRAINT uk_vpc_registry_name_az UNIQUE (vpc_name, az)
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_vpc_registry_region ON vpc_registry(region);
