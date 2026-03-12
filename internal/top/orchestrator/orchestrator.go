@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"workflow_qoder/internal/client"
@@ -27,6 +28,7 @@ type Orchestrator struct {
 	topDAO     *topdao.TopVPCDAO
 	sagaEngine *saga.Engine        // 新增
 	tracedHTTP *trace.TracedClient // 新增
+	wg         sync.WaitGroup      // 用于跟踪后台 goroutine 生命周期
 }
 
 func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sql.DB, sagaEngine *saga.Engine, tracedHTTP *trace.TracedClient) *Orchestrator {
@@ -134,7 +136,11 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 	}
 
 	// 6. 启动后台 goroutine 监听 SAGA 事务状态
-	go o.watchSagaTransaction(txID, req.VPCName, azs)
+	o.wg.Add(1)
+	go func() {
+		defer o.wg.Done()
+		o.watchSagaTransaction(txID, req.VPCName, azs)
+	}()
 
 	return &models.VPCResponse{
 		Success:    true,
@@ -238,6 +244,7 @@ func (o *Orchestrator) CheckZonePolicies(ctx context.Context, zone string) (int,
 // watchSagaTransaction 后台监听 SAGA 事务状态，完成后回写 vpc_registry
 func (o *Orchestrator) watchSagaTransaction(txID, vpcName string, azs []*models.AZ) {
 	if o.topDAO == nil || o.sagaEngine == nil {
+		logger.Info("watchSagaTransaction退出：topDAO或sagaEngine为nil", "tx_id", txID, "vpc_name", vpcName)
 		return
 	}
 
@@ -253,20 +260,32 @@ func (o *Orchestrator) watchSagaTransaction(txID, vpcName string, azs []*models.
 			return
 		case <-timeout:
 			logger.Info("SAGA监听超时，标记VPC失败", "tx_id", txID, "vpc_name", vpcName)
+			// 使用独立 context 确保 DB 操作能完成，避免因主 context 取消导致 DB 写入失败
+			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			for _, az := range azs {
-				o.topDAO.UpdateVPCStatus(o.ctx, vpcName, az.ID, "failed")
+				if err := o.topDAO.UpdateVPCStatus(dbCtx, vpcName, az.ID, "failed"); err != nil {
+					logger.Info("超时标记VPC失败时DB更新失败", "vpc_name", vpcName, "az", az.ID, "error", err)
+				}
 			}
+			cancel()
 			return
 		case <-ticker.C:
 			status, err := o.sagaEngine.Query(o.ctx, txID)
-			if err != nil || status == nil {
+			if err != nil {
+				logger.Info("SAGA事务查询失败", "tx_id", txID, "error", err)
+				continue
+			}
+			if status == nil {
+				logger.Info("SAGA事务查询返回nil", "tx_id", txID)
 				continue
 			}
 
 			switch saga.TxStatus(status.Status) {
 			case saga.TxStatusSucceeded:
 				for _, az := range azs {
-					o.topDAO.UpdateVPCStatus(o.ctx, vpcName, az.ID, "running")
+					if err := o.topDAO.UpdateVPCStatus(o.ctx, vpcName, az.ID, "running"); err != nil {
+						logger.Info("更新VPC状态失败", "vpc_name", vpcName, "az", az.ID, "error", err)
+					}
 				}
 				logger.Info("VPC创建完成，状态已更新", "tx_id", txID, "vpc_name", vpcName)
 				return
@@ -274,10 +293,14 @@ func (o *Orchestrator) watchSagaTransaction(txID, vpcName string, azs []*models.
 			case saga.TxStatusFailed:
 				for i, step := range status.Steps {
 					if i < len(azs) {
+						var stepStatus string
 						if saga.StepStatus(step.Status) == saga.StepStatusSucceeded {
-							o.topDAO.UpdateVPCStatus(o.ctx, vpcName, azs[i].ID, "running")
+							stepStatus = "running"
 						} else {
-							o.topDAO.UpdateVPCStatus(o.ctx, vpcName, azs[i].ID, "failed")
+							stepStatus = "failed"
+						}
+						if err := o.topDAO.UpdateVPCStatus(o.ctx, vpcName, azs[i].ID, stepStatus); err != nil {
+							logger.Info("更新VPC状态失败", "vpc_name", vpcName, "az", azs[i].ID, "error", err)
 						}
 					}
 				}
@@ -300,4 +323,9 @@ func (o *Orchestrator) GetVPCStatusFromDB(ctx context.Context, vpcName string) (
 // HasTopDAO 检查 topDAO 是否可用
 func (o *Orchestrator) HasTopDAO() bool {
 	return o.topDAO != nil
+}
+
+// Shutdown 优雅关闭，等待所有后台 goroutine 完成
+func (o *Orchestrator) Shutdown() {
+	o.wg.Wait()
 }

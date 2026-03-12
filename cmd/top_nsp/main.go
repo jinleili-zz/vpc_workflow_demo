@@ -141,6 +141,8 @@ func main() {
 		<-sigCh
 		logger.Platform().Info("收到关闭信号，正在优雅关闭...")
 		cancel()
+		// 等待所有后台 goroutine 完成
+		orch.Shutdown()
 	}()
 
 	if err := server.Run(addr); err != nil {

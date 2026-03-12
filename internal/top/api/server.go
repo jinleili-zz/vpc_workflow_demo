@@ -213,6 +213,10 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 	// 快路径：从 Top 层数据库查询
 	if s.orchestrator.HasTopDAO() {
 		vpcs, err := s.orchestrator.GetVPCStatusFromDB(ctx, vpcName)
+		if err != nil {
+			// DB 查询失败，记录日志并降级到扇出查询
+			logger.InfoContext(ctx, "DB查询VPC状态失败，降级为扇出查询", "vpc_name", vpcName, "error", err)
+		}
 		if err == nil && len(vpcs) > 0 {
 			azStatuses := make(map[string]interface{})
 			overallStatus := "running"
