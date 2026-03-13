@@ -29,7 +29,7 @@ type Server struct {
 	callbackQueueName string
 }
 
-func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, tracedHTTP *trace.TracedClient, db *sql.DB) *Server {
+func NewServer(cfg *config.NSPConfig, engine *taskqueue.Engine, tracedHTTP *trace.TracedClient, db *sql.DB) *Server {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	
@@ -38,7 +38,7 @@ func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, tracedHTTP *trace
 	router.Use(trace.TraceMiddleware(instanceID))
 	router.Use(ginLoggerMiddleware())
 
-	orch := orchestrator.NewAZOrchestrator(db, broker, tracedHTTP, cfg.Region, cfg.AZ)
+	orch := orchestrator.NewAZOrchestrator(db, engine, tracedHTTP, cfg.Region, cfg.AZ)
 	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ, "vpc")
 
 	server := &Server{
@@ -338,28 +338,7 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 }
 
 func (s *Server) HandleTaskCallback(ctx context.Context, payload []byte) error {
-	var cb struct {
-		TaskID       string      `json:"task_id"`
-		Status       string      `json:"status"`
-		Result       interface{} `json:"result"`
-		ErrorMessage string      `json:"error_message"`
-	}
-
-	if err := json.Unmarshal(payload, &cb); err != nil {
-		return fmt.Errorf("解析回调载荷失败: %v", err)
-	}
-
-	logger.InfoContext(ctx, "收到任务回调", "az", s.cfg.AZ, "taskID", cb.TaskID, "status", cb.Status)
-
-	status := models.TaskStatus(cb.Status)
-	err := s.orchestrator.HandleTaskCallback(ctx, cb.TaskID, status, cb.Result, cb.ErrorMessage)
-	if err != nil {
-		logger.InfoContext(ctx, "任务回调处理失败", "az", s.cfg.AZ, "error", err)
-		return err
-	}
-
-	logger.InfoContext(ctx, "任务回调处理成功", "az", s.cfg.AZ, "taskID", cb.TaskID)
-	return nil
+	return s.orchestrator.HandleTaskCallback(ctx, payload)
 }
 
 func (s *Server) GetCallbackQueueName() string {
@@ -514,4 +493,10 @@ func (s *Server) StartHeartbeat(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// StartCompensationTask starts the background compensation task that repairs
+// inconsistencies between workflow state and resource state.
+func (s *Server) StartCompensationTask(ctx context.Context, interval time.Duration) {
+	s.orchestrator.StartCompensationTask(ctx, interval)
 }
