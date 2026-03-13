@@ -12,11 +12,14 @@ import (
 	"time"
 
 	"workflow_qoder/internal/az/vfw/api"
+	"workflow_qoder/internal/az/vfw/orchestrator"
 	"workflow_qoder/internal/config"
+	"workflow_qoder/internal/queue"
 
 	"github.com/hibiken/asynq"
 	_ "github.com/lib/pq"
 	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/taskqueue"
 	"github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 	"github.com/paic/nsp-common/pkg/trace"
 )
@@ -110,16 +113,38 @@ func main() {
 
 	redisOpt := config.MakeAsynqRedisOpt(redisAddr, redisBrokerDB)
 
-	// 创建 Broker（用于 orchestrator 入队任务）
+	// 创建 Broker
 	broker := asynqbroker.NewBroker(redisOpt)
 	defer broker.Close()
+
+	callbackQueueName := queue.GetCallbackQueueName(region, az, "vfw")
+
+	// 创建临时 orchestrator 实例以获取 WorkflowHooks
+	tmpOrch := orchestrator.NewVFWOrchestrator(pgDB, nil, nil, region, az)
+	hooks := tmpOrch.BuildWorkflowHooks()
+
+	// 创建 Engine（使用 NewEngineWithStore 以复用 pgDB 连接）
+	engineStore := taskqueue.NewPostgresStore(pgDB)
+	engine := taskqueue.NewEngineWithStore(&taskqueue.Config{
+		CallbackQueue: callbackQueueName,
+		QueueRouter: func(queueTag string, priority taskqueue.Priority) string {
+			deviceType := queue.DeviceType(queueTag)
+			return queue.GetPriorityQueueName(region, az, deviceType, queue.TaskPriority(priority))
+		},
+		Hooks: hooks,
+	}, broker, engineStore)
+
+	// 运行数据库迁移（创建 tq_workflows + tq_steps 表）
+	if err := engine.Migrate(context.Background()); err != nil {
+		logger.Platform().Error("Engine 数据库迁移失败", "error", err)
+		os.Exit(1)
+	}
+	logger.Platform().Info("[AZ NSP VFW] Engine 数据库迁移完成")
 
 	// 创建 Traced HTTP Client
 	tracedHTTP := trace.NewTracedClient(nil)
 
-	server := api.NewServer(cfg, broker, tracedHTTP, pgDB)
-
-	callbackQueueName := server.GetCallbackQueueName()
+	server := api.NewServer(cfg, engine, tracedHTTP, pgDB)
 
 	// 创建 Consumer 消费回调队列
 	callbackConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
@@ -134,6 +159,7 @@ func main() {
 	})
 
 	go func() {
+		logger.Platform().Info("[AZ NSP VFW] 回调处理器启动", "az", az, "queue", callbackQueueName)
 		if err := callbackConsumer.Start(context.Background()); err != nil {
 			logger.Platform().Error("[AZ NSP VFW] 回调消费者启动失败", "error", err)
 		}
@@ -153,10 +179,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// 启动补偿任务（每30秒检查一次工作流与策略状态不一致的情况）
+	server.StartCompensationTask(ctx, 30*time.Second)
+
 	go server.StartHeartbeat(ctx)
 
 	go func() {
 		addr := fmt.Sprintf(":%d", port)
+		logger.Platform().Info("[AZ NSP VFW] API服务启动", "az", az, "port", port)
 		if err := server.Run(addr); err != nil {
 			logger.Platform().Error("[AZ NSP VFW] 服务启动失败", "error", err)
 			os.Exit(1)
