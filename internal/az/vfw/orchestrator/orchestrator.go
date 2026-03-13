@@ -37,30 +37,40 @@ func NewVFWOrchestrator(db *sql.DB, engine *taskqueue.Engine, tracedHTTP *trace.
 
 // BuildWorkflowHooks returns the WorkflowHooks that synchronize firewall_policies table
 // with tq_workflows/tq_steps state transitions.
+// NOTE: Hooks are non-blocking - they log warnings on errors but return nil to avoid
+// stalling workflow execution. Compensation tasks handle eventual consistency.
 func (o *VFWOrchestrator) BuildWorkflowHooks() *taskqueue.WorkflowHooks {
 	return &taskqueue.WorkflowHooks{
 		OnStepComplete: func(ctx context.Context, wf *taskqueue.Workflow, step *taskqueue.StepTask) error {
 			if wf.ResourceType == string(models.ResourceTypeFirewallPolicy) {
-				return o.policyDAO.IncrementCompletedTasks(ctx, wf.ResourceID)
+				if err := o.policyDAO.IncrementCompletedTasks(ctx, wf.ResourceID); err != nil {
+					logger.WarnContext(ctx, "OnStepComplete hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
+				}
 			}
 			return nil
 		},
 		OnStepFailed: func(ctx context.Context, wf *taskqueue.Workflow, step *taskqueue.StepTask, errMsg string) error {
 			if wf.ResourceType == string(models.ResourceTypeFirewallPolicy) {
-				return o.policyDAO.IncrementFailedTasks(ctx, wf.ResourceID)
+				if err := o.policyDAO.IncrementFailedTasks(ctx, wf.ResourceID); err != nil {
+					logger.WarnContext(ctx, "OnStepFailed hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
+				}
 			}
 			return nil
 		},
 		OnWorkflowComplete: func(ctx context.Context, wf *taskqueue.Workflow) error {
 			if wf.ResourceType == string(models.ResourceTypeFirewallPolicy) {
 				logger.InfoContext(ctx, "防火墙策略创建完成", "az", o.az, "resourceID", wf.ResourceID)
-				return o.policyDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusRunning, "")
+				if err := o.policyDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusRunning, ""); err != nil {
+					logger.WarnContext(ctx, "OnWorkflowComplete hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
+				}
 			}
 			return nil
 		},
 		OnWorkflowFailed: func(ctx context.Context, wf *taskqueue.Workflow, errMsg string) error {
 			if wf.ResourceType == string(models.ResourceTypeFirewallPolicy) {
-				return o.policyDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg)
+				if err := o.policyDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg); err != nil {
+					logger.WarnContext(ctx, "OnWorkflowFailed hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
+				}
 			}
 			return nil
 		},

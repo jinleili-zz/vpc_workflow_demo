@@ -42,47 +42,61 @@ func NewAZOrchestrator(db *sql.DB, engine *taskqueue.Engine, tracedHTTP *trace.T
 
 // BuildWorkflowHooks returns the WorkflowHooks that synchronise business resource tables
 // (vpc_resources, subnet_resources) with tq_workflows/tq_steps state transitions.
+// NOTE: Hooks are non-blocking - they log warnings on errors but return nil to avoid
+// stalling workflow execution. Compensation tasks handle eventual consistency.
 func (o *AZOrchestrator) BuildWorkflowHooks() *taskqueue.WorkflowHooks {
 	return &taskqueue.WorkflowHooks{
 		OnStepComplete: func(ctx context.Context, wf *taskqueue.Workflow, step *taskqueue.StepTask) error {
+			var err error
 			switch wf.ResourceType {
 			case string(models.ResourceTypeVPC):
-				return o.vpcDAO.IncrementCompletedTasks(ctx, wf.ResourceID)
+				err = o.vpcDAO.IncrementCompletedTasks(ctx, wf.ResourceID)
 			case string(models.ResourceTypeSubnet):
-				return o.subnetDAO.IncrementCompletedTasks(ctx, wf.ResourceID)
+				err = o.subnetDAO.IncrementCompletedTasks(ctx, wf.ResourceID)
+			}
+			if err != nil {
+				logger.WarnContext(ctx, "OnStepComplete hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
 			}
 			return nil
 		},
 		OnStepFailed: func(ctx context.Context, wf *taskqueue.Workflow, step *taskqueue.StepTask, errMsg string) error {
+			var err error
 			switch wf.ResourceType {
 			case string(models.ResourceTypeVPC):
-				if err := o.vpcDAO.IncrementFailedTasks(ctx, wf.ResourceID); err != nil {
-					return err
-				}
+				err = o.vpcDAO.IncrementFailedTasks(ctx, wf.ResourceID)
 			case string(models.ResourceTypeSubnet):
-				if err := o.subnetDAO.IncrementFailedTasks(ctx, wf.ResourceID); err != nil {
-					return err
-				}
+				err = o.subnetDAO.IncrementFailedTasks(ctx, wf.ResourceID)
+			}
+			if err != nil {
+				logger.WarnContext(ctx, "OnStepFailed hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
 			}
 			return nil
 		},
 		OnWorkflowComplete: func(ctx context.Context, wf *taskqueue.Workflow) error {
+			var err error
 			switch wf.ResourceType {
 			case string(models.ResourceTypeVPC):
 				logger.InfoContext(ctx, "VPC创建完成", "az", o.az, "resourceID", wf.ResourceID)
-				return o.vpcDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusRunning, "")
+				err = o.vpcDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusRunning, "")
 			case string(models.ResourceTypeSubnet):
 				logger.InfoContext(ctx, "子网创建完成", "az", o.az, "resourceID", wf.ResourceID)
-				return o.subnetDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusRunning, "")
+				err = o.subnetDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusRunning, "")
+			}
+			if err != nil {
+				logger.WarnContext(ctx, "OnWorkflowComplete hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
 			}
 			return nil
 		},
 		OnWorkflowFailed: func(ctx context.Context, wf *taskqueue.Workflow, errMsg string) error {
+			var err error
 			switch wf.ResourceType {
 			case string(models.ResourceTypeVPC):
-				return o.vpcDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg)
+				err = o.vpcDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg)
 			case string(models.ResourceTypeSubnet):
-				return o.subnetDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg)
+				err = o.subnetDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg)
+			}
+			if err != nil {
+				logger.WarnContext(ctx, "OnWorkflowFailed hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
 			}
 			return nil
 		},
