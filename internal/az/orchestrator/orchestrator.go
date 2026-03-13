@@ -106,7 +106,11 @@ func (o *AZOrchestrator) BuildWorkflowHooks() *taskqueue.WorkflowHooks {
 func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) (*models.VPCResponse, error) {
 	logger.InfoContext(ctx, "开始创建VPC", "az", o.az, "vpcName", req.VPCName)
 
-	vpcID := uuid.New().String()
+	// 使用 Top 层传入的统一 VPC ID，若未提供则自行生成（向后兼容）
+	vpcID := req.VPCID
+	if vpcID == "" {
+		vpcID = uuid.New().String()
+	}
 
 	vpcResource := &models.VPCResource{
 		ID:             vpcID,

@@ -72,14 +72,20 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 		}
 	}
 
-	// 3. 构建 SAGA 事务定义
+	// 3. 统一生成 VPC ID（Top 层和 AZ 层使用同一个 ID）
+	vpcID := uuid.New().String()
+
+	// 4. 构建 SAGA 事务定义
 	builder := saga.NewSaga(fmt.Sprintf("region-vpc-create-%s", req.VPCName)).
 		WithPayload(map[string]any{"vpc_name": req.VPCName, "region": req.Region}).
 		WithTimeout(900) // 15 分钟超时，给 worker 足够时间
 
 	// 为每个 AZ 添加一个步骤（串行执行，使用 Async + Poll 等待 worker 完成）
 	for _, az := range azs {
-		payloadBytes, _ := json.Marshal(req)
+		// 将统一的 VPC ID 注入到请求中，确保 AZ 层使用相同 ID
+		reqWithID := *req
+		reqWithID.VPCID = vpcID
+		payloadBytes, _ := json.Marshal(&reqWithID)
 		var payloadMap map[string]any
 		json.Unmarshal(payloadBytes, &payloadMap)
 		builder.AddStep(saga.Step{
@@ -114,14 +120,14 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 
 	logger.InfoContext(ctx, "SAGA事务已提交", "transaction_id", txID, "vpc_name", req.VPCName)
 
-	// 5. 预注册 VPC 到 vpc_registry（一个 VPC 一条记录）
+	// 5. 预注册 VPC 到 vpc_registry（使用统一的 VPC ID）
 	if o.topDAO != nil {
 		azDetails := make(map[string]models.AZDetail)
 		for _, az := range azs {
 			azDetails[az.ID] = models.AZDetail{Status: "creating"}
 		}
 		vpcReg := &models.VPCRegistry{
-			ID:           uuid.New().String(),
+			ID:           vpcID,
 			VPCName:      req.VPCName,
 			Region:       req.Region,
 			VRFName:      req.VRFName,
