@@ -2,7 +2,67 @@
 
 This file provides guidance to Qoder (qoder.com) when working with code in this repository.
 
-## Project Overview
+## NSP System Overview
+
+### 项目定位
+
+NSP（Network Service Platform，网络服务平台）部署在私有云的云管区，作为网络基础设施编排的核心组件，对外提供RESTful API接口，供云管平台门户后端调用，实现对底层硬件网络设备（交换机、防火墙、负载均衡器等）的自动化编排与配置下发。
+
+### 层次架构
+
+NSP采用三层分布式架构设计：
+
+- **TOP-NSP（云级编排层）**：作为全局编排器，负责跨Region的资源协调、AZ注册管理、健康监控，以及Region级资源（如VPC）的并行分发与自动回滚。TOP-NSP通过HTTP接口与AZ-NSP通信。
+
+- **AZ-NSP（可用区服务层）**：部署在每个可用区，负责本AZ内的资源管理与工作流编排。AZ-NSP启动时自动向TOP-NSP注册，并以60秒间隔发送心跳维持在线状态。AZ-NSP通过基于Redis的asynq消息队列向Worker下发任务。
+
+- **Worker（任务执行层）**：按设备类型分为Switch Worker（交换机配置）、Firewall Worker（防火墙配置）、LoadBalancer Worker（负载均衡配置）。Worker监听AZ专属队列（格式：`tasks_{region}_{az}_{device_type}`），执行具体的设备配置任务，并通过回调队列返回执行结果。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        TOP-NSP                              │
+│              (top-nsp-vpc / top-nsp-vfw)                    │
+│                    HTTP REST API                            │
+└─────────────────────┬───────────────────────────────────────┘
+                      │ HTTP
+        ┌─────────────┼─────────────┐
+        ▼             ▼             ▼
+   ┌─────────┐   ┌─────────┐   ┌─────────┐
+   │ AZ-NSP  │   │ AZ-NSP  │   │ AZ-NSP  │
+   │ beijing │   │ beijing │   │ shanghai│
+   │   -1a   │   │   -1b   │   │   -1a   │
+   └────┬────┘   └────┴────┘   └────┬────┘
+        │ Redis/asynq              │
+   ┌────┴────┐   ┌─────────┐   ┌────┴────┐
+   │ Workers │   │ Workers │   │ Workers │
+   │switch/fw│   │switch/fw│   │switch/fw│
+   └─────────┘   └─────────┘   └─────────┘
+```
+
+### 微服务划分
+
+NSP对外呈现为以下微服务：
+
+| 服务 | 功能范围 | 实现状态 |
+|------|---------|---------|
+| **VPC服务** | VPC创建/删除（跨AZ并行）、子网管理、VRF/VLAN配置 | 已实现 |
+| **VFW服务** | 防火墙安全区域管理、安全策略配置 | 已实现 |
+| **ELB服务** | 负载均衡池管理、监听器配置 | 框架已就绪 |
+| **NAT服务** | NAT网关、EIP等互联网访问功能 | 规划中 |
+
+### 部署架构
+
+NSP基于容器化部署，核心组件包括：
+
+- **Redis Cluster**（3节点）：双数据库设计，DB0用于数据存储，DB1用于消息队列
+- **MySQL**：持久化存储资源拓扑与状态数据
+- **服务容器**：TOP-NSP、AZ-NSP按服务类型独立部署，Worker按设备类型和AZ维度部署
+
+生产环境计划使用Kubernetes编排工具实现多副本高可用部署（每个服务3副本）。当前测试环境受限于资源，docker-compose配置为单实例部署。
+
+---
+
+## Project Overview (Technical)
 
 This is a distributed VPC workflow system built with Go 1.22+ that orchestrates network infrastructure provisioning across multiple regions and availability zones using Redis-backed task queues (asynq).
 
