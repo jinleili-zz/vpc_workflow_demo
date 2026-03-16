@@ -27,6 +27,7 @@ type AZ struct {
 
 // VPCRequest VPC创建请求（扩展）
 type VPCRequest struct {
+	VPCID        string `json:"vpc_id,omitempty"`                // Top层统一生成的VPC ID，AZ层使用此ID
 	VPCName      string `json:"vpc_name" binding:"required"`
 	Region       string `json:"region" binding:"required"` // 新增：指定Region
 	VRFName      string `json:"vrf_name" binding:"required"`

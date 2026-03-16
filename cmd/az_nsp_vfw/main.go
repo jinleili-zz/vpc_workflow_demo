@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strconv"
@@ -13,28 +12,51 @@ import (
 	"time"
 
 	"workflow_qoder/internal/az/vfw/api"
+	"workflow_qoder/internal/az/vfw/orchestrator"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/queue"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/hibiken/asynq"
+	_ "github.com/lib/pq"
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
+	"github.com/paic/nsp-common/pkg/trace"
 )
 
-func main() {
-	log.Println("========================================")
-	log.Println("AZ NSP VFW 启动中...")
-	log.Println("========================================")
+func getEnvOrDefault(key, defaultValue string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultValue
+}
 
+func main() {
 	cfg := config.LoadConfig()
 
 	region := os.Getenv("REGION")
 	az := os.Getenv("AZ")
 	if region == "" || az == "" {
-		log.Fatal("必须设置环境变量 REGION 和 AZ")
+		fmt.Println("必须设置环境变量 REGION 和 AZ")
+		os.Exit(1)
 	}
 	cfg.Region = region
 	cfg.AZ = az
 	cfg.ServiceType = "az"
+
+	// 初始化 logger
+	logCfg := logger.DefaultConfig(fmt.Sprintf("az-nsp-vfw-%s", az))
+	if os.Getenv("DEVELOPMENT") == "true" {
+		logCfg = logger.DevelopmentConfig(fmt.Sprintf("az-nsp-vfw-%s", az))
+	}
+	if err := logger.Init(logCfg); err != nil {
+		panic("初始化日志失败: " + err.Error())
+	}
+	defer logger.Sync()
+
+	logger.Platform().Info("========================================")
+	logger.Platform().Info("AZ NSP VFW 启动中...")
+	logger.Platform().Info("========================================")
 
 	port := 8080
 	if portStr := os.Getenv("PORT"); portStr != "" {
@@ -44,101 +66,102 @@ func main() {
 	}
 	cfg.Port = port
 
-	log.Printf("[AZ NSP VFW] Region=%s, AZ=%s, Port=%d", region, az, port)
+	logger.Platform().Info("[AZ NSP VFW] 服务配置", "region", region, "az", az, "port", port)
 
-	mysqlHost := os.Getenv("MYSQL_HOST")
-	if mysqlHost == "" {
-		mysqlHost = "mysql"
-	}
-	mysqlPort := os.Getenv("MYSQL_PORT")
-	if mysqlPort == "" {
-		mysqlPort = "3306"
-	}
-	mysqlDatabase := os.Getenv("MYSQL_DATABASE")
-	if mysqlDatabase == "" {
-		mysqlDatabase = fmt.Sprintf("nsp_%s_vfw", strings.ReplaceAll(az, "-", "_"))
-	}
-	mysqlUser := os.Getenv("MYSQL_USER")
-	if mysqlUser == "" {
-		mysqlUser = "nsp_user"
-	}
-	mysqlPassword := os.Getenv("MYSQL_PASSWORD")
-	if mysqlPassword == "" {
-		mysqlPassword = "nsp_password"
-	}
+	// Build PostgreSQL DSN
+	pgHost := getEnvOrDefault("POSTGRES_HOST", "postgres")
+	pgPort := getEnvOrDefault("POSTGRES_PORT", "5432")
+	pgUser := getEnvOrDefault("POSTGRES_USER", "nsp_user")
+	pgPassword := getEnvOrDefault("POSTGRES_PASSWORD", "nsp_password")
+	dbName := fmt.Sprintf("nsp_%s_vfw", strings.ReplaceAll(az, "-", "_"))
+	postgresDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", pgUser, pgPassword, pgHost, pgPort, dbName)
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-		mysqlUser, mysqlPassword, mysqlHost, mysqlPort, mysqlDatabase)
-
-	var mysqlDB *sql.DB
+	// Connect to PostgreSQL
+	var pgDB *sql.DB
 	var err error
 	for i := 0; i < 30; i++ {
-		mysqlDB, err = sql.Open("mysql", dsn)
+		pgDB, err = sql.Open("postgres", postgresDSN)
 		if err == nil {
-			if err = mysqlDB.Ping(); err == nil {
+			if err = pgDB.Ping(); err == nil {
 				break
 			}
+			pgDB.Close()
 		}
-		log.Printf("[AZ NSP VFW] 等待MySQL就绪... (%d/30)", i+1)
+		logger.Platform().Info("[AZ NSP VFW] 等待 PostgreSQL 就绪...", "attempt", i+1)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
-		log.Fatalf("连接MySQL失败: %v", err)
+		logger.Platform().Error("PostgreSQL 连接失败", "error", err)
+		os.Exit(1)
 	}
-	defer mysqlDB.Close()
-	log.Printf("[AZ NSP VFW] MySQL连接成功: %s", mysqlDatabase)
+	defer pgDB.Close()
+
+	logger.Platform().Info("[AZ NSP VFW] PostgreSQL 连接成功", "database", dbName)
 
 	redisAddr := cfg.GetRedisAddr()
-	addrs := strings.Split(redisAddr, ",")
+	redisBrokerDB := cfg.GetRedisBrokerDB()
 
-	var asynqClientOpt asynq.RedisConnOpt
-	if len(addrs) > 1 {
-		asynqClientOpt = asynq.RedisClusterClientOpt{
-			Addrs: addrs,
-		}
-	} else {
-		asynqClientOpt = asynq.RedisClientOpt{
-			Addr: redisAddr,
-			DB:   cfg.GetRedisBrokerDB(),
+	// 从环境变量覆盖 Redis 地址（支持集群格式）
+	if redisAddrEnv := os.Getenv("REDIS_ADDR"); redisAddrEnv != "" {
+		redisAddr = redisAddrEnv
+	}
+	if brokerDB := os.Getenv("REDIS_BROKER_DB"); brokerDB != "" {
+		if v, err := strconv.Atoi(brokerDB); err == nil {
+			redisBrokerDB = v
 		}
 	}
 
-	asynqClient := asynq.NewClient(asynqClientOpt)
-	defer asynqClient.Close()
+	redisOpt := config.MakeAsynqRedisOpt(redisAddr, redisBrokerDB)
 
-	server := api.NewServer(cfg, asynqClient, mysqlDB)
+	// 创建 Broker
+	broker := asynqbroker.NewBroker(redisOpt)
+	defer broker.Close()
 
-	callbackQueueName := server.GetCallbackQueueName()
+	callbackQueueName := queue.GetCallbackQueueName(region, az, "vfw")
 
-	var asynqServerOpt asynq.RedisConnOpt
-	if len(addrs) > 1 {
-		asynqServerOpt = asynq.RedisClusterClientOpt{
-			Addrs: addrs,
-		}
-	} else {
-		asynqServerOpt = asynq.RedisClientOpt{
-			Addr: redisAddr,
-			DB:   cfg.GetRedisBrokerDB(),
-		}
-	}
+	// 创建临时 orchestrator 实例以获取 WorkflowHooks
+	tmpOrch := orchestrator.NewVFWOrchestrator(pgDB, nil, nil, region, az)
+	hooks := tmpOrch.BuildWorkflowHooks()
 
-	queuesConfig := queue.GetAllQueuesConfig(region, az)
-	queuesConfig[callbackQueueName] = 10
-
-	asynqServer := asynq.NewServer(
-		asynqServerOpt,
-		asynq.Config{
-			Concurrency: 10,
-			Queues:      queuesConfig,
+	// 创建 Engine（使用 NewEngineWithStore 以复用 pgDB 连接）
+	engineStore := taskqueue.NewPostgresStore(pgDB)
+	engine := taskqueue.NewEngineWithStore(&taskqueue.Config{
+		CallbackQueue: callbackQueueName,
+		QueueRouter: func(queueTag string, priority taskqueue.Priority) string {
+			deviceType := queue.DeviceType(queueTag)
+			return queue.GetPriorityQueueName(region, az, deviceType, queue.TaskPriority(priority))
 		},
-	)
+		Hooks: hooks,
+	}, broker, engineStore)
 
-	mux := asynq.NewServeMux()
-	mux.HandleFunc("task_callback", server.HandleTaskCallback())
+	// 运行数据库迁移（创建 tq_workflows + tq_steps 表）
+	if err := engine.Migrate(context.Background()); err != nil {
+		logger.Platform().Error("Engine 数据库迁移失败", "error", err)
+		os.Exit(1)
+	}
+	logger.Platform().Info("[AZ NSP VFW] Engine 数据库迁移完成")
+
+	// 创建 Traced HTTP Client
+	tracedHTTP := trace.NewTracedClient(nil)
+
+	server := api.NewServer(cfg, engine, tracedHTTP, pgDB)
+
+	// 创建 Consumer 消费回调队列
+	callbackConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
+		Concurrency: 10,
+		Queues: map[string]int{
+			callbackQueueName: 10,
+		},
+	})
+
+	callbackConsumer.HandleRaw("task_callback", func(ctx context.Context, t *asynq.Task) error {
+		return server.HandleTaskCallback(ctx, t.Payload())
+	})
 
 	go func() {
-		if err := asynqServer.Run(mux); err != nil {
-			log.Printf("[AZ NSP VFW] Asynq服务器启动失败: %v", err)
+		logger.Platform().Info("[AZ NSP VFW] 回调处理器启动", "az", az, "queue", callbackQueueName)
+		if err := callbackConsumer.Start(context.Background()); err != nil {
+			logger.Platform().Error("[AZ NSP VFW] 回调消费者启动失败", "error", err)
 		}
 	}()
 
@@ -146,7 +169,7 @@ func main() {
 
 	for i := 0; i < 10; i++ {
 		if err := server.RegisterToTopNSP(); err != nil {
-			log.Printf("[AZ NSP VFW] 注册失败，重试中... (%d/10): %v", i+1, err)
+			logger.Platform().Info("[AZ NSP VFW] 注册失败，重试中...", "attempt", i+1, "error", err)
 			time.Sleep(3 * time.Second)
 			continue
 		}
@@ -156,12 +179,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// 启动补偿任务（每30秒检查一次工作流与策略状态不一致的情况）
+	server.StartCompensationTask(ctx, 30*time.Second)
+
 	go server.StartHeartbeat(ctx)
 
 	go func() {
 		addr := fmt.Sprintf(":%d", port)
+		logger.Platform().Info("[AZ NSP VFW] API服务启动", "az", az, "port", port)
 		if err := server.Run(addr); err != nil {
-			log.Fatalf("[AZ NSP VFW] 服务启动失败: %v", err)
+			logger.Platform().Error("[AZ NSP VFW] 服务启动失败", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -169,8 +197,8 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("[AZ NSP VFW] 正在关闭...")
+	logger.Platform().Info("[AZ NSP VFW] 正在关闭...")
 	cancel()
-	asynqServer.Shutdown()
-	log.Println("[AZ NSP VFW] 已关闭")
+	callbackConsumer.Stop()
+	logger.Platform().Info("[AZ NSP VFW] 已关闭")
 }

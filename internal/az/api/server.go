@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"time"
@@ -17,7 +16,9 @@ import (
 	"workflow_qoder/internal/queue"
 
 	"github.com/gin-gonic/gin"
-	"github.com/hibiken/asynq"
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/trace"
 )
 
 type Server struct {
@@ -26,27 +27,52 @@ type Server struct {
 	router            *gin.Engine
 	db                *sql.DB
 	callbackQueueName string
-	asynqInspector    *asynq.Inspector
 }
 
-func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, asynqInspector *asynq.Inspector, mysqlDB *sql.DB) *Server {
-	router := gin.Default()
+func NewServer(cfg *config.NSPConfig, engine *taskqueue.Engine, tracedHTTP *trace.TracedClient, db *sql.DB) *Server {
+	router := gin.New()
+	router.Use(gin.Recovery())
+	
+	// Add trace middleware for distributed tracing
+	instanceID := fmt.Sprintf("az-nsp-vpc-%s-%s", cfg.Region, cfg.AZ)
+	router.Use(trace.TraceMiddleware(instanceID))
+	router.Use(ginLoggerMiddleware())
 
-	orch := orchestrator.NewAZOrchestrator(mysqlDB, asynqClient, cfg.Region, cfg.AZ)
-	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ)
+	orch := orchestrator.NewAZOrchestrator(db, engine, tracedHTTP, cfg.Region, cfg.AZ)
+	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ, "vpc")
 
 	server := &Server{
 		cfg:               cfg,
 		orchestrator:      orch,
 		router:            router,
-		db:                mysqlDB,
+		db:                db,
 		callbackQueueName: callbackQueueName,
-		asynqInspector:    asynqInspector,
 	}
 
 	server.setupRoutes()
 
 	return server
+}
+
+// ginLoggerMiddleware logs HTTP requests with trace context
+func ginLoggerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+
+		c.Next()
+
+		ctx := c.Request.Context()
+		latency := time.Since(start)
+
+		logger.InfoContext(ctx, "http request",
+			"method", c.Request.Method,
+			"path", path,
+			"status", c.Writer.Status(),
+			"latency_ms", latency.Milliseconds(),
+			"client_ip", c.ClientIP(),
+		)
+	}
 }
 
 func (s *Server) setupRoutes() {
@@ -83,7 +109,7 @@ func (s *Server) createVPC(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateVPC(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.VPCResponse{
@@ -98,7 +124,7 @@ func (s *Server) createVPC(c *gin.Context) {
 
 func (s *Server) getVPCStatus(c *gin.Context) {
 	vpcName := c.Param("vpc_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	status, err := s.orchestrator.GetVPCStatus(ctx, vpcName)
 	if err != nil {
@@ -114,7 +140,7 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 
 func (s *Server) deleteVPC(c *gin.Context) {
 	vpcName := c.Param("vpc_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	err := s.orchestrator.DeleteVPC(ctx, vpcName)
 	if err != nil {
@@ -126,8 +152,10 @@ func (s *Server) deleteVPC(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "VPC已成功删除",
+		"success":  true,
+		"message":  "VPC已成功删除",
+		"vpc_name": vpcName,
+		"az":       s.orchestrator.GetAZ(),
 	})
 }
 
@@ -141,7 +169,7 @@ func (s *Server) createSubnet(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateSubnet(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
@@ -156,7 +184,7 @@ func (s *Server) createSubnet(c *gin.Context) {
 
 func (s *Server) getSubnetStatus(c *gin.Context) {
 	subnetName := c.Param("subnet_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	status, err := s.orchestrator.GetSubnetStatus(ctx, subnetName)
 	if err != nil {
@@ -172,7 +200,7 @@ func (s *Server) getSubnetStatus(c *gin.Context) {
 
 func (s *Server) deleteSubnet(c *gin.Context) {
 	subnetName := c.Param("subnet_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	err := s.orchestrator.DeleteSubnet(ctx, subnetName)
 	if err != nil {
@@ -190,7 +218,7 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 }
 
 func (s *Server) listVPCs(c *gin.Context) {
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	vpcs, err := s.orchestrator.ListVPCs(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -208,7 +236,7 @@ func (s *Server) listVPCs(c *gin.Context) {
 
 func (s *Server) getVPCByID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	vpc, err := s.orchestrator.GetVPCByID(ctx, vpcID)
 	if err != nil {
@@ -227,7 +255,10 @@ func (s *Server) getVPCByID(c *gin.Context) {
 
 func (s *Server) deleteVPCByID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
+
+	// 先获取 VPC 信息用于响应
+	vpc, _ := s.orchestrator.GetVPCByID(ctx, vpcID)
 
 	err := s.orchestrator.DeleteVPCByID(ctx, vpcID)
 	if err != nil {
@@ -238,15 +269,20 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"success": true,
 		"message": "VPC已成功删除",
-	})
+		"az":      s.orchestrator.GetAZ(),
+	}
+	if vpc != nil {
+		resp["vpc_name"] = vpc.VPCName
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func (s *Server) listSubnetsByVPCID(c *gin.Context) {
 	vpcID := c.Param("vpc_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	subnets, err := s.orchestrator.ListSubnetsByVPCID(ctx, vpcID)
 	if err != nil {
@@ -265,7 +301,7 @@ func (s *Server) listSubnetsByVPCID(c *gin.Context) {
 
 func (s *Server) getSubnetByID(c *gin.Context) {
 	subnetID := c.Param("subnet_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	subnet, err := s.orchestrator.GetSubnetByID(ctx, subnetID)
 	if err != nil {
@@ -284,7 +320,7 @@ func (s *Server) getSubnetByID(c *gin.Context) {
 
 func (s *Server) deleteSubnetByID(c *gin.Context) {
 	subnetID := c.Param("subnet_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	err := s.orchestrator.DeleteSubnetByID(ctx, subnetID)
 	if err != nil {
@@ -301,36 +337,17 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 	})
 }
 
-func (s *Server) HandleTaskCallback() func(context.Context, *asynq.Task) error {
-	return func(ctx context.Context, t *asynq.Task) error {
-		var payload struct {
-			TaskID       string      `json:"task_id"`
-			Status       string      `json:"status"`
-			Result       interface{} `json:"result"`
-			ErrorMessage string      `json:"error_message"`
-		}
+func (s *Server) HandleTaskCallback(ctx context.Context, payload []byte) error {
+	return s.orchestrator.HandleTaskCallback(ctx, payload)
+}
 
-		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
-			return fmt.Errorf("解析回调载荷失败: %v", err)
-		}
-
-		log.Printf("[AZ NSP %s] 收到任务回调: taskID=%s, status=%s", s.cfg.AZ, payload.TaskID, payload.Status)
-
-		status := models.TaskStatus(payload.Status)
-		err := s.orchestrator.HandleTaskCallback(ctx, payload.TaskID, status, payload.Result, payload.ErrorMessage)
-		if err != nil {
-			log.Printf("[AZ NSP %s] 任务回调处理失败: %v", s.cfg.AZ, err)
-			return err
-		}
-
-		log.Printf("[AZ NSP %s] 任务回调处理成功: taskID=%s", s.cfg.AZ, payload.TaskID)
-		return nil
-	}
+func (s *Server) GetCallbackQueueName() string {
+	return s.callbackQueueName
 }
 
 func (s *Server) replayTask(c *gin.Context) {
 	taskID := c.Param("task_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	task, err := s.orchestrator.GetTaskByID(ctx, taskID)
 	if err != nil {
@@ -366,7 +383,7 @@ func (s *Server) replayTask(c *gin.Context) {
 
 func (s *Server) getTaskByID(c *gin.Context) {
 	taskID := c.Param("task_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	task, err := s.orchestrator.GetTaskByID(ctx, taskID)
 	if err != nil {
@@ -393,8 +410,12 @@ func (s *Server) health(c *gin.Context) {
 }
 
 func (s *Server) Run(addr string) error {
-	log.Printf("[AZ NSP %s] 服务启动在 %s", s.cfg.AZ, addr)
+	logger.Info("服务启动", "az", s.cfg.AZ, "addr", addr)
 	return s.router.Run(addr)
+}
+
+func (s *Server) Engine() *gin.Engine {
+	return s.router
 }
 
 func (s *Server) RegisterToTopNSP() error {
@@ -431,7 +452,7 @@ func (s *Server) RegisterToTopNSP() error {
 		return fmt.Errorf("注册失败，状态码: %d", resp.StatusCode)
 	}
 
-	log.Printf("[AZ NSP %s] 成功注册到Top NSP: %s", s.cfg.AZ, topNSPAddr)
+	logger.Info("成功注册到Top NSP", "az", s.cfg.AZ, "topNSPAddr", topNSPAddr)
 	return nil
 }
 
@@ -454,22 +475,28 @@ func (s *Server) StartHeartbeat(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[AZ NSP %s] 心跳停止", s.cfg.AZ)
+			logger.InfoContext(ctx, "心跳停止", "az", s.cfg.AZ)
 			return
 		case <-ticker.C:
 			body, _ := json.Marshal(reqData)
 			resp, err := http.Post(heartbeatURL, "application/json", bytes.NewBuffer(body))
 			if err != nil {
-				log.Printf("[AZ NSP %s] 心跳发送失败: %v", s.cfg.AZ, err)
+				logger.InfoContext(ctx, "心跳发送失败", "az", s.cfg.AZ, "error", err)
 				continue
 			}
 			resp.Body.Close()
 
 			if resp.StatusCode == http.StatusOK {
-				log.Printf("[AZ NSP %s] 心跳成功", s.cfg.AZ)
+				logger.InfoContext(ctx, "心跳成功", "az", s.cfg.AZ)
 			} else {
-				log.Printf("[AZ NSP %s] 心跳失败，状态码: %d", s.cfg.AZ, resp.StatusCode)
+				logger.InfoContext(ctx, "心跳失败", "az", s.cfg.AZ, "statusCode", resp.StatusCode)
 			}
 		}
 	}
+}
+
+// StartCompensationTask starts the background compensation task that repairs
+// inconsistencies between workflow state and resource state.
+func (s *Server) StartCompensationTask(ctx context.Context, interval time.Duration) {
+	s.orchestrator.StartCompensationTask(ctx, interval)
 }

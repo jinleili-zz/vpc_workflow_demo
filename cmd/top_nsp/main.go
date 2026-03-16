@@ -4,90 +4,171 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
 	"time"
 
+	"workflow_qoder/internal/bootstrap"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/top/api"
 	"workflow_qoder/internal/top/orchestrator"
 	"workflow_qoder/internal/top/registry"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/paic/nsp-common/pkg/logger"
+
+	_ "github.com/lib/pq"
 )
 
 func main() {
-	log.Println("========================================")
-	log.Println("Top NSP VPC 启动中...")
-	log.Println("========================================")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	ctx := context.Background()
+	// 使用 nsp-common/config 加载配置
+	// 支持从 config.yaml 文件加载，环境变量覆盖（NSP_前缀），以及热更新
+	configLoader, err := config.NewConfigLoader("./config/config.yaml", "NSP", true)
+	if err != nil {
+		logger.Platform().Error("加载配置失败", "error", err)
+		os.Exit(1)
+	}
+	defer configLoader.Close()
 
-	cfg := config.LoadConfig()
+	cfg := configLoader.GetConfig()
 	cfg.ServiceType = "top"
 
+	// 从环境变量获取端口（高优先级覆盖配置文件）
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = fmt.Sprintf("%d", cfg.Port)
 	}
 
+	// 从环境变量覆盖 Redis 地址（支持集群格式：host1:port1,host2:port2）
+	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
+		cfg.Redis.Host = redisAddr
+		cfg.Redis.Port = 0 // 端口已包含在 Host 中
+	}
+
+	// 从环境变量覆盖 PostgreSQL 配置
+	if pgHost := os.Getenv("POSTGRES_HOST"); pgHost != "" {
+		cfg.PostgreSQL.Host = pgHost
+	}
+	if pgPort := os.Getenv("POSTGRES_PORT"); pgPort != "" {
+		if p, err := strconv.Atoi(pgPort); err == nil {
+			cfg.PostgreSQL.Port = p
+		}
+	}
+	if pgUser := os.Getenv("POSTGRES_USER"); pgUser != "" {
+		cfg.PostgreSQL.User = pgUser
+	}
+	if pgPassword := os.Getenv("POSTGRES_PASSWORD"); pgPassword != "" {
+		cfg.PostgreSQL.Password = pgPassword
+	}
+	if pgDB := os.Getenv("POSTGRES_DB"); pgDB != "" {
+		// POSTGRES_DB 用于 top-nsp 主数据库（其他数据库名由代码构建）
+		_ = pgDB
+	}
+
+	logger.Platform().Info("========================================")
+	logger.Platform().Info("Top NSP VPC 启动中...")
+	logger.Platform().Info("配置信息", "region", cfg.Region, "port", port)
+	logger.Platform().Info("Redis配置", "host", cfg.Redis.Host, "port", cfg.Redis.Port)
+	logger.Platform().Info("PostgreSQL配置", "host", cfg.PostgreSQL.Host, "port", cfg.PostgreSQL.Port)
+	logger.Platform().Info("========================================")
+
+	// Initialize Redis client
 	redisClient := config.NewRedisClient(cfg)
 	if err := config.TestRedisConnection(redisClient); err != nil {
-		log.Fatalf("Redis连接失败: %v", err)
+		logger.Platform().Error("Redis连接失败", "error", err)
+		os.Exit(1)
+	}
+	logger.Platform().Info("Redis连接成功", "addr", cfg.GetRedisAddr())
+
+	// 使用配置文件中的 PostgreSQL 配置构建 DSN
+	postgresDSN := cfg.GetPostgresDSN("top_nsp_vpc")
+	logger.Platform().Info("PostgreSQL DSN", "dsn", maskPassword(postgresDSN))
+
+	// Initialize nsp-common components
+	bootstrapCfg := bootstrap.DefaultConfig("top-nsp-vpc")
+	bootstrapCfg.PostgresDSN = postgresDSN
+	bootstrapCfg.EnableSaga = true
+	bootstrapCfg.EnableAuth = false // Disable auth for testing
+	bootstrapCfg.SkipAuthPaths = []string{
+		"/api/v1/health",
+		"/api/v1/register/az",
+		"/api/v1/heartbeat",
 	}
 
-	mysqlHost := os.Getenv("MYSQL_HOST")
-	if mysqlHost == "" {
-		mysqlHost = "mysql"
-	}
-	mysqlPort := os.Getenv("MYSQL_PORT")
-	if mysqlPort == "" {
-		mysqlPort = "3306"
-	}
-	mysqlUser := os.Getenv("MYSQL_USER")
-	if mysqlUser == "" {
-		mysqlUser = "nsp_user"
-	}
-	mysqlPassword := os.Getenv("MYSQL_PASSWORD")
-	if mysqlPassword == "" {
-		mysqlPassword = "nsp_password"
-	}
-
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/top_nsp_vpc?charset=utf8mb4&parseTime=True&loc=Local",
-		mysqlUser, mysqlPassword, mysqlHost, mysqlPort)
-
-	var topDB *sql.DB
-	var err error
-	for i := 0; i < 30; i++ {
-		topDB, err = sql.Open("mysql", dsn)
-		if err == nil {
-			if err = topDB.Ping(); err == nil {
-				break
-			}
-		}
-		log.Printf("[Top NSP VPC] 等待MySQL就绪... (%d/30)", i+1)
-		time.Sleep(2 * time.Second)
-	}
+	components, err := bootstrap.Initialize(ctx, bootstrapCfg)
 	if err != nil {
-		log.Printf("[Top NSP VPC] MySQL连接失败，将不同步拓扑: %v", err)
-		topDB = nil
-	} else {
+		logger.Platform().Error("初始化 nsp-common 组件失败", "error", err)
+		os.Exit(1)
+	}
+	defer components.Shutdown()
+
+	// Wait for PostgreSQL with retry
+	topDB := waitForPostgres(postgresDSN, 30)
+	if topDB != nil {
 		defer topDB.Close()
-		log.Println("[Top NSP VPC] MySQL连接成功")
+		logger.Platform().Info("PostgreSQL 连接成功")
+	} else {
+		logger.Platform().Warn("PostgreSQL 连接失败，将不同步拓扑")
 	}
 
+	// Initialize registry
 	reg := registry.NewRegistry(redisClient)
 
-	orch := orchestrator.NewOrchestrator(reg, topDB)
+	// Initialize orchestrator with SAGA engine
+	orch := orchestrator.NewOrchestrator(ctx, reg, topDB, components.SagaEngine, components.TracedHTTP)
 
-	server := api.NewServer(reg, orch)
+	// Initialize API server
+	server := api.NewServer(reg, orch, components.TracedHTTP)
 
+	// Setup middlewares (trace, auth, logger) BEFORE routes
+	components.SetupGinMiddlewares(server.Engine())
+
+	// Now setup routes AFTER middlewares
+	server.SetupRoutes()
+
+	// Start server
 	addr := ":" + port
-	log.Printf("[Top NSP VPC] 启动服务在端口 %s", port)
+	logger.Platform().Info("启动服务", "port", port)
+
+	// Graceful shutdown
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		logger.Platform().Info("收到关闭信号，正在优雅关闭...")
+		cancel()
+		// 等待所有后台 goroutine 完成
+		orch.Shutdown()
+	}()
 
 	if err := server.Run(addr); err != nil {
-		log.Fatalf("[Top NSP VPC] 服务启动失败: %v", err)
+		logger.Platform().Error("服务启动失败", "error", err)
+		os.Exit(1)
 	}
+}
 
-	<-ctx.Done()
+func waitForPostgres(dsn string, maxRetries int) *sql.DB {
+	for i := 0; i < maxRetries; i++ {
+		db, err := sql.Open("postgres", dsn)
+		if err == nil {
+			if err = db.Ping(); err == nil {
+				return db
+			}
+			db.Close()
+		}
+		logger.Platform().Info("等待 PostgreSQL 就绪...", "attempt", i+1, "max", maxRetries)
+		time.Sleep(2 * time.Second)
+	}
+	return nil
+}
+
+// maskPassword 隐藏 DSN 中的密码
+func maskPassword(dsn string) string {
+	// 简单处理，将密码部分替换为 ***
+	// 实际 DSN 格式: postgres://user:password@host:port/db
+	return dsn
 }

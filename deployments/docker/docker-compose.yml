@@ -71,27 +71,28 @@ services:
       - nsp-network
     entrypoint: ["/bin/sh", "/setup.sh"]
 
-  mysql:
-    image: mysql:8.0
-    container_name: nsp-mysql
+  postgres:
+    image: postgres:15-alpine
+    container_name: nsp-postgres
     environment:
-      - MYSQL_ROOT_PASSWORD=root123456
-      - MYSQL_USER=nsp_user
-      - MYSQL_PASSWORD=nsp_password
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_top
     ports:
-      - "3306:3306"
+      - "5432:5432"
     networks:
       - nsp-network
     volumes:
-      - mysql-data:/var/lib/mysql
-      - ./init-mysql.sh:/docker-entrypoint-initdb.d/init-mysql.sh
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-postgres.sh:/docker-entrypoint-initdb.d/init-postgres.sh
+      - ../../internal/db/migrations/001_init_postgresql.sql:/migrations/001_init_postgresql.sql
+      - ./saga-migration.sql:/migrations/saga.sql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot123456"]
+      test: ["CMD-SHELL", "pg_isready -U nsp_user -d nsp_top"]
       interval: 10s
       timeout: 5s
       retries: 5
-    command: --default-authentication-plugin=mysql_native_password
-    mem_limit: 512m
+    mem_limit: 256m
 
   top-nsp-vpc:
     image: nsp-top-vpc:latest
@@ -102,10 +103,20 @@ services:
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_USER=nsp_user
-      - MYSQL_PASSWORD=nsp_password
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_top
+      - NSP_REDIS_HOST=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - NSP_REDIS_PORT=0
+      - NSP_REDIS_BROKER_DB=1
+      - NSP_POSTGRESQL_HOST=postgres
+      - NSP_POSTGRESQL_PORT=5432
+      - NSP_POSTGRESQL_USER=nsp_user
+      - NSP_POSTGRESQL_PASSWORD=nsp_password
+      - NSP_TOP_NSP_AZ_NSP_PREFIX=az-nsp-vpc
+      - NSP_TOP_NSP_AZ_NSP_PORT=8080
       - AZ_NSP_PREFIX=az-nsp-vpc
       - AZ_NSP_PORT=8080
     ports:
@@ -113,7 +124,7 @@ services:
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      mysql:
+      postgres:
         condition: service_healthy
     networks:
       - nsp-network
@@ -129,14 +140,15 @@ services:
     container_name: top-nsp-vfw
     environment:
       - PORT=8082
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_USER=nsp_user
-      - MYSQL_PASSWORD=nsp_password
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_top
     ports:
       - "8082:8082"
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
       top-nsp-vpc:
         condition: service_healthy
@@ -160,18 +172,25 @@ services:
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_DATABASE=nsp_cn_beijing_1a_vpc
-      - MYSQL_USER=nsp_user
-      - MYSQL_PASSWORD=nsp_password
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1a_vpc
+      - NSP_REDIS_HOST=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - NSP_REDIS_PORT=0
+      - NSP_REDIS_BROKER_DB=1
+      - NSP_POSTGRESQL_HOST=postgres
+      - NSP_POSTGRESQL_PORT=5432
+      - NSP_POSTGRESQL_USER=nsp_user
+      - NSP_POSTGRESQL_PASSWORD=nsp_password
       - TOP_NSP_ADDR=http://top-nsp-vpc:8080
       - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-beijing-1a:8080
       - NSP_ADDR=http://az-nsp-vpc-cn-beijing-1a:8080
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      mysql:
+      postgres:
         condition: service_healthy
       top-nsp-vpc:
         condition: service_healthy
@@ -188,16 +207,16 @@ services:
       - PORT=8080
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_DATABASE=nsp_cn_beijing_1a_vfw
-      - MYSQL_USER=nsp_user
-      - MYSQL_PASSWORD=nsp_password
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1a_vfw
       - TOP_NSP_VFW_ADDR=http://top-nsp-vfw:8082
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      mysql:
+      postgres:
         condition: service_healthy
       top-nsp-vfw:
         condition: service_healthy
@@ -256,18 +275,25 @@ services:
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_DATABASE=nsp_cn_beijing_1b_vpc
-      - MYSQL_USER=nsp_user
-      - MYSQL_PASSWORD=nsp_password
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1b_vpc
+      - NSP_REDIS_HOST=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - NSP_REDIS_PORT=0
+      - NSP_REDIS_BROKER_DB=1
+      - NSP_POSTGRESQL_HOST=postgres
+      - NSP_POSTGRESQL_PORT=5432
+      - NSP_POSTGRESQL_USER=nsp_user
+      - NSP_POSTGRESQL_PASSWORD=nsp_password
       - TOP_NSP_ADDR=http://top-nsp-vpc:8080
       - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-beijing-1b:8080
       - NSP_ADDR=http://az-nsp-vpc-cn-beijing-1b:8080
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      mysql:
+      postgres:
         condition: service_healthy
       top-nsp-vpc:
         condition: service_healthy
@@ -284,16 +310,16 @@ services:
       - PORT=8080
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_DATABASE=nsp_cn_beijing_1b_vfw
-      - MYSQL_USER=nsp_user
-      - MYSQL_PASSWORD=nsp_password
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1b_vfw
       - TOP_NSP_VFW_ADDR=http://top-nsp-vfw:8082
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      mysql:
+      postgres:
         condition: service_healthy
       top-nsp-vfw:
         condition: service_healthy
@@ -352,18 +378,25 @@ services:
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
       - REDIS_BROKER_DB=1
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_DATABASE=nsp_cn_shanghai_1a_vpc
-      - MYSQL_USER=nsp_user
-      - MYSQL_PASSWORD=nsp_password
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_shanghai_1a_vpc
+      - NSP_REDIS_HOST=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+      - NSP_REDIS_PORT=0
+      - NSP_REDIS_BROKER_DB=1
+      - NSP_POSTGRESQL_HOST=postgres
+      - NSP_POSTGRESQL_PORT=5432
+      - NSP_POSTGRESQL_USER=nsp_user
+      - NSP_POSTGRESQL_PASSWORD=nsp_password
       - TOP_NSP_ADDR=http://top-nsp-vpc:8080
       - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-shanghai-1a:8080
       - NSP_ADDR=http://az-nsp-vpc-cn-shanghai-1a:8080
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      mysql:
+      postgres:
         condition: service_healthy
       top-nsp-vpc:
         condition: service_healthy
@@ -380,16 +413,16 @@ services:
       - PORT=8080
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
-      - MYSQL_HOST=mysql
-      - MYSQL_PORT=3306
-      - MYSQL_DATABASE=nsp_cn_shanghai_1a_vfw
-      - MYSQL_USER=nsp_user
-      - MYSQL_PASSWORD=nsp_password
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_shanghai_1a_vfw
       - TOP_NSP_VFW_ADDR=http://top-nsp-vfw:8082
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
-      mysql:
+      postgres:
         condition: service_healthy
       top-nsp-vfw:
         condition: service_healthy
@@ -457,7 +490,7 @@ services:
     mem_limit: 64m
 
 volumes:
-  mysql-data:
+  postgres-data:
   redis-node-1-data:
   redis-node-2-data:
   redis-node-3-data:

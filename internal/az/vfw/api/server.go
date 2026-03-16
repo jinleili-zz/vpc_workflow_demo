@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"time"
@@ -17,7 +16,9 @@ import (
 	"workflow_qoder/internal/queue"
 
 	"github.com/gin-gonic/gin"
-	"github.com/hibiken/asynq"
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/trace"
 )
 
 type Server struct {
@@ -28,23 +29,50 @@ type Server struct {
 	callbackQueueName string
 }
 
-func NewServer(cfg *config.NSPConfig, asynqClient *asynq.Client, mysqlDB *sql.DB) *Server {
-	router := gin.Default()
+func NewServer(cfg *config.NSPConfig, engine *taskqueue.Engine, tracedHTTP *trace.TracedClient, db *sql.DB) *Server {
+	router := gin.New()
+	router.Use(gin.Recovery())
 
-	orch := orchestrator.NewVFWOrchestrator(mysqlDB, asynqClient, cfg.Region, cfg.AZ)
-	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ) + "_vfw"
+	// Add trace middleware for distributed tracing
+	instanceID := fmt.Sprintf("az-nsp-vfw-%s-%s", cfg.Region, cfg.AZ)
+	router.Use(trace.TraceMiddleware(instanceID))
+	router.Use(ginLoggerMiddleware())
+
+	orch := orchestrator.NewVFWOrchestrator(db, engine, tracedHTTP, cfg.Region, cfg.AZ)
+	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ, "vfw")
 
 	server := &Server{
 		cfg:               cfg,
 		orchestrator:      orch,
 		router:            router,
-		db:                mysqlDB,
+		db:                db,
 		callbackQueueName: callbackQueueName,
 	}
 
 	server.setupRoutes()
 
 	return server
+}
+
+// ginLoggerMiddleware logs HTTP requests with trace context
+func ginLoggerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+
+		c.Next()
+
+		ctx := c.Request.Context()
+		latency := time.Since(start)
+
+		logger.InfoContext(ctx, "http request",
+			"method", c.Request.Method,
+			"path", path,
+			"status", c.Writer.Status(),
+			"latency_ms", latency.Milliseconds(),
+			"client_ip", c.ClientIP(),
+		)
+	}
 }
 
 func (s *Server) setupRoutes() {
@@ -72,7 +100,7 @@ func (s *Server) createPolicy(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreatePolicy(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.AZFirewallPolicyResponse{
@@ -87,7 +115,7 @@ func (s *Server) createPolicy(c *gin.Context) {
 
 func (s *Server) getPolicyStatus(c *gin.Context) {
 	policyName := c.Param("policy_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	status, err := s.orchestrator.GetPolicyStatus(ctx, policyName)
 	if err != nil {
@@ -103,7 +131,7 @@ func (s *Server) getPolicyStatus(c *gin.Context) {
 
 func (s *Server) deletePolicy(c *gin.Context) {
 	policyName := c.Param("policy_name")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	err := s.orchestrator.DeletePolicy(ctx, policyName)
 	if err != nil {
@@ -121,7 +149,7 @@ func (s *Server) deletePolicy(c *gin.Context) {
 }
 
 func (s *Server) listPolicies(c *gin.Context) {
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	policies, err := s.orchestrator.ListPolicies(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -139,7 +167,7 @@ func (s *Server) listPolicies(c *gin.Context) {
 
 func (s *Server) getPolicyByID(c *gin.Context) {
 	policyID := c.Param("policy_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	policy, err := s.orchestrator.GetPolicyByID(ctx, policyID)
 	if err != nil {
@@ -158,7 +186,7 @@ func (s *Server) getPolicyByID(c *gin.Context) {
 
 func (s *Server) countPoliciesByZone(c *gin.Context) {
 	zone := c.Param("zone")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	count, err := s.orchestrator.CountPoliciesByZone(ctx, zone)
 	if err != nil {
@@ -176,31 +204,8 @@ func (s *Server) countPoliciesByZone(c *gin.Context) {
 	})
 }
 
-func (s *Server) HandleTaskCallback() func(context.Context, *asynq.Task) error {
-	return func(ctx context.Context, t *asynq.Task) error {
-		var payload struct {
-			TaskID       string      `json:"task_id"`
-			Status       string      `json:"status"`
-			Result       interface{} `json:"result"`
-			ErrorMessage string      `json:"error_message"`
-		}
-
-		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
-			return fmt.Errorf("解析回调载荷失败: %v", err)
-		}
-
-		log.Printf("[AZ NSP VFW %s] 收到任务回调: taskID=%s, status=%s", s.cfg.AZ, payload.TaskID, payload.Status)
-
-		status := models.TaskStatus(payload.Status)
-		err := s.orchestrator.HandleTaskCallback(ctx, payload.TaskID, status, payload.Result, payload.ErrorMessage)
-		if err != nil {
-			log.Printf("[AZ NSP VFW %s] 任务回调处理失败: %v", s.cfg.AZ, err)
-			return err
-		}
-
-		log.Printf("[AZ NSP VFW %s] 任务回调处理成功: taskID=%s", s.cfg.AZ, payload.TaskID)
-		return nil
-	}
+func (s *Server) HandleTaskCallback(ctx context.Context, payload []byte) error {
+	return s.orchestrator.HandleTaskCallback(ctx, payload)
 }
 
 func (s *Server) GetCallbackQueueName() string {
@@ -217,7 +222,7 @@ func (s *Server) health(c *gin.Context) {
 }
 
 func (s *Server) Run(addr string) error {
-	log.Printf("[AZ NSP VFW %s] 服务启动在 %s", s.cfg.AZ, addr)
+	logger.Info("AZ NSP VFW 服务启动", "az", s.cfg.AZ, "addr", addr)
 	return s.router.Run(addr)
 }
 
@@ -255,7 +260,7 @@ func (s *Server) RegisterToTopNSP() error {
 		return fmt.Errorf("注册失败，状态码: %d", resp.StatusCode)
 	}
 
-	log.Printf("[AZ NSP VFW %s] 成功注册到Top NSP VFW: %s", s.cfg.AZ, topNSPVFWAddr)
+	logger.Info("成功注册到Top NSP VFW", "az", s.cfg.AZ, "top_addr", topNSPVFWAddr)
 	return nil
 }
 
@@ -278,22 +283,28 @@ func (s *Server) StartHeartbeat(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[AZ NSP VFW %s] 心跳停止", s.cfg.AZ)
+			logger.InfoContext(ctx, "心跳停止", "az", s.cfg.AZ)
 			return
 		case <-ticker.C:
 			body, _ := json.Marshal(reqData)
 			resp, err := http.Post(heartbeatURL, "application/json", bytes.NewBuffer(body))
 			if err != nil {
-				log.Printf("[AZ NSP VFW %s] 心跳发送失败: %v", s.cfg.AZ, err)
+				logger.InfoContext(ctx, "心跳发送失败", "az", s.cfg.AZ, "error", err)
 				continue
 			}
 			resp.Body.Close()
 
 			if resp.StatusCode == http.StatusOK {
-				log.Printf("[AZ NSP VFW %s] 心跳成功", s.cfg.AZ)
+				logger.InfoContext(ctx, "心跳成功", "az", s.cfg.AZ)
 			} else {
-				log.Printf("[AZ NSP VFW %s] 心跳失败，状态码: %d", s.cfg.AZ, resp.StatusCode)
+				logger.InfoContext(ctx, "心跳失败", "az", s.cfg.AZ, "statusCode", resp.StatusCode)
 			}
 		}
 	}
+}
+
+// StartCompensationTask starts the background compensation task that repairs
+// inconsistencies between workflow state and policy state.
+func (s *Server) StartCompensationTask(ctx context.Context, interval time.Duration) {
+	s.orchestrator.StartCompensationTask(ctx, interval)
 }

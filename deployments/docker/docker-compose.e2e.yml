@@ -1,0 +1,230 @@
+version: '3.8'
+
+# Minimal docker-compose for E2E testing.
+# Ports match the constants in tests/e2e/e2e_test.go:
+#   top-nsp-vpc  -> 18080
+#   az-nsp-vpc   -> 18081
+#   top-nsp-vfw  -> 18082
+#   az-nsp-vfw   -> 18083
+#
+# Uses a single Redis node (no cluster) to avoid "SELECT is not allowed in cluster mode".
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: e2e-redis
+    networks:
+      - e2e-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    mem_limit: 64m
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: e2e-postgres
+    environment:
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_top
+    ports:
+      - "15432:5432"
+    networks:
+      - e2e-network
+    volumes:
+      - ./init-postgres-e2e.sh:/docker-entrypoint-initdb.d/init-postgres-e2e.sh
+      - ../../internal/db/migrations/001_init_postgresql.sql:/migrations/001_init_postgresql.sql
+      - ./saga-migration.sql:/migrations/saga.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nsp_user -d nsp_top"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 256m
+
+  e2e-top-nsp-vpc:
+    image: nsp-top-vpc:latest
+    container_name: e2e-top-nsp-vpc
+    environment:
+      - SERVICE_TYPE=top
+      - PORT=8080
+      - NSP_REDIS_HOST=e2e-redis
+      - NSP_REDIS_PORT=6379
+      - NSP_REDIS_DATA_DB=0
+      - NSP_REDIS_BROKER_DB=1
+      - NSP_POSTGRESQL_HOST=postgres
+      - NSP_POSTGRESQL_PORT=5432
+      - NSP_POSTGRESQL_USER=nsp_user
+      - NSP_POSTGRESQL_PASSWORD=nsp_password
+      - NSP_TOP_NSP_AZ_NSP_PREFIX=e2e-az-nsp-vpc
+      - NSP_TOP_NSP_AZ_NSP_PORT=8080
+      - REDIS_ADDR=e2e-redis:6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./config-e2e.yaml:/app/config/config.yaml
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - e2e-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/v1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 64m
+
+  e2e-top-nsp-vfw:
+    image: nsp-top-vfw:latest
+    container_name: e2e-top-nsp-vfw
+    environment:
+      - PORT=8082
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+    ports:
+      - "18082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      e2e-top-nsp-vpc:
+        condition: service_healthy
+    networks:
+      - e2e-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/api/v1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 64m
+
+  e2e-az-nsp-vpc-cn-beijing-1a:
+    image: nsp-az-vpc:latest
+    container_name: e2e-az-nsp-vpc-cn-beijing-1a
+    environment:
+      - SERVICE_TYPE=az
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+      - PORT=8080
+      - NSP_REDIS_HOST=e2e-redis
+      - NSP_REDIS_PORT=6379
+      - NSP_REDIS_DATA_DB=0
+      - NSP_REDIS_BROKER_DB=1
+      - NSP_POSTGRESQL_HOST=postgres
+      - NSP_POSTGRESQL_PORT=5432
+      - NSP_POSTGRESQL_USER=nsp_user
+      - NSP_POSTGRESQL_PASSWORD=nsp_password
+      - NSP_AZ_NSP_TOP_NSP_ADDR=http://e2e-top-nsp-vpc:8080
+      - REDIS_ADDR=e2e-redis:6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1a_vpc
+      - TOP_NSP_ADDR=http://e2e-top-nsp-vpc:8080
+      - AZ_NSP_VFW_ADDR=http://e2e-az-nsp-vfw-cn-beijing-1a:8080
+      - NSP_ADDR=http://e2e-az-nsp-vpc-cn-beijing-1a:8080
+    ports:
+      - "18081:8080"
+    volumes:
+      - ./config-e2e.yaml:/app/config/config.yaml
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      e2e-top-nsp-vpc:
+        condition: service_healthy
+    networks:
+      - e2e-network
+    mem_limit: 64m
+
+  e2e-az-nsp-vfw-cn-beijing-1a:
+    image: nsp-az-vfw:latest
+    container_name: e2e-az-nsp-vfw-cn-beijing-1a
+    environment:
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+      - PORT=8080
+      - REDIS_ADDR=e2e-redis:6379
+      - REDIS_BROKER_DB=1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1a_vfw
+      - TOP_NSP_VFW_ADDR=http://e2e-top-nsp-vfw:8082
+    ports:
+      - "18083:8080"
+    volumes:
+      - ./config-e2e.yaml:/app/config/config.yaml
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      e2e-top-nsp-vfw:
+        condition: service_healthy
+    networks:
+      e2e-network:
+        aliases:
+          - az-nsp-vfw-cn-beijing-1a
+    mem_limit: 64m
+
+  e2e-worker-switch:
+    image: nsp-worker:latest
+    container_name: e2e-worker-switch-cn-beijing-1a
+    environment:
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+      - WORKER_TYPE=switch
+      - REDIS_ADDR=e2e-redis:6379
+      - REDIS_BROKER_DB=1
+      - WORKER_COUNT=10
+    volumes:
+      - ./config-e2e.yaml:/app/config/config.yaml
+    depends_on:
+      redis:
+        condition: service_healthy
+      e2e-az-nsp-vpc-cn-beijing-1a:
+        condition: service_started
+    networks:
+      - e2e-network
+    mem_limit: 32m
+
+  e2e-worker-firewall:
+    image: nsp-worker:latest
+    container_name: e2e-worker-firewall-cn-beijing-1a
+    environment:
+      - REGION=cn-beijing
+      - AZ=cn-beijing-1a
+      - WORKER_TYPE=firewall
+      - REDIS_ADDR=e2e-redis:6379
+      - REDIS_BROKER_DB=1
+      - WORKER_COUNT=10
+    volumes:
+      - ./config-e2e.yaml:/app/config/config.yaml
+    depends_on:
+      redis:
+        condition: service_healthy
+      e2e-az-nsp-vpc-cn-beijing-1a:
+        condition: service_started
+      e2e-az-nsp-vfw-cn-beijing-1a:
+        condition: service_started
+    networks:
+      - e2e-network
+    mem_limit: 32m
+
+networks:
+  e2e-network:
+    driver: bridge

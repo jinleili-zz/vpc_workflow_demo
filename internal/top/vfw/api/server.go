@@ -3,13 +3,13 @@ package api
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 
 	"workflow_qoder/internal/models"
 	"workflow_qoder/internal/top/vfw/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/paic/nsp-common/pkg/logger"
 )
 
 type Server struct {
@@ -62,7 +62,7 @@ func (s *Server) registerAZ(c *gin.Context) {
 
 	s.policyService.RegisterAZ(req.Region, req.AZ, req.NSPAddr)
 
-	log.Printf("[Top NSP VFW] AZ注册成功: Region=%s, AZ=%s, Addr=%s", req.Region, req.AZ, req.NSPAddr)
+	logger.Info("AZ注册成功", "region", req.Region, "az", req.AZ, "addr", req.NSPAddr)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -193,6 +193,6 @@ func (s *Server) health(c *gin.Context) {
 }
 
 func (s *Server) Run(addr string) error {
-	log.Printf("[Top NSP VFW] 服务启动在 %s", addr)
+	logger.Info("Top NSP VFW 服务启动", "addr", addr)
 	return s.router.Run(addr)
 }

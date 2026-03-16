@@ -4,27 +4,28 @@ echo "========================================="
 echo "NSP Docker 镜像构建"
 echo "========================================="
 
-cd "$(dirname "$0")/../.."
+# 进入 nsp 根目录（包含 vpc_workflow_demo 和 nsp_platform）
+cd "$(dirname "$0")/../../.."
 
 echo ""
 echo "1. 构建Top NSP VPC镜像..."
-docker build -t nsp-top-vpc:latest -f deployments/docker/Dockerfile.top-vpc .
+docker build -t nsp-top-vpc:latest -f vpc_workflow_demo/deployments/docker/Dockerfile.top-vpc .
 
 echo ""
 echo "2. 构建Top NSP VFW镜像..."
-docker build -t nsp-top-vfw:latest -f deployments/docker/Dockerfile.top-vfw .
+docker build -t nsp-top-vfw:latest -f vpc_workflow_demo/deployments/docker/Dockerfile.top-vfw .
 
 echo ""
 echo "3. 构建AZ NSP VPC镜像..."
-docker build -t nsp-az-vpc:latest -f deployments/docker/Dockerfile.az-vpc .
+docker build -t nsp-az-vpc:latest -f vpc_workflow_demo/deployments/docker/Dockerfile.az-vpc .
 
 echo ""
 echo "4. 构建AZ NSP VFW镜像..."
-docker build -t nsp-az-vfw:latest -f deployments/docker/Dockerfile.az-vfw .
+docker build -t nsp-az-vfw:latest -f vpc_workflow_demo/deployments/docker/Dockerfile.az-vfw .
 
 echo ""
 echo "5. 构建Worker镜像..."
-docker build -t nsp-worker:latest -f deployments/docker/Dockerfile.worker .
+docker build -t nsp-worker:latest -f vpc_workflow_demo/deployments/docker/Dockerfile.worker .
 
 echo ""
 echo "========================================="

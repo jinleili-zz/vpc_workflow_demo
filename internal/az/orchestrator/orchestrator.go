@@ -5,55 +5,125 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
+	"time"
+
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/trace"
 
 	"workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"
 	"workflow_qoder/internal/queue"
 
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
 )
 
 type AZOrchestrator struct {
-	vpcDAO      *dao.VPCDAO
-	subnetDAO   *dao.SubnetDAO
-	taskDAO     *dao.TaskDAO
-	asynqClient *asynq.Client
-	region      string
-	az          string
+	vpcDAO     *dao.VPCDAO
+	subnetDAO  *dao.SubnetDAO
+	engine     *taskqueue.Engine
+	tracedHTTP *trace.TracedClient
+	region     string
+	az         string
 }
 
-func NewAZOrchestrator(db *sql.DB, asynqClient *asynq.Client, region, az string) *AZOrchestrator {
+func NewAZOrchestrator(db *sql.DB, engine *taskqueue.Engine, tracedHTTP *trace.TracedClient, region, az string) *AZOrchestrator {
 	return &AZOrchestrator{
-		vpcDAO:      dao.NewVPCDAO(db),
-		subnetDAO:   dao.NewSubnetDAO(db),
-		taskDAO:     dao.NewTaskDAO(db),
-		asynqClient: asynqClient,
-		region:      region,
-		az:          az,
+		vpcDAO:     dao.NewVPCDAO(db),
+		subnetDAO:  dao.NewSubnetDAO(db),
+		engine:     engine,
+		tracedHTTP: tracedHTTP,
+		region:     region,
+		az:         az,
+	}
+}
+
+// BuildWorkflowHooks returns the WorkflowHooks that synchronise business resource tables
+// (vpc_resources, subnet_resources) with tq_workflows/tq_steps state transitions.
+// NOTE: Hooks are non-blocking - they log warnings on errors but return nil to avoid
+// stalling workflow execution. Compensation tasks handle eventual consistency.
+func (o *AZOrchestrator) BuildWorkflowHooks() *taskqueue.WorkflowHooks {
+	return &taskqueue.WorkflowHooks{
+		OnStepComplete: func(ctx context.Context, wf *taskqueue.Workflow, step *taskqueue.StepTask) error {
+			var err error
+			switch wf.ResourceType {
+			case string(models.ResourceTypeVPC):
+				err = o.vpcDAO.IncrementCompletedTasks(ctx, wf.ResourceID)
+			case string(models.ResourceTypeSubnet):
+				err = o.subnetDAO.IncrementCompletedTasks(ctx, wf.ResourceID)
+			}
+			if err != nil {
+				logger.WarnContext(ctx, "OnStepComplete hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
+			}
+			return nil
+		},
+		OnStepFailed: func(ctx context.Context, wf *taskqueue.Workflow, step *taskqueue.StepTask, errMsg string) error {
+			var err error
+			switch wf.ResourceType {
+			case string(models.ResourceTypeVPC):
+				err = o.vpcDAO.IncrementFailedTasks(ctx, wf.ResourceID)
+			case string(models.ResourceTypeSubnet):
+				err = o.subnetDAO.IncrementFailedTasks(ctx, wf.ResourceID)
+			}
+			if err != nil {
+				logger.WarnContext(ctx, "OnStepFailed hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
+			}
+			return nil
+		},
+		OnWorkflowComplete: func(ctx context.Context, wf *taskqueue.Workflow) error {
+			var err error
+			switch wf.ResourceType {
+			case string(models.ResourceTypeVPC):
+				logger.InfoContext(ctx, "VPC创建完成", "az", o.az, "resourceID", wf.ResourceID)
+				err = o.vpcDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusRunning, "")
+			case string(models.ResourceTypeSubnet):
+				logger.InfoContext(ctx, "子网创建完成", "az", o.az, "resourceID", wf.ResourceID)
+				err = o.subnetDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusRunning, "")
+			}
+			if err != nil {
+				logger.WarnContext(ctx, "OnWorkflowComplete hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
+			}
+			return nil
+		},
+		OnWorkflowFailed: func(ctx context.Context, wf *taskqueue.Workflow, errMsg string) error {
+			var err error
+			switch wf.ResourceType {
+			case string(models.ResourceTypeVPC):
+				err = o.vpcDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg)
+			case string(models.ResourceTypeSubnet):
+				err = o.subnetDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg)
+			}
+			if err != nil {
+				logger.WarnContext(ctx, "OnWorkflowFailed hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
+			}
+			return nil
+		},
 	}
 }
 
 func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) (*models.VPCResponse, error) {
-	log.Printf("[AZ Orchestrator %s] 开始创建VPC: %s", o.az, req.VPCName)
+	logger.InfoContext(ctx, "开始创建VPC", "az", o.az, "vpcName", req.VPCName)
 
-	vpcID := uuid.New().String()
-	
+	// 使用 Top 层传入的统一 VPC ID，若未提供则自行生成（向后兼容）
+	vpcID := req.VPCID
+	if vpcID == "" {
+		vpcID = uuid.New().String()
+	}
+
 	vpcResource := &models.VPCResource{
-		ID:           vpcID,
-		VPCName:      req.VPCName,
-		Region:       req.Region,
-		AZ:           o.az,
-		VRFName:      req.VRFName,
-		VLANId:       req.VLANId,
-		FirewallZone: req.FirewallZone,
-		Status:       models.ResourceStatusPending,
-		TotalTasks:   0,
+		ID:             vpcID,
+		VPCName:        req.VPCName,
+		Region:         req.Region,
+		AZ:             o.az,
+		VRFName:        req.VRFName,
+		VLANId:         req.VLANId,
+		FirewallZone:   req.FirewallZone,
+		Status:         models.ResourceStatusPending,
+		TotalTasks:     0,
 		CompletedTasks: 0,
-		FailedTasks:  0,
+		FailedTasks:    0,
 	}
 
 	if err := o.vpcDAO.Create(ctx, vpcResource); err != nil {
@@ -63,16 +133,20 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 		}, nil
 	}
 
-	tasks := o.buildVPCTasks(vpcID, req)
-	
-	if err := o.taskDAO.BatchCreate(ctx, tasks); err != nil {
-		return &models.VPCResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建任务记录失败: %v", err),
-		}, nil
+	params := o.buildVPCTaskParams(ctx, req)
+	def := &taskqueue.WorkflowDefinition{
+		Name:         "create_vpc",
+		ResourceType: string(models.ResourceTypeVPC),
+		ResourceID:   vpcID,
+		Metadata:     map[string]string{"az": o.az},
+		Steps: []taskqueue.StepDefinition{
+			{TaskType: "create_vrf_on_switch", TaskName: "创建VRF", QueueTag: string(queue.DeviceTypeSwitch), Priority: taskqueue.PriorityNormal, Params: params},
+			{TaskType: "create_vlan_subinterface", TaskName: "创建VLAN子接口", QueueTag: string(queue.DeviceTypeSwitch), Priority: taskqueue.PriorityNormal, Params: params},
+			{TaskType: "create_firewall_zone", TaskName: "创建防火墙安全区域", QueueTag: string(queue.DeviceTypeFirewall), Priority: taskqueue.PriorityNormal, Params: params},
+		},
 	}
 
-	if err := o.vpcDAO.UpdateTotalTasks(ctx, vpcID, len(tasks)); err != nil {
+	if err := o.vpcDAO.UpdateTotalTasks(ctx, vpcID, len(def.Steps)); err != nil {
 		return &models.VPCResponse{
 			Success: false,
 			Message: fmt.Sprintf("更新任务总数失败: %v", err),
@@ -86,75 +160,25 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 		}, nil
 	}
 
-	if err := o.enqueueFirstTask(ctx, vpcID); err != nil {
+	workflowID, err := o.engine.SubmitWorkflow(ctx, def)
+	if err != nil {
 		return &models.VPCResponse{
 			Success: false,
-			Message: fmt.Sprintf("任务入队失败: %v", err),
+			Message: fmt.Sprintf("提交工作流失败: %v", err),
 		}, nil
 	}
 
-	log.Printf("[AZ Orchestrator %s] VPC创建流程启动成功: %s (ID: %s)", o.az, req.VPCName, vpcID)
+	logger.InfoContext(ctx, "VPC创建流程启动成功", "az", o.az, "vpcName", req.VPCName, "vpcID", vpcID, "workflowID", workflowID)
 
 	return &models.VPCResponse{
 		Success:    true,
 		Message:    "VPC创建工作流已启动",
 		VPCID:      vpcID,
-		WorkflowID: vpcID,
+		WorkflowID: workflowID,
 	}, nil
 }
 
-func (o *AZOrchestrator) buildVPCTasks(vpcID string, req *models.VPCRequest) []*models.Task {
-	tasks := []*models.Task{
-		{
-			ID:           uuid.New().String(),
-			ResourceType: models.ResourceTypeVPC,
-			ResourceID:   vpcID,
-			TaskType:     "create_vrf_on_switch",
-			TaskName:     "创建VRF",
-			TaskOrder:    1,
-			TaskParams:   o.buildVPCTaskParams(req),
-			Status:       models.TaskStatusPending,
-			Priority:     int(queue.PriorityNormal),
-			DeviceType:   string(queue.DeviceTypeSwitch),
-			RetryCount:   0,
-			MaxRetries:   3,
-			AZ:           o.az,
-		},
-		{
-			ID:           uuid.New().String(),
-			ResourceType: models.ResourceTypeVPC,
-			ResourceID:   vpcID,
-			TaskType:     "create_vlan_subinterface",
-			TaskName:     "创建VLAN子接口",
-			TaskOrder:    2,
-			TaskParams:   o.buildVPCTaskParams(req),
-			Status:       models.TaskStatusPending,
-			Priority:     int(queue.PriorityNormal),
-			DeviceType:   string(queue.DeviceTypeSwitch),
-			RetryCount:   0,
-			MaxRetries:   3,
-			AZ:           o.az,
-		},
-		{
-			ID:           uuid.New().String(),
-			ResourceType: models.ResourceTypeVPC,
-			ResourceID:   vpcID,
-			TaskType:     "create_firewall_zone",
-			TaskName:     "创建防火墙安全区域",
-			TaskOrder:    3,
-			TaskParams:   o.buildVPCTaskParams(req),
-			Status:       models.TaskStatusPending,
-			Priority:     int(queue.PriorityNormal),
-			DeviceType:   string(queue.DeviceTypeFirewall),
-			RetryCount:   0,
-			MaxRetries:   3,
-			AZ:           o.az,
-		},
-	}
-	return tasks
-}
-
-func (o *AZOrchestrator) buildVPCTaskParams(req *models.VPCRequest) string {
+func (o *AZOrchestrator) buildVPCTaskParams(ctx context.Context, req *models.VPCRequest) string {
 	params := map[string]interface{}{
 		"vpc_name":      req.VPCName,
 		"vrf_name":      req.VRFName,
@@ -162,26 +186,30 @@ func (o *AZOrchestrator) buildVPCTaskParams(req *models.VPCRequest) string {
 		"firewall_zone": req.FirewallZone,
 		"region":        req.Region,
 	}
-	data, _ := json.Marshal(params)
+	data, err := json.Marshal(params)
+	if err != nil {
+		logger.InfoContext(ctx, "序列化VPC任务参数失败", "error", err, "vpcName", req.VPCName)
+		return ""
+	}
 	return string(data)
 }
 
 func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetRequest) (*models.SubnetResponse, error) {
-	log.Printf("[AZ Orchestrator %s] 开始创建子网: %s", o.az, req.SubnetName)
+	logger.InfoContext(ctx, "开始创建子网", "az", o.az, "subnetName", req.SubnetName)
 
 	subnetID := uuid.New().String()
-	
+
 	subnetResource := &models.SubnetResource{
-		ID:         subnetID,
-		SubnetName: req.SubnetName,
-		VPCName:    req.VPCName,
-		Region:     req.Region,
-		AZ:         o.az,
-		CIDR:       req.CIDR,
-		Status:     models.ResourceStatusPending,
-		TotalTasks: 0,
+		ID:             subnetID,
+		SubnetName:     req.SubnetName,
+		VPCName:        req.VPCName,
+		Region:         req.Region,
+		AZ:             o.az,
+		CIDR:           req.CIDR,
+		Status:         models.ResourceStatusPending,
+		TotalTasks:     0,
 		CompletedTasks: 0,
-		FailedTasks: 0,
+		FailedTasks:    0,
 	}
 
 	if err := o.subnetDAO.Create(ctx, subnetResource); err != nil {
@@ -191,16 +219,19 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 		}, nil
 	}
 
-	tasks := o.buildSubnetTasks(subnetID, req)
-	
-	if err := o.taskDAO.BatchCreate(ctx, tasks); err != nil {
-		return &models.SubnetResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建任务记录失败: %v", err),
-		}, nil
+	params := o.buildSubnetTaskParams(ctx, req)
+	def := &taskqueue.WorkflowDefinition{
+		Name:         "create_subnet",
+		ResourceType: string(models.ResourceTypeSubnet),
+		ResourceID:   subnetID,
+		Metadata:     map[string]string{"az": o.az},
+		Steps: []taskqueue.StepDefinition{
+			{TaskType: "create_subnet_on_switch", TaskName: "创建子网", QueueTag: string(queue.DeviceTypeSwitch), Priority: taskqueue.PriorityNormal, Params: params},
+			{TaskType: "configure_subnet_routing", TaskName: "配置子网路由", QueueTag: string(queue.DeviceTypeSwitch), Priority: taskqueue.PriorityNormal, Params: params},
+		},
 	}
 
-	if err := o.subnetDAO.UpdateTotalTasks(ctx, subnetID, len(tasks)); err != nil {
+	if err := o.subnetDAO.UpdateTotalTasks(ctx, subnetID, len(def.Steps)); err != nil {
 		return &models.SubnetResponse{
 			Success: false,
 			Message: fmt.Sprintf("更新任务总数失败: %v", err),
@@ -214,60 +245,25 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 		}, nil
 	}
 
-	if err := o.enqueueFirstTask(ctx, subnetID); err != nil {
+	workflowID, err := o.engine.SubmitWorkflow(ctx, def)
+	if err != nil {
 		return &models.SubnetResponse{
 			Success: false,
-			Message: fmt.Sprintf("任务入队失败: %v", err),
+			Message: fmt.Sprintf("提交工作流失败: %v", err),
 		}, nil
 	}
 
-	log.Printf("[AZ Orchestrator %s] 子网创建流程启动成功: %s (ID: %s)", o.az, req.SubnetName, subnetID)
+	logger.InfoContext(ctx, "子网创建流程启动成功", "az", o.az, "subnetName", req.SubnetName, "subnetID", subnetID, "workflowID", workflowID)
 
 	return &models.SubnetResponse{
 		Success:    true,
 		Message:    "子网创建工作流已启动",
 		SubnetID:   subnetID,
-		WorkflowID: subnetID,
+		WorkflowID: workflowID,
 	}, nil
 }
 
-func (o *AZOrchestrator) buildSubnetTasks(subnetID string, req *models.SubnetRequest) []*models.Task {
-	tasks := []*models.Task{
-		{
-			ID:           uuid.New().String(),
-			ResourceType: models.ResourceTypeSubnet,
-			ResourceID:   subnetID,
-			TaskType:     "create_subnet_on_switch",
-			TaskName:     "创建子网",
-			TaskOrder:    1,
-			TaskParams:   o.buildSubnetTaskParams(req),
-			Status:       models.TaskStatusPending,
-			Priority:     int(queue.PriorityNormal),
-			DeviceType:   string(queue.DeviceTypeSwitch),
-			RetryCount:   0,
-			MaxRetries:   3,
-			AZ:           o.az,
-		},
-		{
-			ID:           uuid.New().String(),
-			ResourceType: models.ResourceTypeSubnet,
-			ResourceID:   subnetID,
-			TaskType:     "configure_subnet_routing",
-			TaskName:     "配置子网路由",
-			TaskOrder:    2,
-			TaskParams:   o.buildSubnetTaskParams(req),
-			Status:       models.TaskStatusPending,
-			Priority:     int(queue.PriorityNormal),
-			DeviceType:   string(queue.DeviceTypeSwitch),
-			RetryCount:   0,
-			MaxRetries:   3,
-			AZ:           o.az,
-		},
-	}
-	return tasks
-}
-
-func (o *AZOrchestrator) buildSubnetTaskParams(req *models.SubnetRequest) string {
+func (o *AZOrchestrator) buildSubnetTaskParams(ctx context.Context, req *models.SubnetRequest) string {
 	params := map[string]interface{}{
 		"subnet_name": req.SubnetName,
 		"vpc_name":    req.VPCName,
@@ -275,160 +271,29 @@ func (o *AZOrchestrator) buildSubnetTaskParams(req *models.SubnetRequest) string
 		"az":          req.AZ,
 		"cidr":        req.CIDR,
 	}
-	data, _ := json.Marshal(params)
+	data, err := json.Marshal(params)
+	if err != nil {
+		logger.InfoContext(ctx, "序列化子网任务参数失败", "error", err, "subnetName", req.SubnetName)
+		return ""
+	}
 	return string(data)
 }
 
-func (o *AZOrchestrator) enqueueFirstTask(ctx context.Context, resourceID string) error {
-	task, err := o.taskDAO.GetNextPendingTask(ctx, resourceID)
-	if err != nil {
-		return fmt.Errorf("获取首个待执行任务失败: %v", err)
-	}
-	if task == nil {
-		return fmt.Errorf("没有找到待执行任务")
+// HandleTaskCallback delegates callback processing to the Engine.
+func (o *AZOrchestrator) HandleTaskCallback(ctx context.Context, payload []byte) error {
+	var cb taskqueue.CallbackPayload
+	if err := json.Unmarshal(payload, &cb); err != nil {
+		return fmt.Errorf("解析回调载荷失败: %v", err)
 	}
 
-	return o.enqueueTask(ctx, task)
-}
+	logger.InfoContext(ctx, "收到任务回调", "az", o.az, "taskID", cb.TaskID, "status", cb.Status)
 
-func (o *AZOrchestrator) enqueueTask(ctx context.Context, task *models.Task) error {
-	payload := map[string]interface{}{
-		"task_id":     task.ID,
-		"resource_id": task.ResourceID,
-		"task_params": task.TaskParams,
-	}
-	payloadData, _ := json.Marshal(payload)
-
-	deviceType := queue.DeviceType(task.DeviceType)
-	if deviceType == "" {
-		deviceType = queue.GetDeviceTypeForTaskType(task.TaskType)
+	if err := o.engine.HandleCallback(ctx, &cb); err != nil {
+		logger.InfoContext(ctx, "任务回调处理失败", "az", o.az, "error", err)
+		return err
 	}
 
-	priority := queue.TaskPriority(task.Priority)
-	if priority == 0 {
-		priority = queue.PriorityNormal
-	}
-
-	queueName := queue.GetPriorityQueueName(o.region, o.az, deviceType, priority)
-
-	asynqTask := asynq.NewTask(task.TaskType, payloadData)
-	info, err := o.asynqClient.Enqueue(
-		asynqTask,
-		asynq.Queue(queueName),
-	)
-	if err != nil {
-		return fmt.Errorf("入队失败: %v", err)
-	}
-
-	if err := o.taskDAO.UpdateAsynqTaskID(ctx, task.ID, info.ID); err != nil {
-		return fmt.Errorf("更新Asynq任务ID失败: %v", err)
-	}
-
-	if err := o.taskDAO.UpdateStatus(ctx, task.ID, models.TaskStatusQueued); err != nil {
-		return fmt.Errorf("更新任务状态失败: %v", err)
-	}
-
-	log.Printf("[AZ Orchestrator %s] 任务已入队: %s (AsynqID: %s, Queue: %s, Priority: %d)", o.az, task.TaskName, info.ID, queueName, priority)
-	return nil
-}
-
-func (o *AZOrchestrator) HandleTaskCallback(ctx context.Context, taskID string, status models.TaskStatus, result interface{}, errorMsg string) error {
-	log.Printf("[AZ Orchestrator %s] 接收到任务回调: taskID=%s, status=%s", o.az, taskID, status)
-
-	task, err := o.taskDAO.GetByID(ctx, taskID)
-	if err != nil {
-		return fmt.Errorf("获取任务失败: %v", err)
-	}
-
-	if err := o.taskDAO.UpdateResult(ctx, taskID, status, result, errorMsg); err != nil {
-		return fmt.Errorf("更新任务结果失败: %v", err)
-	}
-
-	if status == models.TaskStatusCompleted {
-		if err := o.handleTaskSuccess(ctx, task); err != nil {
-			return err
-		}
-	} else if status == models.TaskStatusFailed {
-		if err := o.handleTaskFailure(ctx, task, errorMsg); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (o *AZOrchestrator) handleTaskSuccess(ctx context.Context, task *models.Task) error {
-	if task.ResourceType == models.ResourceTypeVPC {
-		if err := o.vpcDAO.IncrementCompletedTasks(ctx, task.ResourceID); err != nil {
-			return fmt.Errorf("更新VPC完成任务数失败: %v", err)
-		}
-	} else if task.ResourceType == models.ResourceTypeSubnet {
-		if err := o.subnetDAO.IncrementCompletedTasks(ctx, task.ResourceID); err != nil {
-			return fmt.Errorf("更新子网完成任务数失败: %v", err)
-		}
-	}
-
-	nextTask, err := o.taskDAO.GetNextPendingTask(ctx, task.ResourceID)
-	if err != nil {
-		return fmt.Errorf("获取下一个任务失败: %v", err)
-	}
-
-	if nextTask != nil {
-		if err := o.enqueueTask(ctx, nextTask); err != nil {
-			return fmt.Errorf("入队下一个任务失败: %v", err)
-		}
-	} else {
-		if err := o.checkAndCompleteResource(ctx, task.ResourceID, task.ResourceType); err != nil {
-			return fmt.Errorf("检查资源完成状态失败: %v", err)
-		}
-	}
-
-	return nil
-}
-
-func (o *AZOrchestrator) handleTaskFailure(ctx context.Context, task *models.Task, errorMsg string) error {
-	if task.ResourceType == models.ResourceTypeVPC {
-		if err := o.vpcDAO.IncrementFailedTasks(ctx, task.ResourceID); err != nil {
-			return fmt.Errorf("更新VPC失败任务数失败: %v", err)
-		}
-		if err := o.vpcDAO.UpdateStatus(ctx, task.ResourceID, models.ResourceStatusFailed, errorMsg); err != nil {
-			return fmt.Errorf("更新VPC状态失败: %v", err)
-		}
-	} else if task.ResourceType == models.ResourceTypeSubnet {
-		if err := o.subnetDAO.IncrementFailedTasks(ctx, task.ResourceID); err != nil {
-			return fmt.Errorf("更新子网失败任务数失败: %v", err)
-		}
-		if err := o.subnetDAO.UpdateStatus(ctx, task.ResourceID, models.ResourceStatusFailed, errorMsg); err != nil {
-			return fmt.Errorf("更新子网状态失败: %v", err)
-		}
-	}
-
-	log.Printf("[AZ Orchestrator %s] 任务失败，停止后续任务: resourceID=%s", o.az, task.ResourceID)
-	return nil
-}
-
-func (o *AZOrchestrator) checkAndCompleteResource(ctx context.Context, resourceID string, resourceType models.ResourceType) error {
-	total, completed, failed, err := o.taskDAO.GetTaskStats(ctx, resourceID)
-	if err != nil {
-		return fmt.Errorf("获取任务统计失败: %v", err)
-	}
-
-	log.Printf("[AZ Orchestrator %s] 任务统计: total=%d, completed=%d, failed=%d", o.az, total, completed, failed)
-
-	if completed == total && failed == 0 {
-		if resourceType == models.ResourceTypeVPC {
-			if err := o.vpcDAO.UpdateStatus(ctx, resourceID, models.ResourceStatusRunning, ""); err != nil {
-				return fmt.Errorf("更新VPC状态为running失败: %v", err)
-			}
-			log.Printf("[AZ Orchestrator %s] VPC创建完成: resourceID=%s", o.az, resourceID)
-		} else if resourceType == models.ResourceTypeSubnet {
-			if err := o.subnetDAO.UpdateStatus(ctx, resourceID, models.ResourceStatusRunning, ""); err != nil {
-				return fmt.Errorf("更新子网状态为running失败: %v", err)
-			}
-			log.Printf("[AZ Orchestrator %s] 子网创建完成: resourceID=%s", o.az, resourceID)
-		}
-	}
-
+	logger.InfoContext(ctx, "任务回调处理成功", "az", o.az, "taskID", cb.TaskID)
 	return nil
 }
 
@@ -441,7 +306,7 @@ func (o *AZOrchestrator) GetVPCStatus(ctx context.Context, vpcName string) (*mod
 		return nil, fmt.Errorf("查询VPC失败: %v", err)
 	}
 
-	tasks, err := o.taskDAO.GetByResourceID(ctx, vpc.ID)
+	tasks, err := o.getTasksByResourceID(ctx, string(models.ResourceTypeVPC), vpc.ID)
 	if err != nil {
 		return nil, fmt.Errorf("查询任务列表失败: %v", err)
 	}
@@ -475,7 +340,7 @@ func (o *AZOrchestrator) GetSubnetStatus(ctx context.Context, subnetName string)
 		return nil, fmt.Errorf("查询子网失败: %v", err)
 	}
 
-	tasks, err := o.taskDAO.GetByResourceID(ctx, subnet.ID)
+	tasks, err := o.getTasksByResourceID(ctx, string(models.ResourceTypeSubnet), subnet.ID)
 	if err != nil {
 		return nil, fmt.Errorf("查询任务列表失败: %v", err)
 	}
@@ -500,6 +365,57 @@ func (o *AZOrchestrator) GetSubnetStatus(ctx context.Context, subnetName string)
 	}, nil
 }
 
+// getTasksByResourceID queries Engine store for workflows by resource and converts steps to models.Task.
+func (o *AZOrchestrator) getTasksByResourceID(ctx context.Context, resourceType, resourceID string) ([]*models.Task, error) {
+	workflows, err := o.engine.Store().GetWorkflowsByResourceID(ctx, resourceType, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	if len(workflows) == 0 {
+		return nil, nil
+	}
+
+	// Use the most recent workflow (first in DESC order)
+	wf := workflows[0]
+	steps, err := o.engine.Store().GetStepsByWorkflow(ctx, wf.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	tasks := make([]*models.Task, len(steps))
+	for i, s := range steps {
+		tasks[i] = stepToTask(s, wf)
+	}
+	return tasks, nil
+}
+
+// stepToTask converts a taskqueue.StepTask to models.Task for API response compatibility.
+func stepToTask(s *taskqueue.StepTask, wf *taskqueue.Workflow) *models.Task {
+	return &models.Task{
+		ID:           s.ID,
+		ResourceType: models.ResourceType(wf.ResourceType),
+		ResourceID:   wf.ResourceID,
+		TaskType:     s.TaskType,
+		TaskName:     s.TaskName,
+		TaskOrder:    s.StepOrder,
+		TaskParams:   s.Params,
+		Status:       models.TaskStatus(s.Status),
+		Priority:     int(s.Priority),
+		DeviceType:   s.QueueTag,
+		AsynqTaskID:  s.BrokerTaskID,
+		Result:       s.Result,
+		ErrorMessage: s.ErrorMessage,
+		RetryCount:   s.RetryCount,
+		MaxRetries:   s.MaxRetries,
+		AZ:           wf.Metadata["az"],
+		CreatedAt:    s.CreatedAt,
+		QueuedAt:     s.QueuedAt,
+		StartedAt:    s.StartedAt,
+		CompletedAt:  s.CompletedAt,
+		UpdatedAt:    s.UpdatedAt,
+	}
+}
+
 func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 	vpc, err := o.vpcDAO.GetByName(ctx, vpcName, o.az)
 	if err == sql.ErrNoRows {
@@ -521,9 +437,9 @@ func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 		return fmt.Errorf("VPC下存在%d个子网，无法删除", subnetCount)
 	}
 
-	policyCount, err := o.checkZonePolicies(vpc.FirewallZone)
+	policyCount, err := o.checkZonePolicies(ctx, vpc.FirewallZone)
 	if err != nil {
-		log.Printf("[AZ Orchestrator %s] 检查Zone策略失败: %v", o.az, err)
+		logger.InfoContext(ctx, "检查Zone策略失败", "az", o.az, "error", err)
 	}
 	if policyCount > 0 {
 		return fmt.Errorf("Zone %s 中存在%d条防火墙策略，无法删除VPC", vpc.FirewallZone, policyCount)
@@ -533,7 +449,7 @@ func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 		return fmt.Errorf("更新VPC状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] VPC删除成功: %s", o.az, vpcName)
+	logger.InfoContext(ctx, "VPC删除成功", "az", o.az, "vpcName", vpcName)
 	return nil
 }
 
@@ -554,12 +470,16 @@ func (o *AZOrchestrator) DeleteSubnet(ctx context.Context, subnetName string) er
 		return fmt.Errorf("更新子网状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] 子网删除成功: %s", o.az, subnetName)
+	logger.InfoContext(ctx, "子网删除成功", "az", o.az, "subnetName", subnetName)
 	return nil
 }
 
 func (o *AZOrchestrator) ListVPCs(ctx context.Context) ([]*models.VPCResource, error) {
 	return o.vpcDAO.ListAll(ctx)
+}
+
+func (o *AZOrchestrator) GetAZ() string {
+	return o.az
 }
 
 func (o *AZOrchestrator) GetVPCByID(ctx context.Context, vpcID string) (*models.VPCResource, error) {
@@ -587,9 +507,9 @@ func (o *AZOrchestrator) DeleteVPCByID(ctx context.Context, vpcID string) error 
 		return fmt.Errorf("VPC下存在%d个子网，无法删除", subnetCount)
 	}
 
-	policyCount, err := o.checkZonePolicies(vpc.FirewallZone)
+	policyCount, err := o.checkZonePolicies(ctx, vpc.FirewallZone)
 	if err != nil {
-		log.Printf("[AZ Orchestrator %s] 检查Zone策略失败: %v", o.az, err)
+		logger.InfoContext(ctx, "检查Zone策略失败", "az", o.az, "error", err)
 	}
 	if policyCount > 0 {
 		return fmt.Errorf("Zone %s 中存在%d条防火墙策略，无法删除VPC", vpc.FirewallZone, policyCount)
@@ -599,7 +519,7 @@ func (o *AZOrchestrator) DeleteVPCByID(ctx context.Context, vpcID string) error 
 		return fmt.Errorf("更新VPC状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] VPC删除成功: %s", o.az, vpcID)
+	logger.InfoContext(ctx, "VPC删除成功", "az", o.az, "vpcID", vpcID)
 	return nil
 }
 
@@ -628,44 +548,200 @@ func (o *AZOrchestrator) DeleteSubnetByID(ctx context.Context, subnetID string) 
 		return fmt.Errorf("更新子网状态失败: %v", err)
 	}
 
-	log.Printf("[AZ Orchestrator %s] 子网删除成功: %s", o.az, subnetID)
+	logger.InfoContext(ctx, "子网删除成功", "az", o.az, "subnetID", subnetID)
 	return nil
 }
 
 func (o *AZOrchestrator) GetTaskByID(ctx context.Context, taskID string) (*models.Task, error) {
-	return o.taskDAO.GetByID(ctx, taskID)
+	step, err := o.engine.Store().GetStep(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("查询任务失败: %v", err)
+	}
+	if step == nil {
+		return nil, fmt.Errorf("任务不存在: %s", taskID)
+	}
+
+	wf, err := o.engine.Store().GetWorkflow(ctx, step.WorkflowID)
+	if err != nil {
+		return nil, fmt.Errorf("查询工作流失败: %v", err)
+	}
+	if wf == nil {
+		return nil, fmt.Errorf("工作流不存在: %s", step.WorkflowID)
+	}
+
+	return stepToTask(step, wf), nil
 }
 
 func (o *AZOrchestrator) ReplayTask(ctx context.Context, taskID string) error {
-	task, err := o.taskDAO.GetByID(ctx, taskID)
+	step, err := o.engine.Store().GetStep(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("获取任务失败: %v", err)
 	}
-
-	if task.Status != models.TaskStatusFailed {
-		return fmt.Errorf("任务状态不是failed，无法重做 (当前状态: %s)", task.Status)
+	if step == nil {
+		return fmt.Errorf("任务不存在: %s", taskID)
 	}
 
-	if err := o.taskDAO.UpdateStatus(ctx, taskID, models.TaskStatusPending); err != nil {
-		return fmt.Errorf("更新任务状态为pending失败: %v", err)
+	if models.TaskStatus(step.Status) != models.TaskStatusFailed {
+		return fmt.Errorf("任务状态不是failed，无法重做 (当前状态: %s)", step.Status)
 	}
 
-	if err := o.enqueueTask(ctx, task); err != nil {
-		return fmt.Errorf("重新入队任务失败: %v", err)
+	// Reset the resource status back to creating so the workflow can proceed
+	wf, err := o.engine.Store().GetWorkflow(ctx, step.WorkflowID)
+	if err != nil {
+		return fmt.Errorf("查询工作流失败: %v", err)
+	}
+	if wf != nil {
+		switch wf.ResourceType {
+		case string(models.ResourceTypeVPC):
+			_ = o.vpcDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusCreating, "")
+		case string(models.ResourceTypeSubnet):
+			_ = o.subnetDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusCreating, "")
+		}
 	}
 
-	log.Printf("[AZ Orchestrator %s] 任务重做成功: taskID=%s", o.az, taskID)
+	if err := o.engine.RetryStep(ctx, taskID); err != nil {
+		return fmt.Errorf("重做任务失败: %v", err)
+	}
+
+	logger.InfoContext(ctx, "任务重做成功", "az", o.az, "taskID", taskID)
 	return nil
 }
 
-func (o *AZOrchestrator) checkZonePolicies(zone string) (int, error) {
+// StartCompensationTask starts a background goroutine that periodically scans for
+// inconsistencies between workflow state (tq_workflows.status) and resource state
+// (vpc_resources.status / subnet_resources.status), then repairs them.
+// This provides eventual consistency when the WorkflowHooks fail due to transient errors.
+func (o *AZOrchestrator) StartCompensationTask(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		logger.Platform().Info("[补偿任务] 启动", "az", o.az, "interval", interval.String())
+
+		for {
+			select {
+			case <-ctx.Done():
+				logger.Platform().Info("[补偿任务] 停止", "az", o.az)
+				return
+			case <-ticker.C:
+				o.runCompensation(ctx)
+			}
+		}
+	}()
+}
+
+// runCompensation scans and repairs inconsistencies between workflow and resource states.
+func (o *AZOrchestrator) runCompensation(ctx context.Context) {
+	// Repair VPC resources
+	o.compensateVPCs(ctx)
+	// Repair Subnet resources
+	o.compensateSubnets(ctx)
+}
+
+func (o *AZOrchestrator) compensateVPCs(ctx context.Context) {
+	vpcs, err := o.vpcDAO.ListAll(ctx)
+	if err != nil {
+		logger.Platform().Error("[补偿任务] 查询VPC列表失败", "az", o.az, "error", err)
+		return
+	}
+
+	for _, vpc := range vpcs {
+		// Skip already terminal states (running, failed, deleted)
+		if vpc.Status == models.ResourceStatusRunning || vpc.Status == models.ResourceStatusFailed || vpc.Status == models.ResourceStatusDeleted {
+			continue
+		}
+
+		// Check if there's a workflow for this resource
+		workflows, err := o.engine.Store().GetWorkflowsByResourceID(ctx, string(models.ResourceTypeVPC), vpc.ID)
+		if err != nil {
+			logger.Platform().Error("[补偿任务] 查询VPC工作流失败", "az", o.az, "vpcID", vpc.ID, "error", err)
+			continue
+		}
+
+		if len(workflows) == 0 {
+			continue
+		}
+
+		wf := workflows[0] // Most recent workflow
+		o.compensateResource(ctx, wf, "VPC", vpc.ID, vpc.Status, o.vpcDAO.UpdateStatus)
+	}
+}
+
+func (o *AZOrchestrator) compensateSubnets(ctx context.Context) {
+	// Query all subnets (we need a ListAll method if not present; for now use workaround)
+	// Since we don't have ListAllSubnets, we'll skip detailed subnet compensation
+	// In production, add SubnetDAO.ListAll() method and implement similar logic
+
+	// For now, compensate by scanning subnets via VPCs
+	vpcs, err := o.vpcDAO.ListAll(ctx)
+	if err != nil {
+		return
+	}
+
+	for _, vpc := range vpcs {
+		subnets, err := o.subnetDAO.ListByVPCID(ctx, vpc.ID)
+		if err != nil {
+			continue
+		}
+
+		for _, subnet := range subnets {
+			if subnet.Status == models.ResourceStatusRunning || subnet.Status == models.ResourceStatusFailed || subnet.Status == models.ResourceStatusDeleted {
+				continue
+			}
+
+			workflows, err := o.engine.Store().GetWorkflowsByResourceID(ctx, string(models.ResourceTypeSubnet), subnet.ID)
+			if err != nil {
+				logger.Platform().Error("[补偿任务] 查询子网工作流失败", "az", o.az, "subnetID", subnet.ID, "error", err)
+				continue
+			}
+
+			if len(workflows) == 0 {
+				continue
+			}
+
+			wf := workflows[0]
+			o.compensateResource(ctx, wf, "Subnet", subnet.ID, subnet.Status, o.subnetDAO.UpdateStatus)
+		}
+	}
+}
+
+// compensateResource checks a single resource and repairs if workflow state diverges.
+func (o *AZOrchestrator) compensateResource(
+	ctx context.Context,
+	wf *taskqueue.Workflow,
+	resourceName string,
+	resourceID string,
+	currentStatus models.ResourceStatus,
+	updateStatus func(ctx context.Context, id string, status models.ResourceStatus, errMsg string) error,
+) {
+	switch wf.Status {
+	case taskqueue.WorkflowStatusSucceeded:
+		if currentStatus != models.ResourceStatusRunning {
+			logger.Platform().Info("[补偿任务] 修复资源状态: succeeded -> running",
+				"az", o.az, "resource", resourceName, "resourceID", resourceID, "currentStatus", currentStatus)
+			if err := updateStatus(ctx, resourceID, models.ResourceStatusRunning, ""); err != nil {
+				logger.Platform().Error("[补偿任务] 更新资源状态失败", "az", o.az, "error", err)
+			}
+		}
+	case taskqueue.WorkflowStatusFailed:
+		if currentStatus != models.ResourceStatusFailed {
+			logger.Platform().Info("[补偿任务] 修复资源状态: failed",
+				"az", o.az, "resource", resourceName, "resourceID", resourceID, "currentStatus", currentStatus)
+			if err := updateStatus(ctx, resourceID, models.ResourceStatusFailed, wf.ErrorMessage); err != nil {
+				logger.Platform().Error("[补偿任务] 更新资源状态失败", "az", o.az, "error", err)
+			}
+		}
+	}
+}
+
+func (o *AZOrchestrator) checkZonePolicies(ctx context.Context, zone string) (int, error) {
 	vfwAddr := os.Getenv("AZ_NSP_VFW_ADDR")
 	if vfwAddr == "" {
 		vfwAddr = fmt.Sprintf("http://az-nsp-vfw-%s:8080", o.az)
 	}
 
 	url := fmt.Sprintf("%s/api/v1/firewall/zone/%s/policy-count", vfwAddr, zone)
-	resp, err := http.Get(url)
+	resp, err := o.tracedHTTP.Get(ctx, url)
 	if err != nil {
 		return 0, err
 	}

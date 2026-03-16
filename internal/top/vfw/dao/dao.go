@@ -21,7 +21,7 @@ func (d *TopVFWDAO) CreatePolicy(ctx context.Context, policy *models.PolicyRegis
 		INSERT INTO policy_registry (
 			id, policy_name, source_ip, dest_ip, source_port, dest_port, protocol, action, description,
 			source_vpc, dest_vpc, source_zone, dest_zone, source_region, dest_region, source_az, dest_az, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 	`
 	_, err := d.db.ExecContext(ctx, query,
 		policy.ID, policy.PolicyName, policy.SourceIP, policy.DestIP,
@@ -37,7 +37,7 @@ func (d *TopVFWDAO) GetPolicyByID(ctx context.Context, id string) (*models.Polic
 		SELECT id, policy_name, source_ip, dest_ip, source_port, dest_port, protocol, action, description,
 			   source_vpc, dest_vpc, source_zone, dest_zone, source_region, dest_region, source_az, dest_az,
 			   status, error_message, created_at, updated_at
-		FROM policy_registry WHERE id = ?
+		FROM policy_registry WHERE id = $1
 	`
 	policy := &models.PolicyRegistry{}
 	var desc, srcVPC, dstVPC, srcZone, dstZone, srcRegion, dstRegion, srcAZ, dstAZ, errMsg sql.NullString
@@ -91,7 +91,7 @@ func (d *TopVFWDAO) GetPolicyByName(ctx context.Context, name string) (*models.P
 		SELECT id, policy_name, source_ip, dest_ip, source_port, dest_port, protocol, action, description,
 			   source_vpc, dest_vpc, source_zone, dest_zone, source_region, dest_region, source_az, dest_az,
 			   status, error_message, created_at, updated_at
-		FROM policy_registry WHERE policy_name = ?
+		FROM policy_registry WHERE policy_name = $1
 	`
 	policy := &models.PolicyRegistry{}
 	var desc, srcVPC, dstVPC, srcZone, dstZone, srcRegion, dstRegion, srcAZ, dstAZ, errMsg sql.NullString
@@ -141,7 +141,7 @@ func (d *TopVFWDAO) GetPolicyByName(ctx context.Context, name string) (*models.P
 }
 
 func (d *TopVFWDAO) UpdatePolicyStatus(ctx context.Context, id, status, errorMsg string) error {
-	query := `UPDATE policy_registry SET status = ?, error_message = ?, updated_at = ? WHERE id = ?`
+	query := `UPDATE policy_registry SET status = $1, error_message = $2, updated_at = $3 WHERE id = $4`
 	_, err := d.db.ExecContext(ctx, query, status, errorMsg, time.Now(), id)
 	return err
 }
@@ -153,12 +153,12 @@ func (d *TopVFWDAO) DeletePolicy(ctx context.Context, id string) error {
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM policy_az_records WHERE policy_id = ?`, id)
+	_, err = tx.ExecContext(ctx, `DELETE FROM policy_az_records WHERE policy_id = $1`, id)
 	if err != nil {
 		return err
 	}
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM policy_registry WHERE id = ?`, id)
+	_, err = tx.ExecContext(ctx, `DELETE FROM policy_registry WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -234,7 +234,7 @@ func (d *TopVFWDAO) ListPolicies(ctx context.Context) ([]*models.PolicyRegistry,
 func (d *TopVFWDAO) CreateAZRecord(ctx context.Context, record *models.PolicyAZRecord) error {
 	query := `
 		INSERT INTO policy_az_records (id, policy_id, az, az_policy_id, status)
-		VALUES (?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5)
 	`
 	_, err := d.db.ExecContext(ctx, query,
 		record.ID, record.PolicyID, record.AZ, record.AZPolicyID, record.Status,
@@ -243,7 +243,7 @@ func (d *TopVFWDAO) CreateAZRecord(ctx context.Context, record *models.PolicyAZR
 }
 
 func (d *TopVFWDAO) UpdateAZRecord(ctx context.Context, policyID, az, azPolicyID, status, errorMsg string) error {
-	query := `UPDATE policy_az_records SET az_policy_id = ?, status = ?, error_message = ?, updated_at = ? WHERE policy_id = ? AND az = ?`
+	query := `UPDATE policy_az_records SET az_policy_id = $1, status = $2, error_message = $3, updated_at = $4 WHERE policy_id = $5 AND az = $6`
 	_, err := d.db.ExecContext(ctx, query, azPolicyID, status, errorMsg, time.Now(), policyID, az)
 	return err
 }
@@ -251,7 +251,7 @@ func (d *TopVFWDAO) UpdateAZRecord(ctx context.Context, policyID, az, azPolicyID
 func (d *TopVFWDAO) GetAZRecords(ctx context.Context, policyID string) ([]*models.PolicyAZRecord, error) {
 	query := `
 		SELECT id, policy_id, az, az_policy_id, status, error_message, created_at, updated_at
-		FROM policy_az_records WHERE policy_id = ?
+		FROM policy_az_records WHERE policy_id = $1
 	`
 	rows, err := d.db.QueryContext(ctx, query, policyID)
 	if err != nil {
@@ -284,7 +284,7 @@ func (d *TopVFWDAO) GetAZRecords(ctx context.Context, policyID string) ([]*model
 func (d *TopVFWDAO) CountPoliciesByZone(ctx context.Context, zone string) (int, error) {
 	query := `
 		SELECT COUNT(*) FROM policy_registry 
-		WHERE (source_zone = ? OR dest_zone = ?) AND status NOT IN ('deleted', 'failed')
+		WHERE (source_zone = $1 OR dest_zone = $2) AND status NOT IN ('deleted', 'failed')
 	`
 	var count int
 	err := d.db.QueryRowContext(ctx, query, zone, zone).Scan(&count)
