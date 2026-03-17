@@ -195,3 +195,42 @@ func (c *AZNSPClient) DeleteVPC(ctx context.Context, azAddr string, vpcName stri
 
 	return nil
 }
+
+// GetVPCStatus 查询指定 AZ 的 VPC Worker 状态
+func (c *AZNSPClient) GetVPCStatus(ctx context.Context, azAddr string, vpcName string) (*models.VPCStatusResponse, error) {
+	url := fmt.Sprintf("%s/api/v1/vpc/%s/status", azAddr, vpcName)
+
+	var resp *http.Response
+	var err error
+	if c.tracedClient != nil {
+		resp, err = c.tracedClient.Get(ctx, url)
+	} else {
+		var httpReq *http.Request
+		httpReq, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
+		}
+		resp, err = c.httpClient.Do(httpReq)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("发送请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("VPC %s not found in AZ", vpcName)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("查询失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
+	}
+
+	var vpcStatus models.VPCStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&vpcStatus); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %v", err)
+	}
+
+	return &vpcStatus, nil
+}
