@@ -78,9 +78,9 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 	// 4. 构建 SAGA 事务定义
 	builder := saga.NewSaga(fmt.Sprintf("region-vpc-create-%s", req.VPCName)).
 		WithPayload(map[string]any{"vpc_name": req.VPCName, "region": req.Region}).
-		WithTimeout(900) // 15 分钟超时，给 worker 足够时间
+		WithTimeout(60) // 1 分钟超时，Sync 步骤只等 API 调用
 
-	// 为每个 AZ 添加一个步骤（串行执行，使用 Async + Poll 等待 worker 完成）
+	// 为每个 AZ 添加一个步骤（Sync：POST 返回 200 即为成功）
 	for _, az := range azs {
 		// 将统一的 VPC ID 注入到请求中，确保 AZ 层使用相同 ID
 		reqWithID := *req
@@ -90,20 +90,12 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 		json.Unmarshal(payloadBytes, &payloadMap)
 		builder.AddStep(saga.Step{
 			Name:             fmt.Sprintf("创建VPC-%s", az.ID),
-			Type:             saga.StepTypeAsync,
+			Type:             saga.StepTypeSync,
 			ActionMethod:     "POST",
 			ActionURL:        fmt.Sprintf("%s/api/v1/vpc", az.NSPAddr),
 			ActionPayload:    payloadMap,
 			CompensateMethod: "DELETE",
 			CompensateURL:    fmt.Sprintf("%s/api/v1/vpc/%s", az.NSPAddr, req.VPCName),
-			PollMethod:       "GET",
-			PollURL:          fmt.Sprintf("%s/api/v1/vpc/%s/status", az.NSPAddr, req.VPCName),
-			PollIntervalSec:  5,
-			PollMaxTimes:     120,
-			PollSuccessPath:  "$.status",
-			PollSuccessValue: "running",
-			PollFailurePath:  "$.status",
-			PollFailureValue: "failed",
 		})
 	}
 
@@ -146,7 +138,7 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
-		o.watchSagaTransaction(txID, req.VPCName, azs)
+		o.watchSagaAndPollAZs(txID, req.VPCName, azs)
 	}()
 
 	return &models.VPCResponse{
@@ -248,82 +240,247 @@ func (o *Orchestrator) CheckZonePolicies(ctx context.Context, zone string) (int,
 	return result.Count, nil
 }
 
-// watchSagaTransaction 后台监听 SAGA 事务状态，完成后回写 vpc_registry
-func (o *Orchestrator) watchSagaTransaction(txID, vpcName string, azs []*models.AZ) {
+// watchSagaAndPollAZs 分两阶段监听 VPC 创建：
+//
+//	阶段 1: 等待 Saga 事务完成（API 调用层）
+//	阶段 2: 直接 Poll 各 AZ 接口收集 Worker 最终状态
+func (o *Orchestrator) watchSagaAndPollAZs(txID, vpcName string, azs []*models.AZ) {
 	if o.topDAO == nil || o.sagaEngine == nil {
-		logger.Info("watchSagaTransaction退出：topDAO或sagaEngine为nil", "tx_id", txID, "vpc_name", vpcName)
 		return
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	// ========== 阶段 1: 等待 Saga 完成 ==========
+	sagaStatus := o.waitForSagaCompletion(txID, vpcName, azs)
+	if sagaStatus != saga.TxStatusSucceeded {
+		// Saga 失败 = API 调用失败，引擎已自动补偿，直接标记
+		o.markVPCFromSagaFailure(txID, vpcName, azs)
+		return
+	}
 
-	timeout := time.After(15 * time.Minute)
+	// ========== 阶段 2: Saga 成功后，Poll 各 AZ 的 Worker 状态 ==========
+	o.pollAZWorkerStatuses(vpcName, azs)
+}
+
+// waitForSagaCompletion 轮询 Saga 引擎直到事务完结
+// 返回最终的 TxStatus（succeeded / failed）
+func (o *Orchestrator) waitForSagaCompletion(txID, vpcName string, azs []*models.AZ) saga.TxStatus {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	timeout := time.After(2 * time.Minute) // Sync 步骤不需要很长
 
 	for {
 		select {
 		case <-o.ctx.Done():
-			logger.Info("SAGA监听因context取消而退出", "tx_id", txID, "vpc_name", vpcName)
-			return
-		case <-timeout:
-			logger.Info("SAGA监听超时，标记VPC失败", "tx_id", txID, "vpc_name", vpcName)
-			// 使用独立 context 确保 DB 操作能完成，避免因主 context 取消导致 DB 写入失败
+			// 服务关闭时使用独立 context 标记状态，避免 DB 写入失败
 			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			azDetails := make(map[string]models.AZDetail)
 			for _, az := range azs {
-				azDetails[az.ID] = models.AZDetail{Status: "failed", Error: "timeout"}
+				azDetails[az.ID] = models.AZDetail{Status: "interrupted", Error: "service shutdown"}
 			}
-			if err := o.topDAO.UpdateVPCOverallStatus(dbCtx, vpcName, "failed", azDetails); err != nil {
-				logger.Info("超时标记VPC失败时DB更新失败", "vpc_name", vpcName, "error", err)
+			o.topDAO.UpdateVPCOverallStatus(dbCtx, vpcName, "interrupted", azDetails)
+			cancel()
+			return saga.TxStatusFailed
+		case <-timeout:
+			logger.Info("Saga等待超时", "tx_id", txID)
+			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			azDetails := make(map[string]models.AZDetail)
+			for _, az := range azs {
+				azDetails[az.ID] = models.AZDetail{Status: "failed", Error: "saga timeout"}
+			}
+			o.topDAO.UpdateVPCOverallStatus(dbCtx, vpcName, "failed", azDetails)
+			cancel()
+			return saga.TxStatusFailed
+		case <-ticker.C:
+			status, err := o.sagaEngine.Query(o.ctx, txID)
+			if err != nil || status == nil {
+				continue
+			}
+			switch saga.TxStatus(status.Status) {
+			case saga.TxStatusSucceeded:
+				return saga.TxStatusSucceeded
+			case saga.TxStatusFailed:
+				return saga.TxStatusFailed
+			}
+			// pending / running / compensating → 继续等
+		}
+	}
+}
+
+// markVPCFromSagaFailure Saga 失败时，根据各 Step 状态标记 per-AZ 详情
+// 注意：此方法可能在 o.ctx 已取消时被调用（waitForSagaCompletion 的 ctx.Done 分支），
+// 因此使用独立的 context.Background() 执行 DB 操作和 Saga 查询。
+func (o *Orchestrator) markVPCFromSagaFailure(txID, vpcName string, azs []*models.AZ) {
+	dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	status, err := o.sagaEngine.Query(dbCtx, txID)
+	if err != nil || status == nil {
+		return
+	}
+	azDetails := make(map[string]models.AZDetail)
+	for i, step := range status.Steps {
+		if i < len(azs) {
+			d := models.AZDetail{}
+			if saga.StepStatus(step.Status) == saga.StepStatusSucceeded {
+				d.Status = "compensated" // API 成功但被补偿了
+			} else {
+				d.Status = "failed"
+				d.Error = step.LastError
+			}
+			azDetails[azs[i].ID] = d
+		}
+	}
+	// 注意：Steps 与 azs 的索引对应关系依赖于构建 Saga 时一个 AZ 一个 Step 按序添加，
+	// 后续如果在 Steps 中插入非 AZ 相关步骤，需要改用 Step Name 中的 AZ ID 做显式映射。
+	o.topDAO.UpdateVPCOverallStatus(dbCtx, vpcName, "failed", azDetails)
+	logger.Info("VPC Saga失败，状态已更新", "tx_id", txID, "vpc_name", vpcName)
+}
+
+// pollAZWorkerStatuses Saga 成功后，直接 Poll 各 AZ 接口收集 Worker 最终状态
+// TODO: 当前对各 AZ 的查询是串行的，AZ 数量较多时可改为并发 fan-out
+func (o *Orchestrator) pollAZWorkerStatuses(vpcName string, azs []*models.AZ) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	timeout := time.After(15 * time.Minute) // Worker 执行可能较慢
+
+	// 跟踪每个 AZ 是否已到达终态
+	settled := make(map[string]bool)
+
+	for {
+		select {
+		case <-o.ctx.Done():
+			// 服务关闭时使用独立 context 标记状态
+			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			vpc, err := o.topDAO.GetVPCByName(dbCtx, vpcName)
+			if err == nil && vpc != nil {
+				for _, az := range azs {
+					if !settled[az.ID] {
+						vpc.AZDetails[az.ID] = models.AZDetail{Status: "interrupted", Error: "service shutdown"}
+					}
+				}
+				o.topDAO.UpdateVPCOverallStatus(dbCtx, vpcName, o.computeOverallStatus(vpc.AZDetails), vpc.AZDetails)
+			}
+			cancel()
+			return
+		case <-timeout:
+			logger.Info("Worker状态轮询超时", "vpc_name", vpcName)
+			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			azDetails := make(map[string]models.AZDetail)
+			for _, az := range azs {
+				if !settled[az.ID] {
+					azDetails[az.ID] = models.AZDetail{Status: "failed", Error: "worker poll timeout"}
+				}
+			}
+			// 仅更新未到达终态的 AZ（已到终态的保留原值）
+			if len(azDetails) > 0 {
+				// TODO: Read-Modify-Write 存在竞态窗口，后续可改用 SQL jsonb_set 做原子 merge
+				vpc, err := o.topDAO.GetVPCByName(dbCtx, vpcName)
+				if err == nil && vpc != nil {
+					for azID, detail := range azDetails {
+						vpc.AZDetails[azID] = detail
+					}
+					o.topDAO.UpdateVPCOverallStatus(dbCtx, vpcName, o.computeOverallStatus(vpc.AZDetails), vpc.AZDetails)
+				}
 			}
 			cancel()
 			return
 		case <-ticker.C:
-			status, err := o.sagaEngine.Query(o.ctx, txID)
-			if err != nil {
-				logger.Info("SAGA事务查询失败", "tx_id", txID, "error", err)
-				continue
-			}
-			if status == nil {
-				logger.Info("SAGA事务查询返回nil", "tx_id", txID)
-				continue
-			}
+			allSettled := true
+			azDetails := make(map[string]models.AZDetail)
 
-			switch saga.TxStatus(status.Status) {
-			case saga.TxStatusSucceeded:
-				azDetails := make(map[string]models.AZDetail)
-				for _, az := range azs {
+			for _, az := range azs {
+				if settled[az.ID] {
+					continue
+				}
+
+				vpcStatus, err := o.azClient.GetVPCStatus(o.ctx, az.NSPAddr, vpcName)
+				if err != nil {
+					logger.Info("查询AZ Worker状态失败", "az", az.ID, "error", err)
+					allSettled = false
+					continue
+				}
+
+				switch vpcStatus.Status {
+				case models.ResourceStatusRunning:
 					azDetails[az.ID] = models.AZDetail{Status: "running"}
+					settled[az.ID] = true
+				case models.ResourceStatusFailed:
+					azDetails[az.ID] = models.AZDetail{Status: "failed", Error: vpcStatus.ErrorMessage}
+					settled[az.ID] = true
+				default:
+					// creating / pending → 还在执行，继续等
+					allSettled = false
 				}
-				if err := o.topDAO.UpdateVPCOverallStatus(o.ctx, vpcName, "running", azDetails); err != nil {
-					logger.Info("更新VPC状态失败", "vpc_name", vpcName, "error", err)
-				}
-				logger.Info("VPC创建完成，状态已更新", "tx_id", txID, "vpc_name", vpcName)
-				return
+			}
 
-			case saga.TxStatusFailed:
-				azDetails := make(map[string]models.AZDetail)
-				for i, step := range status.Steps {
-					if i < len(azs) {
-						d := models.AZDetail{}
-						if saga.StepStatus(step.Status) == saga.StepStatusSucceeded {
-							d.Status = "running"
-						} else {
-							d.Status = "failed"
-							d.Error = step.LastError
-						}
-						azDetails[azs[i].ID] = d
+			// 有变化就增量更新 DB
+			if len(azDetails) > 0 {
+				// TODO: Read-Modify-Write 存在竞态窗口，后续可改用 SQL jsonb_set 做原子 merge
+				vpc, err := o.topDAO.GetVPCByName(o.ctx, vpcName)
+				if err == nil && vpc != nil {
+					for azID, detail := range azDetails {
+						vpc.AZDetails[azID] = detail
 					}
+					overall := o.computeOverallStatus(vpc.AZDetails)
+					o.topDAO.UpdateVPCOverallStatus(o.ctx, vpcName, overall, vpc.AZDetails)
 				}
-				if err := o.topDAO.UpdateVPCOverallStatus(o.ctx, vpcName, "failed", azDetails); err != nil {
-					logger.Info("更新VPC状态失败", "vpc_name", vpcName, "error", err)
-				}
-				logger.Info("VPC创建失败，状态已更新", "tx_id", txID, "vpc_name", vpcName, "error", status.LastError)
+			}
+
+			if allSettled {
+				logger.Info("所有AZ Worker已完成", "vpc_name", vpcName)
 				return
-				// pending / running / compensating → 继续轮询
 			}
 		}
 	}
+}
+
+// computeOverallStatus 根据各 AZ 状态计算整体状态
+func (o *Orchestrator) computeOverallStatus(azDetails map[string]models.AZDetail) string {
+	hasFailed := false
+	hasCreating := false
+	hasInterrupted := false
+	allRunning := true
+	for _, d := range azDetails {
+		switch d.Status {
+		case "running":
+			// ok
+		case "failed":
+			hasFailed = true
+			allRunning = false
+		case "creating":
+			hasCreating = true
+			allRunning = false
+		case "interrupted":
+			hasInterrupted = true
+			allRunning = false
+		default:
+			// "compensated", "deleted" 等非常规状态
+			allRunning = false
+		}
+	}
+	if allRunning {
+		return "running"
+	}
+	if hasFailed {
+		hasRunning := false
+		for _, d := range azDetails {
+			if d.Status == "running" {
+				hasRunning = true
+				break
+			}
+		}
+		if hasRunning {
+			return "partial_running"
+		}
+		return "failed"
+	}
+	if hasInterrupted {
+		return "interrupted"
+	}
+	if hasCreating {
+		return "creating"
+	}
+	return "failed"
 }
 
 // GetVPCByName 从 Top 层数据库查询单个 VPC 记录
