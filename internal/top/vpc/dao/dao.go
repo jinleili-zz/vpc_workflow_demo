@@ -175,6 +175,24 @@ func (d *TopVPCDAO) DeleteSubnet(ctx context.Context, subnetName, az string) err
 	return tx.Commit()
 }
 
+// GetSubnetByID 根据 ID 查询子网
+func (d *TopVPCDAO) GetSubnetByID(ctx context.Context, id string) (*models.SubnetRegistry, error) {
+	query := `
+		SELECT id, subnet_name, vpc_name, region, az, az_subnet_id, cidr, firewall_zone, status, created_at, updated_at
+		FROM subnet_registry WHERE id = $1
+	`
+	s := &models.SubnetRegistry{}
+	err := d.db.QueryRowContext(ctx, query, id).Scan(
+		&s.ID, &s.SubnetName, &s.VPCName, &s.Region, &s.AZ,
+		&s.AZSubnetID, &s.CIDR, &s.FirewallZone, &s.Status,
+		&s.CreatedAt, &s.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 func (d *TopVPCDAO) FindZoneByIP(ctx context.Context, ipStr string) (*models.ZoneInfo, error) {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
@@ -205,6 +223,65 @@ func (d *TopVPCDAO) FindZoneByIP(ctx context.Context, ipStr string) (*models.Zon
 		return nil, err
 	}
 	return &info, nil
+}
+
+// GetVPCByID 根据 id 查询 VPC 记录
+func (d *TopVPCDAO) GetVPCByID(ctx context.Context, id string) (*models.VPCRegistry, error) {
+	query := `
+		SELECT id, vpc_name, region, vrf_name, vlan_id, firewall_zone,
+		       status, saga_tx_id, az_details, created_at, updated_at
+		FROM vpc_registry WHERE id = $1
+	`
+	vpc := &models.VPCRegistry{}
+	var azDetailsJSON []byte
+	err := d.db.QueryRowContext(ctx, query, id).Scan(
+		&vpc.ID, &vpc.VPCName, &vpc.Region,
+		&vpc.VRFName, &vpc.VLANId, &vpc.FirewallZone, &vpc.Status,
+		&vpc.SagaTxID, &azDetailsJSON, &vpc.CreatedAt, &vpc.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(azDetailsJSON) > 0 {
+		json.Unmarshal(azDetailsJSON, &vpc.AZDetails)
+	}
+	if vpc.AZDetails == nil {
+		vpc.AZDetails = make(map[string]models.AZDetail)
+	}
+	return vpc, nil
+}
+
+// ListSubnetsByVPCID 查询某 VPC 下的所有子网
+func (d *TopVPCDAO) ListSubnetsByVPCID(ctx context.Context, vpcID string) ([]*models.SubnetRegistry, error) {
+	// First find the VPC name from ID
+	vpc, err := d.GetVPCByID(ctx, vpcID)
+	if err != nil {
+		return nil, err
+	}
+	query := `
+		SELECT id, subnet_name, vpc_name, region, az, az_subnet_id, cidr, firewall_zone, status, created_at, updated_at
+		FROM subnet_registry WHERE vpc_name = $1 AND status != 'deleted'
+		ORDER BY created_at DESC
+	`
+	rows, err := d.db.QueryContext(ctx, query, vpc.VPCName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var subnets []*models.SubnetRegistry
+	for rows.Next() {
+		s := &models.SubnetRegistry{}
+		if err := rows.Scan(
+			&s.ID, &s.SubnetName, &s.VPCName, &s.Region, &s.AZ,
+			&s.AZSubnetID, &s.CIDR, &s.FirewallZone, &s.Status,
+			&s.CreatedAt, &s.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		subnets = append(subnets, s)
+	}
+	return subnets, rows.Err()
 }
 
 func (d *TopVPCDAO) ListAllVPCs(ctx context.Context) ([]*models.VPCRegistry, error) {

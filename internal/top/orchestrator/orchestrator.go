@@ -12,23 +12,25 @@ import (
 
 	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
+	pccndao "workflow_qoder/internal/top/pccn/dao"
 	"workflow_qoder/internal/top/registry"
 	topdao "workflow_qoder/internal/top/vpc/dao"
 
 	"github.com/google/uuid"
-	"github.com/paic/nsp-common/pkg/logger"
-	"github.com/paic/nsp-common/pkg/saga"
-	"github.com/paic/nsp-common/pkg/trace"
+	"github.com/jinleili-zz/nsp-platform/logger"
+	"github.com/jinleili-zz/nsp-platform/saga"
+	"github.com/jinleili-zz/nsp-platform/trace"
 )
 
 type Orchestrator struct {
-	ctx        context.Context     // 长生命周期 context，用于后台 goroutine
+	ctx        context.Context // 长生命周期 context，用于后台 goroutine
 	registry   *registry.Registry
-	azClient   *client.AZNSPClient // 保留，用于健康检查
+	azClient   *client.AZNSPClient // 保留，用于健康检查和状态查询
 	topDAO     *topdao.TopVPCDAO
-	sagaEngine *saga.Engine        // 新增
-	tracedHTTP *trace.TracedClient // 新增
-	wg         sync.WaitGroup      // 用于跟踪后台 goroutine 生命周期
+	pccnDAO    *pccndao.TopPCCNDAO // PCCN DAO
+	sagaEngine *saga.Engine
+	tracedHTTP *trace.TracedClient
+	wg         sync.WaitGroup
 }
 
 func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sql.DB, sagaEngine *saga.Engine, tracedHTTP *trace.TracedClient) *Orchestrator {
@@ -36,7 +38,7 @@ func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sq
 	if topDB != nil {
 		dao = topdao.NewTopVPCDAO(topDB)
 	}
-	
+
 	// Create AZ client with trace support
 	var azClient *client.AZNSPClient
 	if tracedHTTP != nil {
@@ -44,16 +46,27 @@ func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sq
 	} else {
 		azClient = client.NewAZNSPClient()
 	}
-	
+
+	// Initialize PCCN DAO
+	var pccnDAO *pccndao.TopPCCNDAO
+	if topDB != nil {
+		pccnDAO = pccndao.NewTopPCCNDAO(topDB)
+	}
+
 	return &Orchestrator{
 		ctx:        ctx,
 		registry:   registry,
 		azClient:   azClient,
 		topDAO:     dao,
+		pccnDAO:    pccnDAO,
 		sagaEngine: sagaEngine,
 		tracedHTTP: tracedHTTP,
 	}
 }
+
+// =====================================================
+// VPC Methods
+// =====================================================
 
 // CreateRegionVPC 创建Region级VPC（使用SAGA模式实现分布式事务）
 func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCRequest) (*models.VPCResponse, error) {
@@ -483,6 +496,30 @@ func (o *Orchestrator) computeOverallStatus(azDetails map[string]models.AZDetail
 	return "failed"
 }
 
+// GetVPCByID 从 Top 层数据库根据 ID 查询单个 VPC 记录
+func (o *Orchestrator) GetVPCByID(ctx context.Context, id string) (*models.VPCRegistry, error) {
+	if o.topDAO == nil {
+		return nil, fmt.Errorf("topDAO is nil")
+	}
+	return o.topDAO.GetVPCByID(ctx, id)
+}
+
+// ListSubnetsByVPCID 从 Top 层数据库查询某 VPC 下的所有子网
+func (o *Orchestrator) ListSubnetsByVPCID(ctx context.Context, vpcID string) ([]*models.SubnetRegistry, error) {
+	if o.topDAO == nil {
+		return nil, fmt.Errorf("topDAO is nil")
+	}
+	return o.topDAO.ListSubnetsByVPCID(ctx, vpcID)
+}
+
+// GetSubnetByID 从 Top 层数据库根据 ID 查询子网
+func (o *Orchestrator) GetSubnetByID(ctx context.Context, id string) (*models.SubnetRegistry, error) {
+	if o.topDAO == nil {
+		return nil, fmt.Errorf("topDAO is nil")
+	}
+	return o.topDAO.GetSubnetByID(ctx, id)
+}
+
 // GetVPCByName 从 Top 层数据库查询单个 VPC 记录
 func (o *Orchestrator) GetVPCByName(ctx context.Context, vpcName string) (*models.VPCRegistry, error) {
 	if o.topDAO == nil {
@@ -515,4 +552,516 @@ func (o *Orchestrator) HasTopDAO() bool {
 // Shutdown 优雅关闭，等待所有后台 goroutine 完成
 func (o *Orchestrator) Shutdown() {
 	o.wg.Wait()
+}
+
+// =====================================================
+// PCCN Methods (Private Cloud Connection Network)
+// =====================================================
+
+// CreatePCCN creates a PCCN connection between two VPCs (supports cross-Region)
+// 设计参考 docs/pccn_design.md
+// 实现参考 VPC 重构方案：Saga Sync + 业务层 Poll
+func (o *Orchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest) (*models.PCCNResponse, error) {
+	if o.pccnDAO == nil {
+		return &models.PCCNResponse{Success: false, Message: "PCCN DAO not initialized"}, nil
+	}
+	if o.topDAO == nil {
+		return &models.PCCNResponse{Success: false, Message: "Top DAO not initialized"}, nil
+	}
+
+	logger.InfoContext(ctx, "开始创建PCCN连接",
+		"pccn_name", req.PCCNName,
+		"vpc1", fmt.Sprintf("%s/%s", req.VPC1.Region, req.VPC1.VPCName),
+		"vpc2", fmt.Sprintf("%s/%s", req.VPC2.Region, req.VPC2.VPCName),
+	)
+
+	// 1. 预检查：验证两个VPC存在且状态正常
+	vpc1, err := o.topDAO.GetVPCByName(ctx, req.VPC1.VPCName)
+	if err != nil {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("VPC1不存在: %v", err)}, nil
+	}
+	if vpc1.Region != req.VPC1.Region {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("VPC1 Region不匹配: 请求=%s, 实际=%s", req.VPC1.Region, vpc1.Region)}, nil
+	}
+
+	vpc2, err := o.topDAO.GetVPCByName(ctx, req.VPC2.VPCName)
+	if err != nil {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("VPC2不存在: %v", err)}, nil
+	}
+	if vpc2.Region != req.VPC2.Region {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("VPC2 Region不匹配: 请求=%s, 实际=%s", req.VPC2.Region, vpc2.Region)}, nil
+	}
+
+	// 2. 获取两个VPC涉及的AZ（可能跨Region），对相同AZ去重
+	vpc1AZs := o.getAZsFromVPCDetails(ctx, vpc1)
+	vpc2AZs := o.getAZsFromVPCDetails(ctx, vpc2)
+
+	// 去重：vpc1 和 vpc2 可能共享同一批 AZ（同 Region），避免对同一 AZ 提交两次
+	allAZsSeen := make(map[string]bool)
+	allAZs := make([]*models.AZ, 0, len(vpc1AZs)+len(vpc2AZs))
+	for _, az := range vpc1AZs {
+		if !allAZsSeen[az.ID] {
+			allAZsSeen[az.ID] = true
+			allAZs = append(allAZs, az)
+		}
+	}
+	for _, az := range vpc2AZs {
+		if !allAZsSeen[az.ID] {
+			allAZsSeen[az.ID] = true
+			allAZs = append(allAZs, az)
+		}
+	}
+
+	// 3. 健康检查所有AZ（跨Region）
+	for _, az := range allAZs {
+		if err := o.azClient.HealthCheck(ctx, az.NSPAddr); err != nil {
+			return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("AZ %s 不健康", az.ID)}, nil
+		}
+	}
+
+	// 4. 生成统一的PCCN ID
+	pccnID := uuid.New().String()
+
+	// 5. 构建 Saga 事务（Sync Step：POST 返回 200 即为成功）
+	// 参考 VPC 重构方案：Poll 在 Saga 之外，由业务层直接轮询
+	builder := saga.NewSaga(fmt.Sprintf("pccn-create-%s", req.PCCNName)).
+		WithPayload(map[string]any{
+			"pccn_name":   req.PCCNName,
+			"vpc1_name":   req.VPC1.VPCName,
+			"vpc1_region": req.VPC1.Region,
+			"vpc2_name":   req.VPC2.VPCName,
+			"vpc2_region": req.VPC2.Region,
+		}).
+		WithTimeout(60) // 1 分钟超时，Sync 步骤只等 API 调用
+
+	// 为每个去重后的AZ添加 Sync Step（包含 vpc1 和 vpc2 信息，AZ层自行判断角色）
+	for _, az := range allAZs {
+		azReq := &models.PCCNRequest{
+			PCCNID:   pccnID,
+			PCCNName: req.PCCNName,
+			VPC1:     req.VPC1,
+			VPC2:     req.VPC2,
+		}
+		payloadBytes, _ := json.Marshal(azReq)
+		var payloadMap map[string]any
+		json.Unmarshal(payloadBytes, &payloadMap)
+
+		builder.AddStep(saga.Step{
+			Name:             fmt.Sprintf("提交PCCN创建-%s", az.ID),
+			Type:             saga.StepTypeSync,
+			ActionMethod:     "POST",
+			ActionURL:        fmt.Sprintf("%s/api/v1/pccn", az.NSPAddr),
+			ActionPayload:    payloadMap,
+			CompensateMethod: "DELETE",
+			CompensateURL:    fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, req.PCCNName),
+		})
+	}
+
+	def, err := builder.Build()
+	if err != nil {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("构建Saga定义失败: %v", err)}, nil
+	}
+
+	// 6. 提交Saga事务
+	txID, err := o.sagaEngine.Submit(ctx, def)
+	if err != nil {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("提交Saga事务失败: %v", err)}, nil
+	}
+
+	logger.InfoContext(ctx, "Saga事务已提交", "transaction_id", txID, "pccn_name", req.PCCNName)
+
+	// 7. 预注册PCCN（包含跨Region信息）
+	vpcDetails := make(map[string]models.VPCDetail)
+	vpc1Key := fmt.Sprintf("%s/%s", req.VPC1.Region, req.VPC1.VPCName)
+	vpc2Key := fmt.Sprintf("%s/%s", req.VPC2.Region, req.VPC2.VPCName)
+
+	vpc1AZIDs := make([]string, len(vpc1AZs))
+	for i, az := range vpc1AZs {
+		vpc1AZIDs[i] = az.ID
+	}
+	vpc2AZIDs := make([]string, len(vpc2AZs))
+	for i, az := range vpc2AZs {
+		vpc2AZIDs[i] = az.ID
+	}
+
+	vpcDetails[vpc1Key] = models.VPCDetail{
+		Region: req.VPC1.Region,
+		AZs:    vpc1AZIDs,
+		Status: "creating",
+	}
+	vpcDetails[vpc2Key] = models.VPCDetail{
+		Region: req.VPC2.Region,
+		AZs:    vpc2AZIDs,
+		Status: "creating",
+	}
+
+	pccnReg := &models.PCCNRegistry{
+		ID:         pccnID,
+		PCCNName:   req.PCCNName,
+		VPC1Name:   req.VPC1.VPCName,
+		VPC1Region: req.VPC1.Region,
+		VPC2Name:   req.VPC2.VPCName,
+		VPC2Region: req.VPC2.Region,
+		Status:     "creating",
+		TxID:       txID,
+		VPCDetails: vpcDetails,
+	}
+	if err := o.pccnDAO.RegisterPCCN(ctx, pccnReg); err != nil {
+		logger.InfoContext(ctx, "预注册PCCN到Top层失败", "error", err)
+	}
+
+	// 8. 启动后台goroutine监听Saga状态并 Poll AZ Worker 状态
+	o.wg.Add(1)
+	go func() {
+		defer o.wg.Done()
+		o.watchPCCNSagaAndPollAZs(txID, req.PCCNName, allAZs, req.VPC1, req.VPC2)
+	}()
+
+	return &models.PCCNResponse{
+		Success: true,
+		Message: fmt.Sprintf("PCCN创建任务已提交，事务ID: %s", txID),
+		PCCNID:  pccnID,
+		TxID:    txID,
+	}, nil
+}
+
+// getAZsFromVPCDetails 从VPCRegistry的AZDetails中提取AZ列表
+func (o *Orchestrator) getAZsFromVPCDetails(ctx context.Context, vpc *models.VPCRegistry) []*models.AZ {
+	var azs []*models.AZ
+	for azID := range vpc.AZDetails {
+		az, err := o.registry.GetAZ(ctx, vpc.Region, azID)
+		if err != nil {
+			logger.InfoContext(ctx, "获取AZ信息失败", "az_id", azID, "error", err)
+			continue
+		}
+		azs = append(azs, az)
+	}
+	return azs
+}
+
+// watchPCCNSagaAndPollAZs 分两阶段监听 PCCN 创建：
+//
+//	阶段 1: 等待 Saga 事务完成（API 调用层）
+//	阶段 2: 直接 Poll 各 AZ 接口收集 Worker 最终状态
+//
+// 参考: watchSagaAndPollAZs (VPC)
+func (o *Orchestrator) watchPCCNSagaAndPollAZs(txID, pccnName string, allAZs []*models.AZ, vpc1, vpc2 models.VPCRef) {
+	if o.pccnDAO == nil || o.sagaEngine == nil {
+		return
+	}
+
+	// ========== 阶段 1: 等待 Saga 完成 ==========
+	sagaStatus := o.waitForPCCNSagaCompletion(txID, pccnName)
+	if sagaStatus != saga.TxStatusSucceeded {
+		// Saga 失败 = API 调用失败，引擎已自动补偿
+		o.markPCCNFromSagaFailure(txID, pccnName)
+		return
+	}
+
+	// ========== 阶段 2: Saga 成功后，Poll 各 AZ 的 Worker 状态 ==========
+	o.pollPCCNAZWorkerStatuses(pccnName, allAZs, vpc1, vpc2)
+}
+
+// waitForPCCNSagaCompletion 等待Saga事务完成
+func (o *Orchestrator) waitForPCCNSagaCompletion(txID, pccnName string) saga.TxStatus {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	timeout := time.After(2 * time.Minute) // Sync 步骤不需要很长
+
+	for {
+		select {
+		case <-o.ctx.Done():
+			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			o.pccnDAO.UpdatePCCNStatus(dbCtx, pccnName, "interrupted", nil)
+			cancel()
+			return saga.TxStatusFailed
+		case <-timeout:
+			logger.Info("PCCN Saga等待超时", "tx_id", txID, "pccn_name", pccnName)
+			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			o.pccnDAO.UpdatePCCNStatus(dbCtx, pccnName, "failed", nil)
+			cancel()
+			return saga.TxStatusFailed
+		case <-ticker.C:
+			status, err := o.sagaEngine.Query(o.ctx, txID)
+			if err != nil || status == nil {
+				continue
+			}
+			switch saga.TxStatus(status.Status) {
+			case saga.TxStatusSucceeded:
+				return saga.TxStatusSucceeded
+			case saga.TxStatusFailed:
+				return saga.TxStatusFailed
+			}
+			// pending / running / compensating → 继续等
+		}
+	}
+}
+
+// markPCCNFromSagaFailure Saga失败时更新状态
+func (o *Orchestrator) markPCCNFromSagaFailure(txID, pccnName string) {
+	dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	o.pccnDAO.UpdatePCCNStatus(dbCtx, pccnName, "failed", nil)
+	logger.Info("PCCN Saga失败，状态已更新", "tx_id", txID, "pccn_name", pccnName)
+}
+
+// pollPCCNAZWorkerStatuses Saga 成功后，直接 Poll 各 AZ 接口收集 Worker 最终状态
+func (o *Orchestrator) pollPCCNAZWorkerStatuses(pccnName string, allAZs []*models.AZ, vpc1, vpc2 models.VPCRef) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	timeout := time.After(15 * time.Minute) // Worker 执行可能较慢
+
+	// 跟踪每个 AZ 是否已到达终态
+	settled := make(map[string]bool)
+
+	for {
+		select {
+		case <-o.ctx.Done():
+			// 服务关闭时标记状态
+			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			o.pccnDAO.UpdatePCCNStatus(dbCtx, pccnName, "interrupted", nil)
+			cancel()
+			return
+		case <-timeout:
+			logger.Info("PCCN Worker状态轮询超时", "pccn_name", pccnName)
+			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			o.pccnDAO.UpdatePCCNStatus(dbCtx, pccnName, "failed", nil)
+			cancel()
+			return
+		case <-ticker.C:
+			allSettled := true
+			hasFailed := false
+
+			for _, az := range allAZs {
+				if settled[az.ID] {
+					continue
+				}
+
+				pccnStatus, err := o.azClient.GetPCCNStatus(o.ctx, az.NSPAddr, pccnName)
+				if err != nil {
+					logger.Info("查询AZ PCCN Worker状态失败", "az", az.ID, "error", err)
+					allSettled = false
+					continue
+				}
+
+				switch pccnStatus.Status {
+				case models.ResourceStatusRunning:
+					settled[az.ID] = true
+				case models.ResourceStatusFailed:
+					settled[az.ID] = true
+					hasFailed = true
+				default:
+					// creating / pending → 还在执行，继续等
+					allSettled = false
+				}
+			}
+
+			if allSettled {
+				// 所有 AZ 都已到达终态
+				dbCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+
+				if hasFailed {
+					o.pccnDAO.UpdatePCCNStatus(dbCtx, pccnName, "partial_running", nil)
+					logger.Info("PCCN 部分成功", "pccn_name", pccnName)
+				} else {
+					// 全部成功，更新 VPC 详情
+					vpcDetails := make(map[string]models.VPCDetail)
+					vpc1Key := fmt.Sprintf("%s/%s", vpc1.Region, vpc1.VPCName)
+					vpc2Key := fmt.Sprintf("%s/%s", vpc2.Region, vpc2.VPCName)
+
+					vpcDetails[vpc1Key] = models.VPCDetail{
+						Region: vpc1.Region,
+						Status: "running",
+					}
+					vpcDetails[vpc2Key] = models.VPCDetail{
+						Region: vpc2.Region,
+						Status: "running",
+					}
+
+					o.pccnDAO.UpdatePCCNStatus(dbCtx, pccnName, "running", vpcDetails)
+					logger.Info("PCCN 创建成功", "pccn_name", pccnName)
+				}
+				return
+			}
+		}
+	}
+}
+
+// GetPCCNStatus 查询PCCN状态
+func (o *Orchestrator) GetPCCNStatus(ctx context.Context, pccnName string) (*models.PCCNStatusQueryResponse, error) {
+	if o.pccnDAO == nil {
+		return nil, fmt.Errorf("PCCN DAO not initialized")
+	}
+
+	pccn, err := o.pccnDAO.GetPCCNByName(ctx, pccnName)
+	if err != nil {
+		return nil, fmt.Errorf("PCCN %s not found", pccnName)
+	}
+
+	return &models.PCCNStatusQueryResponse{
+		PCCNName:      pccn.PCCNName,
+		OverallStatus: pccn.Status,
+		VPCDetails:    pccn.VPCDetails,
+		Source:        "database",
+	}, nil
+}
+
+// DeletePCCN 删除PCCN连接
+func (o *Orchestrator) DeletePCCN(ctx context.Context, pccnName string) (*models.PCCNResponse, error) {
+	if o.pccnDAO == nil {
+		return &models.PCCNResponse{Success: false, Message: "PCCN DAO not initialized"}, nil
+	}
+
+	// 1. 查询PCCN信息
+	pccn, err := o.pccnDAO.GetPCCNByName(ctx, pccnName)
+	if err != nil {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("PCCN不存在: %v", err)}, nil
+	}
+
+	if pccn.Status != "running" && pccn.Status != "partial_running" && pccn.Status != "failed" {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("PCCN状态不允许删除: %s", pccn.Status)}, nil
+	}
+
+	// 2. 获取涉及的AZ（跨Region），去重
+	vpc1AZs := o.getAZsFromRegionAndVPC(ctx, pccn.VPC1Region, pccn.VPC1Name)
+	vpc2AZs := o.getAZsFromRegionAndVPC(ctx, pccn.VPC2Region, pccn.VPC2Name)
+	seenAZs := make(map[string]bool)
+	allAZs := make([]*models.AZ, 0, len(vpc1AZs)+len(vpc2AZs))
+	for _, az := range vpc1AZs {
+		if !seenAZs[az.ID] {
+			seenAZs[az.ID] = true
+			allAZs = append(allAZs, az)
+		}
+	}
+	for _, az := range vpc2AZs {
+		if !seenAZs[az.ID] {
+			seenAZs[az.ID] = true
+			allAZs = append(allAZs, az)
+		}
+	}
+
+	// 3. 构建Saga事务
+	builder := saga.NewSaga(fmt.Sprintf("pccn-delete-%s", pccnName)).
+		WithPayload(map[string]any{
+			"pccn_name":   pccnName,
+			"vpc1_region": pccn.VPC1Region,
+			"vpc2_region": pccn.VPC2Region,
+		}).
+		WithTimeout(120)
+
+	// 为每个AZ添加删除Step（删除操作不需要补偿，因为本身就是回滚操作）
+	for _, az := range allAZs {
+		builder.AddStep(saga.Step{
+			Name:             fmt.Sprintf("删除PCCN-%s", az.ID),
+			Type:             saga.StepTypeSync,
+			ActionMethod:     "DELETE",
+			ActionURL:        fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, pccnName),
+			CompensateMethod: "DELETE", // 补偿操作也是删除（幂等）
+			CompensateURL:    fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, pccnName),
+		})
+	}
+
+	def, err := builder.Build()
+	if err != nil {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("构建Saga定义失败: %v", err)}, nil
+	}
+
+	// 4. 提交Saga事务
+	txID, err := o.sagaEngine.Submit(ctx, def)
+	if err != nil {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("提交Saga事务失败: %v", err)}, nil
+	}
+
+	// 5. 更新状态
+	o.pccnDAO.UpdatePCCNStatus(ctx, pccnName, "deleting", nil)
+
+	// 6. 启动后台监听
+	o.wg.Add(1)
+	go func() {
+		defer o.wg.Done()
+		o.watchPCCNDeletion(txID, pccnName)
+	}()
+
+	return &models.PCCNResponse{
+		Success: true,
+		Message: fmt.Sprintf("PCCN删除任务已提交，事务ID: %s", txID),
+		PCCNID:  pccn.ID,
+		TxID:    txID,
+	}, nil
+}
+
+// getAZsFromRegionAndVPC 从指定Region的VPC获取AZ列表
+func (o *Orchestrator) getAZsFromRegionAndVPC(ctx context.Context, region, vpcName string) []*models.AZ {
+	vpc, err := o.topDAO.GetVPCByName(ctx, vpcName)
+	if err != nil {
+		return nil
+	}
+
+	var azs []*models.AZ
+	for azID := range vpc.AZDetails {
+		az, err := o.registry.GetAZ(ctx, region, azID)
+		if err != nil {
+			continue
+		}
+		azs = append(azs, az)
+	}
+	return azs
+}
+
+// watchPCCNDeletion 监听PCCN删除完成
+func (o *Orchestrator) watchPCCNDeletion(txID, pccnName string) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	timeout := time.After(2 * time.Minute)
+
+	for {
+		select {
+		case <-o.ctx.Done():
+			return
+		case <-timeout:
+			logger.Info("PCCN删除等待超时", "tx_id", txID)
+			return
+		case <-ticker.C:
+			status, err := o.sagaEngine.Query(o.ctx, txID)
+			if err != nil || status == nil {
+				continue
+			}
+			switch saga.TxStatus(status.Status) {
+			case saga.TxStatusSucceeded:
+				dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				o.pccnDAO.DeletePCCN(dbCtx, pccnName)
+				cancel()
+				logger.Info("PCCN删除成功", "pccn_name", pccnName)
+				return
+			case saga.TxStatusFailed:
+				dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				o.pccnDAO.UpdatePCCNStatus(dbCtx, pccnName, "failed", nil)
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// HasPCCNDAO 检查PCCN DAO是否可用
+func (o *Orchestrator) HasPCCNDAO() bool {
+	return o.pccnDAO != nil
+}
+
+// ListPCCNs 列出所有PCCN
+func (o *Orchestrator) ListPCCNs(ctx context.Context) ([]*models.PCCNRegistry, error) {
+	if o.pccnDAO == nil {
+		return nil, fmt.Errorf("PCCN DAO not initialized")
+	}
+	return o.pccnDAO.ListAllPCCNs(ctx)
+}
+
+// GetPCCNsByVPCName 获取与指定VPC相关的所有PCCN连接
+func (o *Orchestrator) GetPCCNsByVPC(ctx context.Context, vpcName string) ([]*models.PCCNRegistry, error) {
+	if o.pccnDAO == nil {
+		return nil, fmt.Errorf("PCCN DAO not initialized")
+	}
+	return o.pccnDAO.GetPCCNsByVPCName(ctx, vpcName)
 }

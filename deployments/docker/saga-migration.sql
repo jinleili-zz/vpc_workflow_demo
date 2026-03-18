@@ -138,3 +138,16 @@ COMMENT ON COLUMN saga_poll_tasks.locked_by IS '锁定者实例 ID';
 
 CREATE INDEX IF NOT EXISTS idx_poll_tasks_next ON saga_poll_tasks(next_poll_at)
     WHERE locked_until IS NULL OR locked_until < NOW();
+
+-- ============================================================================
+-- 多副本并发安全：为 saga_transactions 添加分布式锁字段
+-- ============================================================================
+ALTER TABLE saga_transactions
+    ADD COLUMN IF NOT EXISTS locked_by    VARCHAR(128),
+    ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+
+COMMENT ON COLUMN saga_transactions.locked_by IS '持有锁的实例 ID (hostname-pid)';
+COMMENT ON COLUMN saga_transactions.locked_until IS '锁过期时间，超过此时间其他副本可抢占';
+
+CREATE INDEX IF NOT EXISTS idx_saga_tx_lock ON saga_transactions(locked_until)
+    WHERE status IN ('pending', 'running', 'compensating');

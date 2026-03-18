@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/paic/nsp-common/pkg/trace"
+	"github.com/jinleili-zz/nsp-platform/trace"
 	"workflow_qoder/internal/models"
 )
 
@@ -233,4 +233,125 @@ func (c *AZNSPClient) GetVPCStatus(ctx context.Context, azAddr string, vpcName s
 	}
 
 	return &vpcStatus, nil
+}
+
+// =====================================================
+// PCCN Methods
+// =====================================================
+
+// CreatePCCN creates a PCCN connection in the specified AZ
+func (c *AZNSPClient) CreatePCCN(ctx context.Context, azAddr string, req *models.PCCNRequest) (*models.PCCNResponse, error) {
+	url := fmt.Sprintf("%s/api/v1/pccn", azAddr)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("序列化请求失败: %v", err)
+	}
+
+	var resp *http.Response
+	if c.tracedClient != nil {
+		resp, err = c.tracedClient.Post(ctx, url, "application/json", bytes.NewBuffer(body))
+	} else {
+		var httpReq *http.Request
+		httpReq, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+		if err != nil {
+			return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		resp, err = c.httpClient.Do(httpReq)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("发送请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("请求失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
+	}
+
+	var pccnResp models.PCCNResponse
+	err = json.Unmarshal(respBody, &pccnResp)
+	if err != nil {
+		return nil, fmt.Errorf("解析响应失败: %v", err)
+	}
+
+	return &pccnResp, nil
+}
+
+// GetPCCNStatus queries the PCCN status in the specified AZ
+func (c *AZNSPClient) GetPCCNStatus(ctx context.Context, azAddr string, pccnName string) (*models.PCCNStatusResponse, error) {
+	url := fmt.Sprintf("%s/api/v1/pccn/%s/status", azAddr, pccnName)
+
+	var resp *http.Response
+	var err error
+	if c.tracedClient != nil {
+		resp, err = c.tracedClient.Get(ctx, url)
+	} else {
+		var httpReq *http.Request
+		httpReq, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
+		}
+		resp, err = c.httpClient.Do(httpReq)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("发送请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("PCCN %s not found in AZ", pccnName)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("查询失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
+	}
+
+	var pccnStatus models.PCCNStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pccnStatus); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %v", err)
+	}
+
+	return &pccnStatus, nil
+}
+
+// DeletePCCN deletes a PCCN connection in the specified AZ
+func (c *AZNSPClient) DeletePCCN(ctx context.Context, azAddr string, pccnName string) error {
+	url := fmt.Sprintf("%s/api/v1/pccn/%s", azAddr, pccnName)
+
+	var resp *http.Response
+	var err error
+	if c.tracedClient != nil {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+		if reqErr != nil {
+			return fmt.Errorf("创建HTTP请求失败: %v", reqErr)
+		}
+		resp, err = c.tracedClient.Do(httpReq)
+	} else {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+		if reqErr != nil {
+			return fmt.Errorf("创建HTTP请求失败: %v", reqErr)
+		}
+		resp, err = c.httpClient.Do(httpReq)
+	}
+
+	if err != nil {
+		return fmt.Errorf("发送请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("删除PCCN失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
 }

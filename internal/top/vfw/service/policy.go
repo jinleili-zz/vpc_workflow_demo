@@ -14,7 +14,7 @@ import (
 	"workflow_qoder/internal/models"
 
 	"github.com/google/uuid"
-	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/jinleili-zz/nsp-platform/logger"
 )
 
 type PolicyService struct {
