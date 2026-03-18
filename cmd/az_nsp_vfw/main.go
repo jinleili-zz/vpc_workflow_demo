@@ -18,10 +18,10 @@ import (
 
 	"github.com/hibiken/asynq"
 	_ "github.com/lib/pq"
-	"github.com/paic/nsp-common/pkg/logger"
-	"github.com/paic/nsp-common/pkg/taskqueue"
-	"github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
-	"github.com/paic/nsp-common/pkg/trace"
+	"github.com/jinleili-zz/nsp-platform/logger"
+	"github.com/jinleili-zz/nsp-platform/taskqueue"
+	"github.com/jinleili-zz/nsp-platform/taskqueue/asynqbroker"
+	"github.com/jinleili-zz/nsp-platform/trace"
 )
 
 func getEnvOrDefault(key, defaultValue string) string {

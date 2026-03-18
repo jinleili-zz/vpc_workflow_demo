@@ -6,7 +6,6 @@ WORKDIR /build
 ENV GOPROXY=https://goproxy.cn,direct
 
 # 复制 nsp-common 模块
-COPY nsp_platform/nsp-common /nsp_platform/nsp-common
 
 # 复制主项目
 COPY vpc_workflow_demo/go.mod vpc_workflow_demo/go.sum ./

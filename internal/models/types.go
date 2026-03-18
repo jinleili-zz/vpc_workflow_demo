@@ -73,3 +73,37 @@ type HeartbeatRequest struct {
 	Region string `json:"region" binding:"required"`
 	AZ     string `json:"az" binding:"required"`
 }
+
+// =====================================================
+// PCCN Types (Private Cloud Connection Network)
+// =====================================================
+
+// VPCRef VPC引用（支持跨Region）
+type VPCRef struct {
+	VPCName string `json:"vpc_name" binding:"required"` // VPC名称
+	Region  string `json:"region" binding:"required"`   // VPC所属Region
+}
+
+// PCCNRequest PCCN创建请求 (Top层)
+type PCCNRequest struct {
+	PCCNID   string `json:"pccn_id,omitempty"`             // Top层生成的PCCN ID，AZ层使用
+	PCCNName string `json:"pccn_name" binding:"required"`  // PCCN名称
+	VPC1     VPCRef `json:"vpc1" binding:"required"`       // VPC1引用（含Region）
+	VPC2     VPCRef `json:"vpc2" binding:"required"`       // VPC2引用（含Region）
+}
+
+// PCCNResponse PCCN创建响应
+type PCCNResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	PCCNID  string `json:"pccn_id,omitempty"`  // PCCN唯一标识
+	TxID    string `json:"tx_id,omitempty"`    // Saga事务ID（Top层）或WorkflowID（AZ层）
+}
+
+// PCCNStatusQueryResponse PCCN状态查询响应 (Top层)
+type PCCNStatusQueryResponse struct {
+	PCCNName      string               `json:"pccn_name"`
+	OverallStatus string               `json:"overall_status"`
+	VPCDetails    map[string]VPCDetail `json:"vpc_details"`
+	Source        string               `json:"source"` // "database" or "fallback"
+}

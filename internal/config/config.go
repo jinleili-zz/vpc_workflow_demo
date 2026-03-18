@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/paic/nsp-common/pkg/config"
+	"github.com/jinleili-zz/nsp-platform/config"
 )
 
 // NSPConfig NSP服务配置

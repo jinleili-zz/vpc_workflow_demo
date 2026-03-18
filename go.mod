@@ -6,13 +6,10 @@ require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/google/uuid v1.6.0
 	github.com/hibiken/asynq v0.26.0
+	github.com/jinleili-zz/nsp-platform v0.2.5
 	github.com/lib/pq v1.10.9
-	github.com/paic/nsp-common v0.0.0
 	github.com/redis/go-redis/v9 v9.17.3
 )
-
-// Development: use local nsp-common module
-replace github.com/paic/nsp-common => ../nsp_platform/nsp-common
 
 require (
 	github.com/bytedance/sonic v1.11.6 // indirect
@@ -51,8 +48,8 @@ require (
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/arch v0.8.0 // indirect
-	golang.org/x/crypto v0.40.0 // indirect
-	golang.org/x/net v0.42.0 // indirect
+	golang.org/x/crypto v0.41.0 // indirect
+	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 	golang.org/x/time v0.14.0 // indirect

@@ -86,6 +86,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./init-postgres.sh:/docker-entrypoint-initdb.d/init-postgres.sh
       - ../../internal/db/migrations/001_init_postgresql.sql:/migrations/001_init_postgresql.sql
+      - ../../internal/db/migrations/004_create_pccn_tables.sql:/migrations/004_create_pccn_tables.sql
       - ./saga-migration.sql:/migrations/saga.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nsp_user -d nsp_top"]
