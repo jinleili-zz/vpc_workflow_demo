@@ -496,6 +496,30 @@ func (o *Orchestrator) computeOverallStatus(azDetails map[string]models.AZDetail
 	return "failed"
 }
 
+// GetVPCByID 从 Top 层数据库根据 ID 查询单个 VPC 记录
+func (o *Orchestrator) GetVPCByID(ctx context.Context, id string) (*models.VPCRegistry, error) {
+	if o.topDAO == nil {
+		return nil, fmt.Errorf("topDAO is nil")
+	}
+	return o.topDAO.GetVPCByID(ctx, id)
+}
+
+// ListSubnetsByVPCID 从 Top 层数据库查询某 VPC 下的所有子网
+func (o *Orchestrator) ListSubnetsByVPCID(ctx context.Context, vpcID string) ([]*models.SubnetRegistry, error) {
+	if o.topDAO == nil {
+		return nil, fmt.Errorf("topDAO is nil")
+	}
+	return o.topDAO.ListSubnetsByVPCID(ctx, vpcID)
+}
+
+// GetSubnetByID 从 Top 层数据库根据 ID 查询子网
+func (o *Orchestrator) GetSubnetByID(ctx context.Context, id string) (*models.SubnetRegistry, error) {
+	if o.topDAO == nil {
+		return nil, fmt.Errorf("topDAO is nil")
+	}
+	return o.topDAO.GetSubnetByID(ctx, id)
+}
+
 // GetVPCByName 从 Top 层数据库查询单个 VPC 记录
 func (o *Orchestrator) GetVPCByName(ctx context.Context, vpcName string) (*models.VPCRegistry, error) {
 	if o.topDAO == nil {
@@ -568,10 +592,25 @@ func (o *Orchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest) 
 		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("VPC2 Region不匹配: 请求=%s, 实际=%s", req.VPC2.Region, vpc2.Region)}, nil
 	}
 
-	// 2. 获取两个VPC涉及的AZ（可能跨Region）
+	// 2. 获取两个VPC涉及的AZ（可能跨Region），对相同AZ去重
 	vpc1AZs := o.getAZsFromVPCDetails(ctx, vpc1)
 	vpc2AZs := o.getAZsFromVPCDetails(ctx, vpc2)
-	allAZs := append(vpc1AZs, vpc2AZs...)
+
+	// 去重：vpc1 和 vpc2 可能共享同一批 AZ（同 Region），避免对同一 AZ 提交两次
+	allAZsSeen := make(map[string]bool)
+	allAZs := make([]*models.AZ, 0, len(vpc1AZs)+len(vpc2AZs))
+	for _, az := range vpc1AZs {
+		if !allAZsSeen[az.ID] {
+			allAZsSeen[az.ID] = true
+			allAZs = append(allAZs, az)
+		}
+	}
+	for _, az := range vpc2AZs {
+		if !allAZsSeen[az.ID] {
+			allAZsSeen[az.ID] = true
+			allAZs = append(allAZs, az)
+		}
+	}
 
 	// 3. 健康检查所有AZ（跨Region）
 	for _, az := range allAZs {
@@ -595,8 +634,8 @@ func (o *Orchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest) 
 		}).
 		WithTimeout(60) // 1 分钟超时，Sync 步骤只等 API 调用
 
-	// 为VPC1的每个AZ添加 Sync Step
-	for _, az := range vpc1AZs {
+	// 为每个去重后的AZ添加 Sync Step（包含 vpc1 和 vpc2 信息，AZ层自行判断角色）
+	for _, az := range allAZs {
 		azReq := &models.PCCNRequest{
 			PCCNID:   pccnID,
 			PCCNName: req.PCCNName,
@@ -608,30 +647,7 @@ func (o *Orchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest) 
 		json.Unmarshal(payloadBytes, &payloadMap)
 
 		builder.AddStep(saga.Step{
-			Name:             fmt.Sprintf("提交PCCN创建-VPC1-%s", az.ID),
-			Type:             saga.StepTypeSync,
-			ActionMethod:     "POST",
-			ActionURL:        fmt.Sprintf("%s/api/v1/pccn", az.NSPAddr),
-			ActionPayload:    payloadMap,
-			CompensateMethod: "DELETE",
-			CompensateURL:    fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, req.PCCNName),
-		})
-	}
-
-	// 为VPC2的每个AZ添加 Sync Step
-	for _, az := range vpc2AZs {
-		azReq := &models.PCCNRequest{
-			PCCNID:   pccnID,
-			PCCNName: req.PCCNName,
-			VPC1:     req.VPC1,
-			VPC2:     req.VPC2,
-		}
-		payloadBytes, _ := json.Marshal(azReq)
-		var payloadMap map[string]any
-		json.Unmarshal(payloadBytes, &payloadMap)
-
-		builder.AddStep(saga.Step{
-			Name:             fmt.Sprintf("提交PCCN创建-VPC2-%s", az.ID),
+			Name:             fmt.Sprintf("提交PCCN创建-%s", az.ID),
 			Type:             saga.StepTypeSync,
 			ActionMethod:     "POST",
 			ActionURL:        fmt.Sprintf("%s/api/v1/pccn", az.NSPAddr),
@@ -698,7 +714,7 @@ func (o *Orchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest) 
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
-		o.watchPCCNSagaAndPollAZs(txID, req.PCCNName, vpc1AZs, vpc2AZs, req.VPC1, req.VPC2)
+		o.watchPCCNSagaAndPollAZs(txID, req.PCCNName, allAZs, req.VPC1, req.VPC2)
 	}()
 
 	return &models.PCCNResponse{
@@ -729,12 +745,10 @@ func (o *Orchestrator) getAZsFromVPCDetails(ctx context.Context, vpc *models.VPC
 //	阶段 2: 直接 Poll 各 AZ 接口收集 Worker 最终状态
 //
 // 参考: watchSagaAndPollAZs (VPC)
-func (o *Orchestrator) watchPCCNSagaAndPollAZs(txID, pccnName string, vpc1AZs, vpc2AZs []*models.AZ, vpc1, vpc2 models.VPCRef) {
+func (o *Orchestrator) watchPCCNSagaAndPollAZs(txID, pccnName string, allAZs []*models.AZ, vpc1, vpc2 models.VPCRef) {
 	if o.pccnDAO == nil || o.sagaEngine == nil {
 		return
 	}
-
-	allAZs := append(vpc1AZs, vpc2AZs...)
 
 	// ========== 阶段 1: 等待 Saga 完成 ==========
 	sagaStatus := o.waitForPCCNSagaCompletion(txID, pccnName)
@@ -906,14 +920,27 @@ func (o *Orchestrator) DeletePCCN(ctx context.Context, pccnName string) (*models
 		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("PCCN不存在: %v", err)}, nil
 	}
 
-	if pccn.Status != "running" && pccn.Status != "partial_running" {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("PCCN状态不是running，无法删除: %s", pccn.Status)}, nil
+	if pccn.Status != "running" && pccn.Status != "partial_running" && pccn.Status != "failed" {
+		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("PCCN状态不允许删除: %s", pccn.Status)}, nil
 	}
 
-	// 2. 获取涉及的AZ（跨Region）
+	// 2. 获取涉及的AZ（跨Region），去重
 	vpc1AZs := o.getAZsFromRegionAndVPC(ctx, pccn.VPC1Region, pccn.VPC1Name)
 	vpc2AZs := o.getAZsFromRegionAndVPC(ctx, pccn.VPC2Region, pccn.VPC2Name)
-	allAZs := append(vpc1AZs, vpc2AZs...)
+	seenAZs := make(map[string]bool)
+	allAZs := make([]*models.AZ, 0, len(vpc1AZs)+len(vpc2AZs))
+	for _, az := range vpc1AZs {
+		if !seenAZs[az.ID] {
+			seenAZs[az.ID] = true
+			allAZs = append(allAZs, az)
+		}
+	}
+	for _, az := range vpc2AZs {
+		if !seenAZs[az.ID] {
+			seenAZs[az.ID] = true
+			allAZs = append(allAZs, az)
+		}
+	}
 
 	// 3. 构建Saga事务
 	builder := saga.NewSaga(fmt.Sprintf("pccn-delete-%s", pccnName)).
@@ -924,13 +951,15 @@ func (o *Orchestrator) DeletePCCN(ctx context.Context, pccnName string) (*models
 		}).
 		WithTimeout(120)
 
-	// 为每个AZ添加删除Step
+	// 为每个AZ添加删除Step（删除操作不需要补偿，因为本身就是回滚操作）
 	for _, az := range allAZs {
 		builder.AddStep(saga.Step{
-			Name:         fmt.Sprintf("删除PCCN-%s", az.ID),
-			Type:         saga.StepTypeSync,
-			ActionMethod: "DELETE",
-			ActionURL:    fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, pccnName),
+			Name:             fmt.Sprintf("删除PCCN-%s", az.ID),
+			Type:             saga.StepTypeSync,
+			ActionMethod:     "DELETE",
+			ActionURL:        fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, pccnName),
+			CompensateMethod: "DELETE", // 补偿操作也是删除（幂等）
+			CompensateURL:    fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, pccnName),
 		})
 	}
 

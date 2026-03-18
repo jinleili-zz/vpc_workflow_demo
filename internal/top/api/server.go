@@ -45,6 +45,11 @@ func (s *Server) SetupRoutes() {
 		api.GET("/vpcs", s.listVPCs)
 		api.GET("/vpc/:vpc_name/status", s.getVPCStatus)
 		api.DELETE("/vpc/:vpc_name", s.deleteVPC)
+		api.GET("/vpc/id/:vpc_id", s.getVPCByID)
+		api.DELETE("/vpc/id/:vpc_id", s.deleteVPCByID)
+		api.GET("/vpc/id/:vpc_id/subnets", s.listSubnetsByVPCID)
+		api.GET("/regions", s.listRegions)
+		api.GET("/regions/:region/azs", s.listRegionAZs)
 		api.GET("/azs", s.listAZs)
 		api.POST("/az", s.registerAZ)
 		api.POST("/az/heartbeat", s.heartbeat)
@@ -53,6 +58,8 @@ func (s *Server) SetupRoutes() {
 		api.POST("/subnet", s.createSubnet)
 		api.GET("/subnet/:subnet_name/status", s.getSubnetStatus)
 		api.DELETE("/subnet/:subnet_name", s.deleteSubnet)
+		api.GET("/subnet/id/:subnet_id", s.getSubnetByID)
+		api.DELETE("/subnet/id/:subnet_id", s.deleteSubnetByID)
 
 		// PCCN routes
 		api.POST("/pccn", s.createPCCN)
@@ -146,6 +153,40 @@ func (s *Server) listAZs(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
+		"azs":     azs,
+	})
+}
+
+func (s *Server) listRegions(c *gin.Context) {
+	ctx := c.Request.Context()
+	regions, err := s.registry.ListAllRegions(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("获取Region列表失败: %v", err),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"regions": regions,
+	})
+}
+
+func (s *Server) listRegionAZs(c *gin.Context) {
+	region := c.Param("region")
+	ctx := c.Request.Context()
+	azs, err := s.registry.GetRegionAZs(ctx, region)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("获取Region AZ列表失败: %v", err),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"region":  region,
 		"azs":     azs,
 	})
 }
@@ -290,6 +331,94 @@ func (s *Server) deleteVPC(c *gin.Context) {
 // Subnet Handlers
 // =====================================================
 
+func (s *Server) getVPCByID(c *gin.Context) {
+	vpcID := c.Param("vpc_id")
+	ctx := c.Request.Context()
+
+	if !s.orchestrator.HasTopDAO() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "数据库未配置"})
+		return
+	}
+
+	vpc, err := s.orchestrator.GetVPCByID(ctx, vpcID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"vpc":     vpc,
+	})
+}
+
+func (s *Server) deleteVPCByID(c *gin.Context) {
+	vpcID := c.Param("vpc_id")
+	ctx := c.Request.Context()
+
+	if !s.orchestrator.HasTopDAO() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "数据库未配置"})
+		return
+	}
+
+	vpc, err := s.orchestrator.GetVPCByID(ctx, vpcID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{})
+		return
+	}
+
+	// Delegate to the name-based delete handler logic
+	vpcName := vpc.VPCName
+	if s.orchestrator.HasPCCNDAO() {
+		pccns, err := s.orchestrator.GetPCCNsByVPC(ctx, vpcName)
+		if err == nil && len(pccns) > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("VPC存在 %d 个PCCN连接，请先删除PCCN连接", len(pccns)),
+			})
+			return
+		}
+	}
+
+	if vpc.FirewallZone != "" {
+		policyCount, err := s.orchestrator.CheckZonePolicies(ctx, vpc.FirewallZone)
+		if err == nil && policyCount > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("VPC关联的Zone %s 下存在 %d 条防火墙策略，无法删除", vpc.FirewallZone, policyCount),
+			})
+			return
+		}
+	}
+
+	if err := s.orchestrator.UpdateVPCStatus(ctx, vpcName, "deleted", nil); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": fmt.Sprintf("删除VPC失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "VPC已删除"})
+}
+
+func (s *Server) listSubnetsByVPCID(c *gin.Context) {
+	vpcID := c.Param("vpc_id")
+	ctx := c.Request.Context()
+
+	if !s.orchestrator.HasTopDAO() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "数据库未配置"})
+		return
+	}
+
+	subnets, err := s.orchestrator.ListSubnetsByVPCID(ctx, vpcID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"subnets": subnets,
+	})
+}
+
 func (s *Server) createSubnet(c *gin.Context) {
 	var req models.SubnetRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -388,6 +517,67 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 
 	// 转发删除请求到 AZ
 	req, _ := http.NewRequestWithContext(ctx, "DELETE", fmt.Sprintf("%s/api/v1/subnet/%s", azInfo.NSPAddr, subnetName), nil)
+	resp, err := s.tracedHTTP.Do(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("删除子网失败: %v", err),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	c.DataFromReader(resp.StatusCode, resp.ContentLength, "application/json", resp.Body, nil)
+}
+
+func (s *Server) getSubnetByID(c *gin.Context) {
+	subnetID := c.Param("subnet_id")
+	ctx := c.Request.Context()
+
+	if !s.orchestrator.HasTopDAO() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "数据库未配置"})
+		return
+	}
+
+	subnet, err := s.orchestrator.GetSubnetByID(ctx, subnetID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"subnet":  subnet,
+	})
+}
+
+func (s *Server) deleteSubnetByID(c *gin.Context) {
+	subnetID := c.Param("subnet_id")
+	ctx := c.Request.Context()
+
+	if !s.orchestrator.HasTopDAO() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "数据库未配置"})
+		return
+	}
+
+	// Get subnet info from Top DAO to find region/az
+	subnet, err := s.orchestrator.GetSubnetByID(ctx, subnetID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{})
+		return
+	}
+
+	// Forward to AZ for deletion
+	azInfo, err := s.registry.GetAZ(ctx, subnet.Region, subnet.AZ)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("AZ不存在: %v", err),
+		})
+		return
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, "DELETE", fmt.Sprintf("%s/api/v1/subnet/%s", azInfo.NSPAddr, subnet.SubnetName), nil)
 	resp, err := s.tracedHTTP.Do(req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{

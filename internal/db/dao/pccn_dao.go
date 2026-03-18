@@ -24,6 +24,11 @@ func (d *PCCNDAO) Create(ctx context.Context, pccn *models.PCCNResource) error {
 			id, pccn_name, vpc_name, vpc_region, peer_vpc_name, peer_vpc_region, az,
 			status, subnets, total_tasks, completed_tasks, failed_tasks
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		ON CONFLICT (pccn_name, az) DO UPDATE SET
+			status = EXCLUDED.status,
+			subnets = EXCLUDED.subnets,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE pccn_resources.status IN ('pending', 'failed', 'deleted')
 	`
 	_, err := d.db.ExecContext(ctx, query,
 		pccn.ID, pccn.PCCNName, pccn.VPCName, pccn.VPCRegion, pccn.PeerVPCName, pccn.PeerVPCRegion, pccn.AZ,

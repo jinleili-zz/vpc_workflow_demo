@@ -6,10 +6,66 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestMain runs before all E2E tests and cleans the database completely.
+func TestMain(m *testing.M) {
+	cleanAllDatabases()
+	m.Run()
+}
+
+// cleanAllDatabases truncates all application tables in all E2E databases via docker exec.
+func cleanAllDatabases() {
+	databases := []string{
+		"top_nsp_vpc",
+		"top_nsp_vfw",
+		"nsp_cn_beijing_1a_vpc",
+		"nsp_cn_beijing_1a_vfw",
+	}
+
+	truncateSQL := `
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN
+        SELECT tablename FROM pg_tables
+        WHERE schemaname = 'public'
+          AND tablename NOT IN ('schema_migrations')
+    LOOP
+        EXECUTE 'TRUNCATE TABLE ' || quote_ident(r.tablename) || ' CASCADE';
+    END LOOP;
+END $$;
+`
+
+	for _, db := range databases {
+		args := []string{
+			"exec", "-i", "e2e-postgres",
+			"psql", "-U", "nsp_user", "-d", db, "-c", truncateSQL,
+		}
+		out, err := exec.Command("docker", args...).CombinedOutput()
+		if err != nil {
+			fmt.Printf("[E2E cleanup] Warning: failed to clean database %s: %v\n%s\n", db, err, string(out))
+		} else {
+			fmt.Printf("[E2E cleanup] Cleaned database: %s\n", db)
+		}
+	}
+
+	// Also flush Redis to remove stale workflow states and task queues
+	out, err := exec.Command("docker", "exec", "e2e-redis", "redis-cli", "FLUSHALL").CombinedOutput()
+	if err != nil {
+		fmt.Printf("[E2E cleanup] Warning: failed to flush Redis: %v\n%s\n", err, string(out))
+	} else {
+		fmt.Printf("[E2E cleanup] Redis flushed\n")
+	}
+
+	// Wait briefly for services to reconnect after Redis flush
+	time.Sleep(2 * time.Second)
+}
 
 const (
 	topNSPVPCAddr = "http://localhost:18080"
@@ -658,7 +714,7 @@ func TestE2E_20_DeleteSubnet(t *testing.T) {
 		t.Fatal("could not find VPC ID for subnet lookup")
 	}
 
-	_, subResult := httpGet(t, fmt.Sprintf("%s/api/v1/vpc/id/%s/subnets", azNSPVPCAddr, vpcID))
+	_, subResult := httpGet(t, fmt.Sprintf("%s/api/v1/vpc/id/%s/subnets", topNSPVPCAddr, vpcID))
 	subnets, _ := subResult["subnets"].([]interface{})
 	var subnetID string
 	for _, s := range subnets {

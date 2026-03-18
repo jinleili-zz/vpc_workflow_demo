@@ -106,6 +106,8 @@ func main() {
 		consumer.Handle("create_vlan_subinterface", tasks.CreateVLANSubInterfaceHandler(cbSender))
 		consumer.Handle("create_subnet_on_switch", tasks.CreateSubnetOnSwitchHandler(cbSender))
 		consumer.Handle("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(cbSender))
+		consumer.Handle("create_pccn_connection", tasks.CreatePCCNConnectionHandler(cbSender))
+		consumer.Handle("configure_pccn_routing", tasks.ConfigurePCCNRoutingHandler(cbSender))
 	case queue.DeviceTypeFirewall:
 		cbSenderVFW := taskqueue.NewCallbackSenderFromBroker(broker, queue.GetCallbackQueueName(region, az, "vfw"))
 		consumer.Handle("create_firewall_zone", tasks.CreateFirewallZoneHandler(cbSender))
