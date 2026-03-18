@@ -240,8 +240,14 @@ func (s *Server) deleteVPC(c *gin.Context) {
 
 	// 检查 VPC 下是否有 PCCN 连接
 	if s.orchestrator.HasPCCNDAO() {
-		// 目前简化处理，实际应查询是否存在关联的 PCCN
-		_ = ctx
+		pccns, err := s.orchestrator.GetPCCNsByVPC(ctx, vpcName)
+		if err == nil && len(pccns) > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("VPC存在 %d 个PCCN连接，请先删除PCCN连接", len(pccns)),
+			})
+			return
+		}
 	}
 
 	// 检查 VPC 是否存在防火墙策略

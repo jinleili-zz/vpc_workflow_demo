@@ -1028,3 +1028,11 @@ func (o *Orchestrator) ListPCCNs(ctx context.Context) ([]*models.PCCNRegistry, e
 	}
 	return o.pccnDAO.ListAllPCCNs(ctx)
 }
+
+// GetPCCNsByVPCName 获取与指定VPC相关的所有PCCN连接
+func (o *Orchestrator) GetPCCNsByVPC(ctx context.Context, vpcName string) ([]*models.PCCNRegistry, error) {
+	if o.pccnDAO == nil {
+		return nil, fmt.Errorf("PCCN DAO not initialized")
+	}
+	return o.pccnDAO.GetPCCNsByVPCName(ctx, vpcName)
+}
