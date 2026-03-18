@@ -9,9 +9,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/paic/nsp-common/pkg/logger"
-	"github.com/paic/nsp-common/pkg/taskqueue"
-	"github.com/paic/nsp-common/pkg/trace"
+	"github.com/jinleili-zz/nsp-platform/logger"
+	"github.com/jinleili-zz/nsp-platform/taskqueue"
+	"github.com/jinleili-zz/nsp-platform/trace"
 
 	"workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"

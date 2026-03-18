@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/paic/nsp-common/pkg/logger"
-	"github.com/paic/nsp-common/pkg/taskqueue"
+	"github.com/jinleili-zz/nsp-platform/logger"
+	"github.com/jinleili-zz/nsp-platform/taskqueue"
 )
 
 // PCCNParams PCCN任务参数结构体

@@ -9,7 +9,7 @@ import (
 	"workflow_qoder/internal/top/vfw/service"
 
 	"github.com/gin-gonic/gin"
-	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/jinleili-zz/nsp-platform/logger"
 )
 
 type Server struct {

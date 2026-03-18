@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/hibiken/asynq"
-	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/jinleili-zz/nsp-platform/logger"
 )
 
 // AsynqAdapter configures Asynq to use nsp-common logger.

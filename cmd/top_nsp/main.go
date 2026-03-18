@@ -16,7 +16,7 @@ import (
 	"workflow_qoder/internal/top/orchestrator"
 	"workflow_qoder/internal/top/registry"
 
-	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/jinleili-zz/nsp-platform/logger"
 
 	_ "github.com/lib/pq"
 )

@@ -14,9 +14,9 @@ import (
 	"workflow_qoder/internal/queue"
 	"workflow_qoder/tasks"
 
-	"github.com/paic/nsp-common/pkg/logger"
-	"github.com/paic/nsp-common/pkg/taskqueue"
-	"github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
+	"github.com/jinleili-zz/nsp-platform/logger"
+	"github.com/jinleili-zz/nsp-platform/taskqueue"
+	"github.com/jinleili-zz/nsp-platform/taskqueue/asynqbroker"
 )
 
 func main() {
