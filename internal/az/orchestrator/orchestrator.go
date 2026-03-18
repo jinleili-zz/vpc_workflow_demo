@@ -23,6 +23,7 @@ import (
 type AZOrchestrator struct {
 	vpcDAO     *dao.VPCDAO
 	subnetDAO  *dao.SubnetDAO
+	pccnDAO    *dao.PCCNDAO
 	engine     *taskqueue.Engine
 	tracedHTTP *trace.TracedClient
 	region     string
@@ -33,6 +34,7 @@ func NewAZOrchestrator(db *sql.DB, engine *taskqueue.Engine, tracedHTTP *trace.T
 	return &AZOrchestrator{
 		vpcDAO:     dao.NewVPCDAO(db),
 		subnetDAO:  dao.NewSubnetDAO(db),
+		pccnDAO:    dao.NewPCCNDAO(db),
 		engine:     engine,
 		tracedHTTP: tracedHTTP,
 		region:     region,
@@ -53,6 +55,8 @@ func (o *AZOrchestrator) BuildWorkflowHooks() *taskqueue.WorkflowHooks {
 				err = o.vpcDAO.IncrementCompletedTasks(ctx, wf.ResourceID)
 			case string(models.ResourceTypeSubnet):
 				err = o.subnetDAO.IncrementCompletedTasks(ctx, wf.ResourceID)
+			case string(models.ResourceTypePCCN):
+				err = o.pccnDAO.IncrementCompletedTasks(ctx, wf.ResourceID)
 			}
 			if err != nil {
 				logger.WarnContext(ctx, "OnStepComplete hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
@@ -66,6 +70,8 @@ func (o *AZOrchestrator) BuildWorkflowHooks() *taskqueue.WorkflowHooks {
 				err = o.vpcDAO.IncrementFailedTasks(ctx, wf.ResourceID)
 			case string(models.ResourceTypeSubnet):
 				err = o.subnetDAO.IncrementFailedTasks(ctx, wf.ResourceID)
+			case string(models.ResourceTypePCCN):
+				err = o.pccnDAO.IncrementFailedTasks(ctx, wf.ResourceID)
 			}
 			if err != nil {
 				logger.WarnContext(ctx, "OnStepFailed hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
@@ -81,6 +87,9 @@ func (o *AZOrchestrator) BuildWorkflowHooks() *taskqueue.WorkflowHooks {
 			case string(models.ResourceTypeSubnet):
 				logger.InfoContext(ctx, "子网创建完成", "az", o.az, "resourceID", wf.ResourceID)
 				err = o.subnetDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusRunning, "")
+			case string(models.ResourceTypePCCN):
+				logger.InfoContext(ctx, "PCCN创建完成", "az", o.az, "resourceID", wf.ResourceID)
+				err = o.pccnDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusRunning, "")
 			}
 			if err != nil {
 				logger.WarnContext(ctx, "OnWorkflowComplete hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
@@ -94,6 +103,8 @@ func (o *AZOrchestrator) BuildWorkflowHooks() *taskqueue.WorkflowHooks {
 				err = o.vpcDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg)
 			case string(models.ResourceTypeSubnet):
 				err = o.subnetDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg)
+			case string(models.ResourceTypePCCN):
+				err = o.pccnDAO.UpdateStatus(ctx, wf.ResourceID, models.ResourceStatusFailed, errMsg)
 			}
 			if err != nil {
 				logger.WarnContext(ctx, "OnWorkflowFailed hook failed (non-blocking)", "resourceType", wf.ResourceType, "resourceID", wf.ResourceID, "error", err)
@@ -760,4 +771,228 @@ func (o *AZOrchestrator) checkZonePolicies(ctx context.Context, zone string) (in
 	}
 
 	return result.Count, nil
+}
+
+// =====================================================
+// PCCN Methods
+// =====================================================
+
+// CreatePCCN creates a PCCN connection workflow in the AZ layer
+func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest) (*models.PCCNResponse, error) {
+	logger.InfoContext(ctx, "开始创建PCCN连接",
+		"az", o.az,
+		"pccn_name", req.PCCNName,
+		"vpc_name", req.VPC1.VPCName,
+		"vpc_region", req.VPC1.Region,
+		"peer_vpc_name", req.VPC2.VPCName,
+		"peer_vpc_region", req.VPC2.Region,
+	)
+
+	// Use the PCCN ID from Top layer or generate one
+	pccnID := req.PCCNID
+	if pccnID == "" {
+		pccnID = uuid.New().String()
+	}
+
+	// Get VPC info to obtain subnet list
+	vpc, err := o.vpcDAO.GetByName(ctx, req.VPC1.VPCName, o.az)
+	if err == sql.ErrNoRows {
+		return &models.PCCNResponse{
+			Success: false,
+			Message: fmt.Sprintf("VPC不存在: %s", req.VPC1.VPCName),
+		}, nil
+	}
+	if err != nil {
+		return &models.PCCNResponse{
+			Success: false,
+			Message: fmt.Sprintf("查询VPC失败: %v", err),
+		}, nil
+	}
+
+	// Get VPC's subnet list
+	subnets, err := o.subnetDAO.ListByVPCID(ctx, vpc.ID)
+	if err != nil {
+		return &models.PCCNResponse{
+			Success: false,
+			Message: fmt.Sprintf("获取子网列表失败: %v", err),
+		}, nil
+	}
+
+	// Build subnet CIDR list
+	var subnetCIDRs []string
+	for _, subnet := range subnets {
+		subnetCIDRs = append(subnetCIDRs, subnet.CIDR)
+	}
+
+	// Create PCCN resource record
+	pccnResource := &models.PCCNResource{
+		ID:            pccnID,
+		PCCNName:      req.PCCNName,
+		VPCName:       req.VPC1.VPCName,
+		VPCRegion:     req.VPC1.Region,
+		PeerVPCName:   req.VPC2.VPCName,
+		PeerVPCRegion: req.VPC2.Region,
+		AZ:            o.az,
+		Status:        models.ResourceStatusPending,
+		Subnets:       subnetCIDRs,
+		TotalTasks:    0,
+	}
+
+	if err := o.pccnDAO.Create(ctx, pccnResource); err != nil {
+		return &models.PCCNResponse{
+			Success: false,
+			Message: fmt.Sprintf("创建PCCN资源记录失败: %v", err),
+		}, nil
+	}
+
+	// Build task params
+	params := o.buildPCCNTaskParams(req, subnetCIDRs)
+
+	// Define workflow
+	def := &taskqueue.WorkflowDefinition{
+		Name:         "create_pccn",
+		ResourceType: string(models.ResourceTypePCCN),
+		ResourceID:   pccnID,
+		Metadata:     map[string]string{"az": o.az, "vpc_region": req.VPC1.Region, "peer_vpc_region": req.VPC2.Region},
+		Steps: []taskqueue.StepDefinition{
+			{
+				TaskType:   "create_pccn_connection",
+				TaskName:   "创建PCCN连接",
+				QueueTag:   string(queue.DeviceTypeSwitch),
+				Priority:   taskqueue.PriorityNormal,
+				Params:     params,
+			},
+			{
+				TaskType:   "configure_pccn_routing",
+				TaskName:   "配置PCCN路由",
+				QueueTag:   string(queue.DeviceTypeSwitch),
+				Priority:   taskqueue.PriorityNormal,
+				Params:     params,
+			},
+		},
+	}
+
+	if err := o.pccnDAO.UpdateTotalTasks(ctx, pccnID, len(def.Steps)); err != nil {
+		return &models.PCCNResponse{
+			Success: false,
+			Message: fmt.Sprintf("更新任务总数失败: %v", err),
+		}, nil
+	}
+
+	if err := o.pccnDAO.UpdateStatus(ctx, pccnID, models.ResourceStatusCreating, ""); err != nil {
+		return &models.PCCNResponse{
+			Success: false,
+			Message: fmt.Sprintf("更新PCCN状态失败: %v", err),
+		}, nil
+	}
+
+	workflowID, err := o.engine.SubmitWorkflow(ctx, def)
+	if err != nil {
+		return &models.PCCNResponse{
+			Success: false,
+			Message: fmt.Sprintf("提交工作流失败: %v", err),
+		}, nil
+	}
+
+	logger.InfoContext(ctx, "PCCN创建流程启动成功",
+		"az", o.az,
+		"pccn_name", req.PCCNName,
+		"pccn_id", pccnID,
+		"workflow_id", workflowID,
+		"is_cross_region", req.VPC1.Region != req.VPC2.Region,
+	)
+
+	return &models.PCCNResponse{
+		Success:  true,
+		Message:  "PCCN创建工作流已启动",
+		PCCNID:   pccnID,
+		TxID:     workflowID,
+	}, nil
+}
+
+func (o *AZOrchestrator) buildPCCNTaskParams(req *models.PCCNRequest, subnets []string) string {
+	params := map[string]interface{}{
+		"pccn_id":         req.PCCNID,
+		"pccn_name":       req.PCCNName,
+		"vpc_name":        req.VPC1.VPCName,
+		"vpc_region":      req.VPC1.Region,
+		"peer_vpc_name":   req.VPC2.VPCName,
+		"peer_vpc_region": req.VPC2.Region,
+		"az":              o.az,
+		"subnets":         subnets,
+	}
+	data, _ := json.Marshal(params)
+	return string(data)
+}
+
+// GetPCCNStatus returns the status of a PCCN connection
+func (o *AZOrchestrator) GetPCCNStatus(ctx context.Context, pccnName string) (*models.PCCNStatusResponse, error) {
+	pccn, err := o.pccnDAO.GetByName(ctx, pccnName, o.az)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("PCCN不存在: %s", pccnName)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询PCCN失败: %v", err)
+	}
+
+	tasks, err := o.getTasksByResourceID(ctx, string(models.ResourceTypePCCN), pccn.ID)
+	if err != nil {
+		return nil, fmt.Errorf("查询任务列表失败: %v", err)
+	}
+
+	pending := pccn.TotalTasks - pccn.CompletedTasks - pccn.FailedTasks
+
+	return &models.PCCNStatusResponse{
+		PCCNID:        pccn.ID,
+		PCCNName:      pccn.PCCNName,
+		VPCName:       pccn.VPCName,
+		VPCRegion:     pccn.VPCRegion,
+		PeerVPCName:   pccn.PeerVPCName,
+		PeerVPCRegion: pccn.PeerVPCRegion,
+		AZ:            pccn.AZ,
+		Status:        pccn.Status,
+		Subnets:       pccn.Subnets,
+		Progress: models.ResourceProgress{
+			Total:     pccn.TotalTasks,
+			Completed: pccn.CompletedTasks,
+			Failed:    pccn.FailedTasks,
+			Pending:   pending,
+		},
+		Tasks:        tasks,
+		ErrorMessage: pccn.ErrorMessage,
+		CreatedAt:    pccn.CreatedAt,
+		UpdatedAt:    pccn.UpdatedAt,
+	}, nil
+}
+
+// DeletePCCN deletes a PCCN connection
+func (o *AZOrchestrator) DeletePCCN(ctx context.Context, pccnName string) error {
+	pccn, err := o.pccnDAO.GetByName(ctx, pccnName, o.az)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("PCCN不存在: %s", pccnName)
+	}
+	if err != nil {
+		return fmt.Errorf("查询PCCN失败: %v", err)
+	}
+
+	if pccn.Status != models.ResourceStatusRunning {
+		return fmt.Errorf("PCCN状态不是running，无法删除")
+	}
+
+	if err := o.pccnDAO.UpdateStatus(ctx, pccn.ID, models.ResourceStatusDeleting, ""); err != nil {
+		return fmt.Errorf("更新PCCN状态失败: %v", err)
+	}
+
+	// Delete the PCCN record
+	if err := o.pccnDAO.DeleteByName(ctx, pccnName, o.az); err != nil {
+		return fmt.Errorf("删除PCCN记录失败: %v", err)
+	}
+
+	logger.InfoContext(ctx, "PCCN删除成功", "az", o.az, "pccn_name", pccnName)
+	return nil
+}
+
+// ListPCCNs lists all PCCN connections
+func (o *AZOrchestrator) ListPCCNs(ctx context.Context) ([]*models.PCCNResource, error) {
+	return o.pccnDAO.ListAll(ctx)
 }

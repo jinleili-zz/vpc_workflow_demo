@@ -92,6 +92,12 @@ func (s *Server) setupRoutes() {
 		api.GET("/subnet/id/:subnet_id", s.getSubnetByID)
 		api.DELETE("/subnet/id/:subnet_id", s.deleteSubnetByID)
 
+		// PCCN routes
+		api.POST("/pccn", s.createPCCN)
+		api.GET("/pccn/:pccn_name/status", s.getPccnStatus)
+		api.DELETE("/pccn/:pccn_name", s.deletePCCN)
+		api.GET("/pccns", s.listPCCNs)
+
 		api.POST("/task/replay/:task_id", s.replayTask)
 		api.GET("/task/:task_id", s.getTaskByID)
 
@@ -406,6 +412,108 @@ func (s *Server) health(c *gin.Context) {
 		"service": "az-nsp",
 		"az":      s.cfg.AZ,
 		"region":  s.cfg.Region,
+	})
+}
+
+// =====================================================
+// PCCN Handlers
+// =====================================================
+
+func (s *Server) createPCCN(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var req models.PCCNRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("请求参数错误: %v", err),
+		})
+		return
+	}
+
+	logger.InfoContext(ctx, "收到PCCN创建请求", "pccn_name", req.PCCNName, "az", s.cfg.AZ)
+
+	resp, err := s.orchestrator.CreatePCCN(ctx, &req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("创建PCCN失败: %v", err),
+		})
+		return
+	}
+
+	if resp.Success {
+		c.JSON(http.StatusOK, resp)
+	} else {
+		c.JSON(http.StatusBadRequest, resp)
+	}
+}
+
+func (s *Server) getPccnStatus(c *gin.Context) {
+	ctx := c.Request.Context()
+	pccnName := c.Param("pccn_name")
+
+	if pccnName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "pccn_name参数缺失",
+		})
+		return
+	}
+
+	status, err := s.orchestrator.GetPCCNStatus(ctx, pccnName)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, status)
+}
+
+func (s *Server) deletePCCN(c *gin.Context) {
+	ctx := c.Request.Context()
+	pccnName := c.Param("pccn_name")
+
+	if pccnName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "pccn_name参数缺失",
+		})
+		return
+	}
+
+	if err := s.orchestrator.DeletePCCN(ctx, pccnName); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "PCCN删除成功",
+	})
+}
+
+func (s *Server) listPCCNs(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	pccns, err := s.orchestrator.ListPCCNs(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("查询PCCN列表失败: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"pccns":   pccns,
 	})
 }
 
