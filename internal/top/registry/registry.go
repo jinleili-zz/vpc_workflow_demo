@@ -100,11 +100,17 @@ func (r *Registry) GetRegionAZs(ctx context.Context, region string) ([]*models.A
 	return azs, nil
 }
 
-// Heartbeat AZ心跳更新
+// Heartbeat AZ心跳更新（如果AZ不存在则自动注册）
 func (r *Registry) Heartbeat(ctx context.Context, region, azID string) error {
 	az, err := r.GetAZ(ctx, region, azID)
 	if err != nil {
-		return err
+		// AZ不存在，自动注册一个新的AZ记录
+		az = &models.AZ{
+			ID:            azID,
+			Region:        region,
+			Status:        "online",
+			LastHeartbeat: time.Now().Unix(),
+		}
 	}
 
 	// 更新心跳时间
@@ -122,6 +128,10 @@ func (r *Registry) Heartbeat(ctx context.Context, region, azID string) error {
 	if err != nil {
 		return fmt.Errorf("更新心跳失败: %v", err)
 	}
+
+	// 确保AZ在Region的AZ列表中
+	regionKey := fmt.Sprintf("region:%s:azs", region)
+	r.redisClient.SAdd(ctx, regionKey, azID)
 
 	return nil
 }

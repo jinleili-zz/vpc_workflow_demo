@@ -13,7 +13,6 @@ import (
 	"workflow_qoder/internal/az/vfw/orchestrator"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/models"
-	"workflow_qoder/internal/queue"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinleili-zz/nsp-platform/logger"
@@ -22,14 +21,13 @@ import (
 )
 
 type Server struct {
-	cfg               *config.NSPConfig
-	orchestrator      *orchestrator.VFWOrchestrator
-	router            *gin.Engine
-	db                *sql.DB
-	callbackQueueName string
+	cfg          *config.NSPConfig
+	orchestrator *orchestrator.VFWOrchestrator
+	router       *gin.Engine
+	db           *sql.DB
 }
 
-func NewServer(cfg *config.NSPConfig, engine *taskqueue.Engine, tracedHTTP *trace.TracedClient, db *sql.DB) *Server {
+func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, inspector taskqueue.Inspector, tracedHTTP *trace.TracedClient, db *sql.DB) *Server {
 	router := gin.New()
 	router.Use(gin.Recovery())
 
@@ -38,15 +36,13 @@ func NewServer(cfg *config.NSPConfig, engine *taskqueue.Engine, tracedHTTP *trac
 	router.Use(trace.TraceMiddleware(instanceID))
 	router.Use(ginLoggerMiddleware())
 
-	orch := orchestrator.NewVFWOrchestrator(db, engine, tracedHTTP, cfg.Region, cfg.AZ)
-	callbackQueueName := queue.GetCallbackQueueName(cfg.Region, cfg.AZ, "vfw")
+	orch := orchestrator.NewVFWOrchestrator(db, broker, inspector, tracedHTTP, cfg.Region, cfg.AZ)
 
 	server := &Server{
-		cfg:               cfg,
-		orchestrator:      orch,
-		router:            router,
-		db:                db,
-		callbackQueueName: callbackQueueName,
+		cfg:          cfg,
+		orchestrator: orch,
+		router:       router,
+		db:           db,
 	}
 
 	server.setupRoutes()
@@ -204,12 +200,12 @@ func (s *Server) countPoliciesByZone(c *gin.Context) {
 	})
 }
 
-func (s *Server) HandleTaskCallback(ctx context.Context, payload []byte) error {
-	return s.orchestrator.HandleTaskCallback(ctx, payload)
+func (s *Server) HandleReplyTask(ctx context.Context, task *taskqueue.Task) error {
+	return s.orchestrator.HandleReplyTask(ctx, task)
 }
 
-func (s *Server) GetCallbackQueueName() string {
-	return s.callbackQueueName
+func (s *Server) ReplyQueueName() string {
+	return s.orchestrator.ReplyQueueName()
 }
 
 func (s *Server) health(c *gin.Context) {

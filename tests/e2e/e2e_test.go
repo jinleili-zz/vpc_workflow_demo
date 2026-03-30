@@ -65,6 +65,23 @@ END $$;
 
 	// Wait briefly for services to reconnect after Redis flush
 	time.Sleep(2 * time.Second)
+
+	// Re-register AZ after Redis flush (heartbeat will auto-register but may take up to 60s)
+	// We proactively register to speed up test execution
+	registerURL := topNSPVPCAddr + "/api/v1/register/az"
+	reqData := map[string]string{
+		"region":   "cn-beijing",
+		"az":       "cn-beijing-1a",
+		"nsp_addr": "http://e2e-az-nsp-vpc-cn-beijing-1a:8080",
+	}
+	body, _ := json.Marshal(reqData)
+	resp, err := http.Post(registerURL, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		fmt.Printf("[E2E cleanup] Warning: failed to register AZ: %v\n", err)
+	} else {
+		resp.Body.Close()
+		fmt.Printf("[E2E cleanup] AZ registered\n")
+	}
 }
 
 const (
