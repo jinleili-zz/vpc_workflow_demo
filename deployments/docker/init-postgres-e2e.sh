@@ -38,6 +38,8 @@ for DB in top_nsp_vpc top_nsp_vfw nsp_cn_beijing_1a_vpc nsp_cn_beijing_1a_vfw ns
     if [ -f "$PCCN_FILE" ]; then
         psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$DB" -f "$PCCN_FILE" || true
     fi
+    # Ensure locked_by columns exist (saga.sql ALTER TABLE may have failed silently)
+    psql -v ON_ERROR_STOP=0 --username "$POSTGRES_USER" --dbname "$DB" -c "ALTER TABLE saga_transactions ADD COLUMN IF NOT EXISTS locked_by VARCHAR(128), ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;" 2>/dev/null || true
 done
 
 echo "All databases initialized successfully."
