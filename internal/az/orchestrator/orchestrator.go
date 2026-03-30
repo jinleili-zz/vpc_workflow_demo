@@ -562,8 +562,50 @@ func (o *AZOrchestrator) compensateResource(
 		_ = updateStatus(ctx, resourceID, models.ResourceStatusFailed, "workflow step failed")
 		return
 	}
+	if o.resourceHasInFlightBrokerTask(ctx, resourceID) {
+		return
+	}
 	if time.Since(updatedAt) > staleWorkflowTimeout {
 		_ = updateStatus(ctx, resourceID, models.ResourceStatusFailed, "workflow reply timeout")
+	}
+}
+
+func (o *AZOrchestrator) resourceHasInFlightBrokerTask(ctx context.Context, resourceID string) bool {
+	tasks, err := o.taskDAO.GetByResourceID(ctx, resourceID)
+	if err != nil {
+		logger.Platform().Error("[补偿任务] 查询任务列表失败", "az", o.az, "resourceID", resourceID, "error", err)
+		return false
+	}
+
+	reader, ok := o.inspector.(taskqueue.TaskReader)
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		if ok && task.AsynqTaskID != "" {
+			detail, err := reader.GetTaskInfo(ctx, o.resolveQueueName(task.DeviceType, task.Priority), task.AsynqTaskID)
+			if err == nil && taskIsInFlight(detail.State) {
+				return true
+			}
+			if err != nil && !errors.Is(err, taskqueue.ErrTaskNotFound) && !errors.Is(err, taskqueue.ErrQueueNotFound) {
+				logger.Platform().Warn("[补偿任务] 查询broker任务状态失败", "az", o.az, "taskID", task.ID, "asynqTaskID", task.AsynqTaskID, "error", err)
+			}
+			continue
+		}
+
+		if task.Status == models.TaskStatusQueued || task.Status == models.TaskStatusRunning {
+			return true
+		}
+	}
+	return false
+}
+
+func taskIsInFlight(state taskqueue.TaskState) bool {
+	switch state {
+	case taskqueue.TaskStatePending, taskqueue.TaskStateScheduled, taskqueue.TaskStateActive, taskqueue.TaskStateRetry:
+		return true
+	default:
+		return false
 	}
 }
 

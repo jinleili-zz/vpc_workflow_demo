@@ -171,6 +171,20 @@ func (d *TaskDAO) UpdateQueued(ctx context.Context, id, asynqTaskID string) erro
 	return err
 }
 
+func (d *TaskDAO) UpdateRetryProgress(ctx context.Context, id string, retryCount, maxRetries int, errMsg string) error {
+	query := `
+		UPDATE tasks
+		SET status = 'queued',
+		    retry_count = $1,
+		    max_retries = $2,
+		    error_message = $3,
+		    updated_at = $4
+		WHERE id = $5
+	`
+	_, err := d.db.ExecContext(ctx, query, retryCount, maxRetries, nullString(errMsg), time.Now(), id)
+	return err
+}
+
 func (d *TaskDAO) UpdateResult(ctx context.Context, id string, status models.TaskStatus, result any, errMsg string) error {
 	var resultJSON any
 	if result != nil {

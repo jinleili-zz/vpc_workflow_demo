@@ -42,6 +42,7 @@ type TaskStore interface {
 	GetByResourceAndOrder(ctx context.Context, resourceID string, taskOrder int) (*models.Task, error)
 	GetNextPendingTask(ctx context.Context, resourceID string) (*models.Task, error)
 	UpdateQueued(ctx context.Context, id, asynqTaskID string) error
+	UpdateRetryProgress(ctx context.Context, id string, retryCount, maxRetries int, errMsg string) error
 	UpdateResult(ctx context.Context, id string, status models.TaskStatus, result any, errMsg string) error
 }
 
@@ -184,6 +185,12 @@ func (m *Manager) HandleReply(ctx context.Context, task *taskqueue.Task) error {
 		return nil
 
 	case ReplyStatusFailed:
+		if !reply.FinalFailure {
+			if err := m.taskStore.UpdateRetryProgress(ctx, currentTask.ID, reply.RetryCount, reply.MaxRetries, reply.Error); err != nil {
+				return fmt.Errorf("更新任务重试进度失败: %w", err)
+			}
+			return nil
+		}
 		if err := m.taskStore.UpdateResult(ctx, currentTask.ID, models.TaskStatusFailed, nil, reply.Error); err != nil {
 			return fmt.Errorf("更新任务失败状态失败: %w", err)
 		}

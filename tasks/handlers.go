@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/hibiken/asynq"
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
 
@@ -279,7 +280,7 @@ func publishReply(ctx context.Context, broker taskqueue.Broker, task *taskqueue.
 		return fmt.Errorf("reply queue is required")
 	}
 
-	replyPayload, err := buildReplyPayload(task, status, result, errMsg)
+	replyPayload, err := buildReplyPayload(ctx, task, status, result, errMsg)
 	if err != nil {
 		return err
 	}
@@ -306,7 +307,7 @@ func publishReply(ctx context.Context, broker taskqueue.Broker, task *taskqueue.
 	return nil
 }
 
-func buildReplyPayload(task *taskqueue.Task, status orchestration.ReplyStatus, result any, errMsg string) (*orchestration.ReplyPayload, error) {
+func buildReplyPayload(ctx context.Context, task *taskqueue.Task, status orchestration.ReplyStatus, result any, errMsg string) (*orchestration.ReplyPayload, error) {
 	stepIndex, err := metadataInt(task.Metadata, orchestration.MetadataKeyStepIndex)
 	if err != nil {
 		return nil, err
@@ -325,6 +326,12 @@ func buildReplyPayload(task *taskqueue.Task, status orchestration.ReplyStatus, r
 		Status:       status,
 		Error:        errMsg,
 	}
+	if status == orchestration.ReplyStatusFailed {
+		retryCount, maxRetries, finalFailure := retryContext(ctx)
+		reply.RetryCount = retryCount
+		reply.MaxRetries = maxRetries
+		reply.FinalFailure = finalFailure
+	}
 
 	if reply.ResourceID == "" || reply.ResourceType == "" {
 		return nil, fmt.Errorf("task metadata缺少resource上下文")
@@ -339,6 +346,15 @@ func buildReplyPayload(task *taskqueue.Task, status orchestration.ReplyStatus, r
 	}
 
 	return reply, nil
+}
+
+func retryContext(ctx context.Context) (retryCount, maxRetries int, finalFailure bool) {
+	retryCount, okRetry := asynq.GetRetryCount(ctx)
+	maxRetries, okMax := asynq.GetMaxRetry(ctx)
+	if !okRetry || !okMax {
+		return 0, 0, true
+	}
+	return retryCount, maxRetries, retryCount >= maxRetries
 }
 
 func metadataInt(metadata map[string]string, key string) (int, error) {

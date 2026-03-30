@@ -253,6 +253,9 @@ func (o *VFWOrchestrator) runCompensation(ctx context.Context) {
 			_ = o.policyDAO.UpdateStatus(ctx, policy.ID, models.ResourceStatusFailed, "workflow step failed")
 			continue
 		}
+		if o.resourceHasInFlightBrokerTask(ctx, policy.ID) {
+			continue
+		}
 		if time.Since(policy.UpdatedAt) > stalePolicyTimeout {
 			_ = o.policyDAO.UpdateStatus(ctx, policy.ID, models.ResourceStatusFailed, "workflow reply timeout")
 		}
@@ -290,6 +293,36 @@ func (o *VFWOrchestrator) resolveQueueName(deviceType string, priority int) stri
 	return queue.GetPriorityQueueName(o.region, o.az, queue.DeviceType(deviceType), queue.TaskPriority(priority))
 }
 
+func (o *VFWOrchestrator) resourceHasInFlightBrokerTask(ctx context.Context, resourceID string) bool {
+	tasks, err := o.taskDAO.GetByResourceID(ctx, resourceID)
+	if err != nil {
+		logger.Platform().Error("[VFW补偿任务] 查询任务列表失败", "az", o.az, "resourceID", resourceID, "error", err)
+		return false
+	}
+
+	reader, ok := o.inspector.(taskqueue.TaskReader)
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		if ok && task.AsynqTaskID != "" {
+			detail, err := reader.GetTaskInfo(ctx, o.resolveQueueName(task.DeviceType, task.Priority), task.AsynqTaskID)
+			if err == nil && taskIsInFlight(detail.State) {
+				return true
+			}
+			if err != nil && !errors.Is(err, taskqueue.ErrTaskNotFound) && !errors.Is(err, taskqueue.ErrQueueNotFound) {
+				logger.Platform().Warn("[VFW补偿任务] 查询broker任务状态失败", "az", o.az, "taskID", task.ID, "asynqTaskID", task.AsynqTaskID, "error", err)
+			}
+			continue
+		}
+
+		if task.Status == models.TaskStatusQueued || task.Status == models.TaskStatusRunning {
+			return true
+		}
+	}
+	return false
+}
+
 func mapTaskState(state taskqueue.TaskState, fallback models.TaskStatus) models.TaskStatus {
 	switch state {
 	case taskqueue.TaskStatePending, taskqueue.TaskStateScheduled, taskqueue.TaskStateRetry:
@@ -302,6 +335,15 @@ func mapTaskState(state taskqueue.TaskState, fallback models.TaskStatus) models.
 		return models.TaskStatusFailed
 	default:
 		return fallback
+	}
+}
+
+func taskIsInFlight(state taskqueue.TaskState) bool {
+	switch state {
+	case taskqueue.TaskStatePending, taskqueue.TaskStateScheduled, taskqueue.TaskStateActive, taskqueue.TaskStateRetry:
+		return true
+	default:
+		return false
 	}
 }
 
