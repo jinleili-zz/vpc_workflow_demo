@@ -18,7 +18,7 @@ const (
 )
 
 func GetQueueName(region, az string, deviceType DeviceType) string {
-	return "tasks_" + region + "_" + az + "_" + string(deviceType)
+	return "tasks:" + region + ":" + az + ":" + string(deviceType)
 }
 
 func GetPriorityQueueName(region, az string, deviceType DeviceType, priority TaskPriority) string {
@@ -33,11 +33,11 @@ func GetPriorityQueueName(region, az string, deviceType DeviceType, priority Tas
 	default:
 		prioritySuffix = ""
 	}
-	return "tasks_" + region + "_" + az + "_" + string(deviceType) + prioritySuffix
+	return "tasks:" + region + ":" + az + ":" + string(deviceType) + prioritySuffix
 }
 
 func GetCallbackQueueName(region, az, service string) string {
-	return "callbacks_" + region + "_" + az + "_" + service
+	return "callbacks:" + region + ":" + az + ":" + service
 }
 
 func GetQueueConfig(region, az string, deviceType DeviceType) map[string]int {
