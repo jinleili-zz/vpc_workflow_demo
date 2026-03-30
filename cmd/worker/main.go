@@ -15,7 +15,6 @@ import (
 	"workflow_qoder/tasks"
 
 	"github.com/jinleili-zz/nsp-platform/logger"
-	"github.com/jinleili-zz/nsp-platform/taskqueue"
 	"github.com/jinleili-zz/nsp-platform/taskqueue/asynqbroker"
 )
 
@@ -82,14 +81,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	callbackQueueName := queue.GetCallbackQueueName(region, az, "vpc")
 	queuesConfig := queue.GetQueueConfig(region, az, deviceType)
 
-	// 创建 Broker 和 CallbackSender
+	// 创建 Broker
 	broker := asynqbroker.NewBroker(redisOpt)
 	defer broker.Close()
-
-	cbSender := taskqueue.NewCallbackSenderFromBroker(broker, callbackQueueName)
 
 	// 创建 Consumer
 	consumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
@@ -102,25 +98,24 @@ func main() {
 	// 注册 task handler
 	switch deviceType {
 	case queue.DeviceTypeSwitch:
-		consumer.Handle("create_vrf_on_switch", tasks.CreateVRFOnSwitchHandler(cbSender))
-		consumer.Handle("create_vlan_subinterface", tasks.CreateVLANSubInterfaceHandler(cbSender))
-		consumer.Handle("create_subnet_on_switch", tasks.CreateSubnetOnSwitchHandler(cbSender))
-		consumer.Handle("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(cbSender))
-		consumer.Handle("create_pccn_connection", tasks.CreatePCCNConnectionHandler(cbSender))
-		consumer.Handle("configure_pccn_routing", tasks.ConfigurePCCNRoutingHandler(cbSender))
+		consumer.Handle("create_vrf_on_switch", tasks.CreateVRFOnSwitchHandler(broker))
+		consumer.Handle("create_vlan_subinterface", tasks.CreateVLANSubInterfaceHandler(broker))
+		consumer.Handle("create_subnet_on_switch", tasks.CreateSubnetOnSwitchHandler(broker))
+		consumer.Handle("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(broker))
+		consumer.Handle("create_pccn_connection", tasks.CreatePCCNConnectionHandler(broker))
+		consumer.Handle("configure_pccn_routing", tasks.ConfigurePCCNRoutingHandler(broker))
 	case queue.DeviceTypeFirewall:
-		cbSenderVFW := taskqueue.NewCallbackSenderFromBroker(broker, queue.GetCallbackQueueName(region, az, "vfw"))
-		consumer.Handle("create_firewall_zone", tasks.CreateFirewallZoneHandler(cbSender))
-		consumer.Handle("create_firewall_policy", tasks.CreateFirewallPolicyHandler(cbSenderVFW))
+		consumer.Handle("create_firewall_zone", tasks.CreateFirewallZoneHandler(broker))
+		consumer.Handle("create_firewall_policy", tasks.CreateFirewallPolicyHandler(broker))
 	case queue.DeviceTypeLoadBalancer:
-		consumer.Handle("create_lb_pool", tasks.CreateLBPoolHandler(cbSender))
-		consumer.Handle("configure_lb_listener", tasks.ConfigureLBListenerHandler(cbSender))
+		consumer.Handle("create_lb_pool", tasks.CreateLBPoolHandler(broker))
+		consumer.Handle("configure_lb_listener", tasks.ConfigureLBListenerHandler(broker))
 	}
 
 	taskQueueName := queue.GetQueueName(region, az, deviceType)
 
 	go func() {
-		logger.Platform().Info("Worker 启动", "region", region, "az", az, "workerType", workerType, "concurrency", workerCount, "taskQueue", taskQueueName, "callbackQueue", callbackQueueName)
+		logger.Platform().Info("Worker 启动", "region", region, "az", az, "workerType", workerType, "concurrency", workerCount, "taskQueue", taskQueueName)
 		if err := consumer.Start(context.Background()); err != nil {
 			logger.Platform().Error("Worker 启动失败", "region", region, "az", az, "workerType", workerType, "error", err)
 			os.Exit(1)
