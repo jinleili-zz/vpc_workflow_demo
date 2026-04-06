@@ -27,21 +27,33 @@
 
 ### 受影响的代码模块
 
+**VPC服务链路:**
+
 | 模块 | 文件 | 改动类型 |
 |------|------|----------|
 | 配置加载 | `internal/config/config.go` | 新增AK/SK配置字段 |
+| 配置文件 | `config/config.yaml` | 添加auth.credentials配置段 |
 | 启动入口 | `cmd/top_nsp/main.go` | 加载凭证、初始化Signer |
 | 启动入口 | `cmd/az_nsp/main.go` | 加载凭证、初始化Verifier、添加中间件 |
 | HTTP客户端 | `internal/client/az_client.go` | 添加Signer、为所有方法签名请求 |
 | Saga编排 | `internal/top/orchestrator/orchestrator.go` | 构建Saga Step时设置AuthAK |
 | Bootstrap | `internal/bootstrap/bootstrap.go` | Saga初始化时传入CredentialStore |
-| AZ API | `internal/az/api/server.go` | 添加AK/SK认证中间件 |
-| VFW Service | `internal/top/vfw/service/policy.go` | HTTP调用添加签名 |
+| AZ VPC API | `internal/az/api/server.go` | 添加AK/SK认证中间件 |
 | Top API | `internal/top/api/server.go` | 直接HTTP调用添加签名 |
+
+**VFW服务链路:**
+
+| 模块 | 文件 | 改动类型 |
+|------|------|----------|
+| Top VFW入口 | `cmd/top_nsp_vfw/main.go` | 加载凭证、初始化Signer |
+| AZ VFW入口 | `cmd/az_nsp_vfw/main.go` | 加载凭证、初始化Verifier、添加中间件 |
+| Top VFW API | `internal/top/vfw/api/server.go` | 添加认证中间件 |
+| Top VFW Service | `internal/top/vfw/service/policy.go` | HTTP调用添加签名 |
+| AZ VFW API | `internal/az/vfw/api/server.go` | 添加AK/SK认证中间件 |
 
 ### HTTP交互点清单（需要签名）
 
-**Top-NSP → AZ-NSP 业务调用（需要签名）:**
+**Top-NSP-VPC → AZ-NSP-VPC 业务调用（需要签名）:**
 
 | 调用方 | 目标接口 | 当前实现 | 改造方式 |
 |--------|----------|----------|----------|
@@ -50,16 +62,23 @@
 | AZNSPClient | DELETE /api/v1/vpc/{name} | Saga执行 | Step.AuthAK |
 | AZNSPClient | GET /api/v1/vpc/{name}/status | az_client.go | 添加Signer签名 |
 | AZNSPClient | POST /api/v1/subnet | az_client.go | 添加Signer签名 |
-| AZNSPClient | GET /api/v1/subnet/{name}/status | api/server.go直接调用 | 添加签名逻辑 |
-| AZNSPClient | DELETE /api/v1/subnet/{name} | api/server.go直接调用 | 添加签名逻辑 |
+| AZNSPClient | GET /api/v1/subnet/{name}/status | top/api/server.go直接调用 | 添加签名逻辑 |
+| AZNSPClient | DELETE /api/v1/subnet/{name} | top/api/server.go直接调用 | 添加签名逻辑 |
 | AZNSPClient | POST /api/v1/pccn | Saga执行 | Step.AuthAK |
 | AZNSPClient | DELETE /api/v1/pccn/{name} | Saga执行 | Step.AuthAK |
 | AZNSPClient | GET /api/v1/pccn/{name}/status | az_client.go | 添加Signer签名 |
-| VFW Policy | POST /api/v1/firewall/policy | vfw/service/policy.go | 添加签名逻辑 |
+
+**Top-NSP-VFW → AZ-NSP-VFW 业务调用（需要签名）:**
+
+| 调用方 | 目标接口 | 当前实现 | 改造方式 |
+|--------|----------|----------|----------|
+| PolicyService | POST /api/v1/firewall/policy | vfw/service/policy.go http.Post | 添加Signer签名 |
 
 **AZ-NSP → Top-NSP（不需要签名）:**
-- POST /api/v1/register/az（AZ注册）
-- POST /api/v1/heartbeat（心跳）
+- POST /api/v1/register/az（AZ VPC注册，走内网）
+- POST /api/v1/heartbeat（AZ VPC心跳，走内网）
+- POST /api/v1/register/az（AZ VFW注册，走内网）
+- POST /api/v1/heartbeat（AZ VFW心跳，走内网）
 
 **AZ-NSP ↔ Worker（不受影响）:**
 - Redis/asynq消息队列通信，不需要修改

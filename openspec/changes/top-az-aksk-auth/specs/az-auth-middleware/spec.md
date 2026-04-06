@@ -13,7 +13,7 @@ AZ-NSP SHALL对所有入站HTTP请求进行AK/SK签名验证（免认证路径�
 - **THEN** 系统返回HTTP 401 Unauthorized
 
 #### Scenario: 签名过期请求被拒绝
-- **WHEN** 请求签名中的时间戳超出有效窗口（默认5分钟）
+- **WHEN** 请求中X-NSP-Timestamp的时间戳超出有效窗口（默认5分钟，由DefaultTimestampTolerance定义）
 - **THEN** 系统返回HTTP 401 Unauthorized
 
 ### Requirement: 免认证路径配置

@@ -14,15 +14,15 @@ Top-NSP的HTTP客户端SHALL为所有发往AZ-NSP的请求自动添加AK/SK签�
 
 ### Requirement: 签名格式
 
-Top-NSP SHALL使用NSP-HMAC-SHA256签名算法。
+Top-NSP SHALL使用NSP-HMAC-SHA256签名算法（由nsp-platform/auth包实现）。
 
 #### Scenario: 签名头格式
 - **WHEN** 请求被签名
-- **THEN** 请求头包含Authorization、X-Auth-Timestamp、X-Auth-Nonce等字段
+- **THEN** 请求头包含Authorization、X-NSP-Timestamp、X-NSP-Nonce、X-NSP-SignedHeaders字段
 
 #### Scenario: 签名内容
 - **WHEN** 计算签名
-- **THEN** 签名涵盖HTTP方法、URL路径、查询参数、请求体和时间戳
+- **THEN** 签名涵盖HTTP方法、URL路径、查询参数、请求体、时间戳和已签名头（默认签名头：content-type;x-nsp-nonce;x-nsp-timestamp）
 
 ### Requirement: 所有交互点签名
 

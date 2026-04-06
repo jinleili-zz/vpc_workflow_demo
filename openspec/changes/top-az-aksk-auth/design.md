@@ -6,8 +6,9 @@ NSP系统采用多地域分布式部署架构，Top-NSP和AZ-NSP位于不同地�
 
 ### 当前状态
 
-- Top-NSP通过`AZNSPClient`和Saga引擎调用AZ-NSP的HTTP API
-- AZ-NSP接收请求后直接处理，无任何认证机制
+- Top-NSP（VPC和VFW）通过`AZNSPClient`、Saga引擎、直接HTTP调用AZ-NSP的HTTP API
+- AZ-NSP（VPC和VFW）接收请求后直接处理，无任何认证机制
+- NSP系统包含4个独立二进制：`top_nsp`、`az_nsp`（VPC链路）和`top_nsp_vfw`、`az_nsp_vfw`（VFW链路），均需要auth改造
 - `nsp-platform/auth`已提供完整的AK/SK签名和验证能力
 - `nsp-platform/saga`已支持`Step.AuthAK`和`Engine.Config.CredentialStore`
 
@@ -37,7 +38,7 @@ NSP系统采用多地域分布式部署架构，Top-NSP和AZ-NSP位于不同地�
 
 **决定**: 使用YAML配置文件，明文存储AK/SK
 
-**配置文件结构**:
+**配置文件结构** (`config/config.yaml`):
 ```yaml
 # config.yaml
 auth:
@@ -124,14 +125,31 @@ builder.AddStep(saga.Step{
 
 ### D5: 直接HTTP调用改造
 
-**决定**: 统一封装`SignedTracedClient`，为`internal/top/api/server.go`和`internal/top/vfw/service/policy.go`中的直接HTTP调用提供签名能力
+**决定**: 统一封装`SignedTracedClient`，为以下直接HTTP调用提供签名能力：
+- `internal/top/api/server.go` 中通过`s.tracedHTTP.Get/Do`直接调用AZ的子网状态/删除接口
+- `internal/top/vfw/service/policy.go` 中通过`http.Post`直接调用AZ VFW的防火墙策略接口
 
-**方案**: 扩展`trace.TracedClient`或创建包装器，自动为请求签名
+**方案**: 创建包装器`SignedTracedClient`，组合`TracedClient`和`Signer`，自动为请求签名
 
 **理由**:
 - 当前`api/server.go`中直接使用`s.tracedHTTP.Get/Do`
 - 当前`vfw/service/policy.go`中直接使用`http.Post`
 - 需要统一封装，避免重复代码
+
+### D6: VFW服务链路auth覆盖
+
+**决定**: VFW链路与VPC链路采用相同的auth改造方式
+
+VFW有独立的二进制和API Server：
+- `cmd/top_nsp_vfw/main.go` → `internal/top/vfw/api/server.go` → `internal/top/vfw/service/policy.go`（签名方）
+- `cmd/az_nsp_vfw/main.go` → `internal/az/vfw/api/server.go`（验证方）
+
+**改造要点**:
+- `cmd/top_nsp_vfw/main.go`: 初始化Signer，传入PolicyService
+- `cmd/az_nsp_vfw/main.go`: 初始化Verifier，在`internal/az/vfw/api/server.go`添加认证中间件
+- `PolicyService.CreatePolicy()`: 将`http.Post`替换为带签名的HTTP调用
+
+**理由**: VFW的`POST /api/v1/firewall/policy`是Top→AZ的业务调用，必须纳入auth范围，否则启用AZ认证后该路径会返回401。
 
 ## Risks / Trade-offs
 
@@ -165,22 +183,25 @@ builder.AddStep(saga.Step{
 
 ### 阶段1: 代码改造（不启用认证）
 
-1. 改造配置加载，支持AK/SK配置
+1. 改造配置加载（`config/config.yaml`），支持AK/SK配置
 2. 改造AZNSPClient，添加Signer
 3. 改造Saga，传入CredentialStore
-4. AZ-NSP添加中间件，但配置`EnableAuth: false`
+4. 改造VFW链路，添加Signer和中间件
+5. AZ-NSP/AZ-VFW添加中间件，但配置`EnableAuth: false`
 
 ### 阶段2: 验证签名逻辑
 
-1. 启用AZ-NSP认证（`EnableAuth: true`）
-2. 运行集成测试，验证所有调用路径
-3. 监控日志，确认无401错误
+1. 运行集成测试，验证所有调用路径（此时AZ还未强制验证）
+2. 监控日志，确认签名头正确附加
 
 ### 阶段3: 生产部署
 
+**部署顺序至关重要：必须先更新Top，再启用AZ验证。**
+
 1. 配置生产环境AK/SK（通过Kubernetes Secret）
-2. 滚动更新AZ-NSP
-3. 滚动更新Top-NSP
+2. **先滚动更新所有Top-NSP和Top-VFW**（开始签名请求，AZ尚未验证，兼容）
+3. 确认Top侧签名正常后，**再滚动更新所有AZ-NSP和AZ-VFW**（启用`EnableAuth: true`）
+4. 如果反过来先更新AZ，AZ会拒绝尚未签名的Top请求，导致瞬态401错误
 
 ### 回滚策略
 
