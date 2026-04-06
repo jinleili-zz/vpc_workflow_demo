@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"workflow_qoder/internal/az/api"
+	"workflow_qoder/internal/bootstrap"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/orchestration"
 
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue/asynqbroker"
-	"github.com/jinleili-zz/nsp-platform/trace"
 	_ "github.com/lib/pq"
 )
 
@@ -26,24 +26,11 @@ func main() {
 	region := os.Getenv("REGION")
 	az := os.Getenv("AZ")
 
-	// Initialize logger with service name
-	serviceName := fmt.Sprintf("az-nsp-vpc-%s", az)
-	logCfg := logger.DefaultConfig(serviceName)
-	if err := logger.Init(logCfg); err != nil {
-		fmt.Printf("Failed to initialize logger: %v\n", err)
-		os.Exit(1)
-	}
-	defer logger.Sync()
-
-	logger.Platform().Info("========================================")
-	logger.Platform().Info("AZ NSP 启动中...")
-	logger.Platform().Info("========================================")
-
 	// 使用 nsp-common/config 加载配置
 	// 支持从 config.yaml 文件加载，环境变量覆盖（NSP_前缀），以及热更新
 	configLoader, err := config.NewConfigLoader("./config/config.yaml", "NSP", true)
 	if err != nil {
-		logger.Platform().Error("加载配置失败", "error", err)
+		fmt.Printf("加载配置失败: %v\n", err)
 		os.Exit(1)
 	}
 	defer configLoader.Close()
@@ -70,7 +57,7 @@ func main() {
 	}
 
 	if region == "" || az == "" {
-		logger.Platform().Error("必须设置环境变量 REGION 和 AZ，或在配置文件中指定")
+		fmt.Println("必须设置环境变量 REGION 和 AZ，或在配置文件中指定")
 		os.Exit(1)
 	}
 
@@ -107,6 +94,29 @@ func main() {
 
 	portInt, _ := strconv.Atoi(port)
 	cfg.Port = portInt
+
+	authCreds, err := cfg.AuthCredentials()
+	if err != nil {
+		fmt.Printf("解析认证配置失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	bootstrapCfg := bootstrap.DefaultConfig(fmt.Sprintf("az-nsp-vpc-%s", az))
+	bootstrapCfg.EnableAuth = cfg.Auth.EnableAuth
+	bootstrapCfg.EnableSaga = false
+	bootstrapCfg.Credentials = authCreds
+	bootstrapCfg.SkipAuthPaths = cfg.Auth.SkipAuthPaths
+
+	components, err := bootstrap.Initialize(context.Background(), bootstrapCfg)
+	if err != nil {
+		fmt.Printf("初始化基础组件失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer components.Shutdown()
+
+	logger.Platform().Info("========================================")
+	logger.Platform().Info("AZ NSP 启动中...")
+	logger.Platform().Info("========================================")
 
 	logger.Platform().Info("[AZ NSP] 服务配置", "region", region, "az", az, "port", portInt)
 	logger.Platform().Info("[AZ NSP] Top NSP地址", "addr", topNSPAddr)
@@ -150,10 +160,7 @@ func main() {
 	inspector := asynqbroker.NewInspector(redisOpt)
 	defer inspector.Close()
 
-	// 创建 Traced HTTP Client
-	tracedHTTP := trace.NewTracedClient(nil)
-
-	server := api.NewServer(cfg, broker, inspector, tracedHTTP, pgDB)
+	server := api.NewServer(cfg, broker, inspector, components.TracedHTTP, pgDB, components.Verifier)
 
 	if err := server.RegisterToTopNSP(); err != nil {
 		logger.Platform().Info("[AZ NSP] 注册到Top NSP失败 (将在后续心跳中重试)", "az", az, "error", err)

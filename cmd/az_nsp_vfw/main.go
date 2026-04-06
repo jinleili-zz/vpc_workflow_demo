@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"workflow_qoder/internal/az/vfw/api"
+	"workflow_qoder/internal/bootstrap"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/orchestration"
 
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue/asynqbroker"
-	"github.com/jinleili-zz/nsp-platform/trace"
 	_ "github.com/lib/pq"
 )
 
@@ -41,20 +41,6 @@ func main() {
 	cfg.AZ = az
 	cfg.ServiceType = "az"
 
-	// 初始化 logger
-	logCfg := logger.DefaultConfig(fmt.Sprintf("az-nsp-vfw-%s", az))
-	if os.Getenv("DEVELOPMENT") == "true" {
-		logCfg = logger.DevelopmentConfig(fmt.Sprintf("az-nsp-vfw-%s", az))
-	}
-	if err := logger.Init(logCfg); err != nil {
-		panic("初始化日志失败: " + err.Error())
-	}
-	defer logger.Sync()
-
-	logger.Platform().Info("========================================")
-	logger.Platform().Info("AZ NSP VFW 启动中...")
-	logger.Platform().Info("========================================")
-
 	port := 8080
 	if portStr := os.Getenv("PORT"); portStr != "" {
 		if p, err := strconv.Atoi(portStr); err == nil {
@@ -62,6 +48,29 @@ func main() {
 		}
 	}
 	cfg.Port = port
+
+	authCreds, err := cfg.AuthCredentials()
+	if err != nil {
+		fmt.Printf("解析认证配置失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	bootstrapCfg := bootstrap.DefaultConfig(fmt.Sprintf("az-nsp-vfw-%s", az))
+	bootstrapCfg.EnableAuth = cfg.Auth.EnableAuth
+	bootstrapCfg.EnableSaga = false
+	bootstrapCfg.Credentials = authCreds
+	bootstrapCfg.SkipAuthPaths = cfg.Auth.SkipAuthPaths
+
+	components, err := bootstrap.Initialize(context.Background(), bootstrapCfg)
+	if err != nil {
+		fmt.Printf("初始化基础组件失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer components.Shutdown()
+
+	logger.Platform().Info("========================================")
+	logger.Platform().Info("AZ NSP VFW 启动中...")
+	logger.Platform().Info("========================================")
 
 	logger.Platform().Info("[AZ NSP VFW] 服务配置", "region", region, "az", az, "port", port)
 
@@ -75,7 +84,6 @@ func main() {
 
 	// Connect to PostgreSQL
 	var pgDB *sql.DB
-	var err error
 	for i := 0; i < 30; i++ {
 		pgDB, err = sql.Open("postgres", postgresDSN)
 		if err == nil {
@@ -117,10 +125,7 @@ func main() {
 	inspector := asynqbroker.NewInspector(redisOpt)
 	defer inspector.Close()
 
-	// 创建 Traced HTTP Client
-	tracedHTTP := trace.NewTracedClient(nil)
-
-	server := api.NewServer(cfg, broker, inspector, tracedHTTP, pgDB)
+	server := api.NewServer(cfg, broker, inspector, components.TracedHTTP, pgDB, components.Verifier)
 
 	// 创建 Consumer 消费 reply 队列
 	replyConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{

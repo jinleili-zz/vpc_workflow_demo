@@ -29,13 +29,24 @@ func main() {
 	// 支持从 config.yaml 文件加载，环境变量覆盖（NSP_前缀），以及热更新
 	configLoader, err := config.NewConfigLoader("./config/config.yaml", "NSP", true)
 	if err != nil {
-		logger.Platform().Error("加载配置失败", "error", err)
+		fmt.Printf("加载配置失败: %v\n", err)
 		os.Exit(1)
 	}
 	defer configLoader.Close()
 
 	cfg := configLoader.GetConfig()
 	cfg.ServiceType = "top"
+
+	authCreds, err := cfg.AuthCredentials()
+	if err != nil {
+		fmt.Printf("解析认证配置失败: %v\n", err)
+		os.Exit(1)
+	}
+	signerCred, err := cfg.ResolveSignerCredential("top-nsp")
+	if err != nil {
+		fmt.Printf("解析签名凭证失败: %v\n", err)
+		os.Exit(1)
+	}
 
 	// 从环境变量获取端口（高优先级覆盖配置文件）
 	port := os.Getenv("PORT")
@@ -92,7 +103,9 @@ func main() {
 	bootstrapCfg := bootstrap.DefaultConfig("top-nsp-vpc")
 	bootstrapCfg.PostgresDSN = postgresDSN
 	bootstrapCfg.EnableSaga = true
-	bootstrapCfg.EnableAuth = false // Disable auth for testing
+	bootstrapCfg.EnableAuth = false
+	bootstrapCfg.Credentials = authCreds
+	bootstrapCfg.ServiceAccessKey = signerCred.AccessKey
 	bootstrapCfg.SkipAuthPaths = []string{
 		"/api/v1/health",
 		"/api/v1/register/az",
@@ -119,10 +132,10 @@ func main() {
 	reg := registry.NewRegistry(redisClient)
 
 	// Initialize orchestrator with SAGA engine
-	orch := orchestrator.NewOrchestrator(ctx, reg, topDB, components.SagaEngine, components.TracedHTTP)
+	orch := orchestrator.NewOrchestrator(ctx, reg, topDB, components.SagaEngine, components.TracedHTTP, components.Signer)
 
 	// Initialize API server
-	server := api.NewServer(reg, orch, components.TracedHTTP)
+	server := api.NewServer(reg, orch, components.TracedHTTP, components.Signer)
 
 	// Setup middlewares (trace, auth, logger) BEFORE routes
 	components.SetupGinMiddlewares(server.Engine())

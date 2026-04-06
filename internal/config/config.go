@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/config"
 )
 
@@ -27,6 +29,9 @@ type NSPConfig struct {
 
 	// AZ NSP 特有配置
 	AZNSP AZNSPConfig `mapstructure:"az_nsp"`
+
+	// Auth 配置
+	Auth AuthConfig `mapstructure:"auth"`
 }
 
 // RedisConfig Redis配置
@@ -61,6 +66,21 @@ type AZNSPConfig struct {
 	WorkerCount int    `mapstructure:"worker_count"`
 }
 
+// AuthConfig AK/SK 认证配置
+type AuthConfig struct {
+	EnableAuth    bool                   `mapstructure:"enable_auth"`
+	SkipAuthPaths []string               `mapstructure:"skip_auth_paths"`
+	Credentials   []AuthCredentialConfig `mapstructure:"credentials"`
+}
+
+// AuthCredentialConfig 单个 AK/SK 凭证配置
+type AuthCredentialConfig struct {
+	AccessKey string `mapstructure:"access_key"`
+	SecretKey string `mapstructure:"secret_key"`
+	Label     string `mapstructure:"label"`
+	Enabled   bool   `mapstructure:"enabled"`
+}
+
 // ConfigLoader 配置加载器，支持热更新
 type ConfigLoader struct {
 	loader config.Loader
@@ -78,21 +98,23 @@ func NewConfigLoader(configFile, envPrefix string, watch bool) (*ConfigLoader, e
 		Watch:      watch,
 		Defaults: map[string]any{
 			"port":                  8080,
-			"redis.host":           "localhost",
-			"redis.port":           6379,
-			"redis.data_db":        0,
-			"redis.broker_db":      1,
-			"redis.max_idle":       3,
-			"redis.max_active":     10,
-			"redis.idle_timeout":   240,
-			"postgresql.host":      "localhost",
-			"postgresql.port":      5432,
-			"postgresql.user":      "nsp_user",
-			"postgresql.password":  "nsp_password",
+			"redis.host":            "localhost",
+			"redis.port":            6379,
+			"redis.data_db":         0,
+			"redis.broker_db":       1,
+			"redis.max_idle":        3,
+			"redis.max_active":      10,
+			"redis.idle_timeout":    240,
+			"postgresql.host":       "localhost",
+			"postgresql.port":       5432,
+			"postgresql.user":       "nsp_user",
+			"postgresql.password":   "nsp_password",
 			"top_nsp.az_nsp_prefix": "az-nsp",
 			"top_nsp.az_nsp_port":   8080,
 			"az_nsp.top_nsp_addr":   "http://top-nsp:8080",
 			"az_nsp.worker_count":   2,
+			"auth.enable_auth":      false,
+			"auth.skip_auth_paths":  []string{"/api/v1/health"},
 		},
 	})
 	if err != nil {
@@ -223,10 +245,80 @@ func LoadConfig() *NSPConfig {
 				TopNSPAddr:  "http://top-nsp:8080",
 				WorkerCount: 2,
 			},
+			Auth: AuthConfig{
+				EnableAuth:    false,
+				SkipAuthPaths: []string{"/api/v1/health"},
+			},
 		}
 	}
 	// 注意：使用 LoadConfig 时，调用方需要自行管理 ConfigLoader 的生命周期
 	// 这里为了兼容旧接口，不返回 loader，调用方无法调用 Close()
 	// 建议新代码直接使用 NewConfigLoader
 	return cl.GetConfig()
+}
+
+// AuthCredentials returns resolved auth credentials from config.
+func (c *NSPConfig) AuthCredentials() ([]*auth.Credential, error) {
+	creds := make([]*auth.Credential, 0, len(c.Auth.Credentials))
+	for _, cred := range c.Auth.Credentials {
+		secretKey := resolveEnvValue(cred.SecretKey)
+		if cred.AccessKey == "" {
+			return nil, fmt.Errorf("auth credential access_key is required")
+		}
+		if cred.Enabled && secretKey == "" {
+			return nil, fmt.Errorf("auth credential %q secret_key is required", cred.AccessKey)
+		}
+		creds = append(creds, &auth.Credential{
+			AccessKey: cred.AccessKey,
+			SecretKey: secretKey,
+			Label:     cred.Label,
+			Enabled:   cred.Enabled,
+		})
+	}
+	return creds, nil
+}
+
+// EnabledAuthCredentials returns only enabled credentials.
+func (c *NSPConfig) EnabledAuthCredentials() ([]*auth.Credential, error) {
+	creds, err := c.AuthCredentials()
+	if err != nil {
+		return nil, err
+	}
+
+	enabled := make([]*auth.Credential, 0, len(creds))
+	for _, cred := range creds {
+		if cred.Enabled {
+			enabled = append(enabled, cred)
+		}
+	}
+	return enabled, nil
+}
+
+// ResolveSignerCredential selects the credential used by Top services for signing.
+func (c *NSPConfig) ResolveSignerCredential(preferredAK string) (*auth.Credential, error) {
+	creds, err := c.EnabledAuthCredentials()
+	if err != nil {
+		return nil, err
+	}
+	if len(creds) == 0 {
+		return nil, fmt.Errorf("no enabled auth credentials configured")
+	}
+
+	if preferredAK != "" {
+		for _, cred := range creds {
+			if cred.AccessKey == preferredAK {
+				return cred, nil
+			}
+		}
+		return nil, fmt.Errorf("enabled auth credential %q not found", preferredAK)
+	}
+
+	return creds[0], nil
+}
+
+func resolveEnvValue(value string) string {
+	if strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") {
+		return os.Getenv(strings.TrimSuffix(strings.TrimPrefix(value, "${"), "}"))
+	}
+	return value
 }

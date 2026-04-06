@@ -3,17 +3,33 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/trace"
 	"workflow_qoder/internal/models"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
 func TestAZNSPClientWithTrace(t *testing.T) {
 	tracedClient := trace.NewTracedClient(nil)
-	client := NewAZNSPClientWithTrace(tracedClient)
+	client := NewAZNSPClientWithTrace(tracedClient, nil)
 
 	if client.tracedClient == nil {
 		t.Fatal("tracedClient should not be nil")
@@ -21,7 +37,7 @@ func TestAZNSPClientWithTrace(t *testing.T) {
 }
 
 func TestAZNSPClientWithoutTrace(t *testing.T) {
-	client := NewAZNSPClient()
+	client := NewAZNSPClient(nil)
 
 	if client.tracedClient != nil {
 		t.Fatal("tracedClient should be nil for plain client")
@@ -32,29 +48,27 @@ func TestAZNSPClientWithoutTrace(t *testing.T) {
 }
 
 func TestCreateVPCWithTrace(t *testing.T) {
-	// Mock server
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify trace headers are present
-		traceID := r.Header.Get("X-B3-TraceId")
-		if traceID == "" {
-			t.Error("Expected X-B3-TraceId header in request")
-		}
+	tracedClient := trace.NewTracedClient(&http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			// Verify trace headers are present
+			traceID := r.Header.Get("X-B3-TraceId")
+			if traceID == "" {
+				t.Error("Expected X-B3-TraceId header in request")
+			}
 
-		if r.Method != "POST" {
-			t.Errorf("Expected POST, got %s", r.Method)
-		}
-		if r.URL.Path != "/api/v1/vpc" {
-			t.Errorf("Expected /api/v1/vpc, got %s", r.URL.Path)
-		}
+			if r.Method != "POST" {
+				t.Errorf("Expected POST, got %s", r.Method)
+			}
+			if r.URL.Path != "/api/v1/vpc" {
+				t.Errorf("Expected /api/v1/vpc, got %s", r.URL.Path)
+			}
 
-		resp := models.VPCResponse{Success: true, Message: "VPC created"}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer ts.Close()
-
-	tracedClient := trace.NewTracedClient(nil)
-	client := NewAZNSPClientWithTrace(tracedClient)
+			resp := models.VPCResponse{Success: true, Message: "VPC created"}
+			body, _ := json.Marshal(resp)
+			return jsonResponse(http.StatusOK, string(body)), nil
+		}),
+	})
+	client := NewAZNSPClientWithTrace(tracedClient, nil)
 
 	// Create trace context
 	tc := &trace.TraceContext{
@@ -66,7 +80,7 @@ func TestCreateVPCWithTrace(t *testing.T) {
 	ctx := trace.ContextWithTrace(context.Background(), tc)
 
 	req := &models.VPCRequest{VPCName: "test-vpc", Region: "region-1"}
-	resp, err := client.CreateVPC(ctx, ts.URL, req)
+	resp, err := client.CreateVPC(ctx, "http://example.com", req)
 	if err != nil {
 		t.Fatalf("CreateVPC failed: %v", err)
 	}
@@ -76,24 +90,22 @@ func TestCreateVPCWithTrace(t *testing.T) {
 }
 
 func TestDeleteVPCWithTrace(t *testing.T) {
-	// Mock server
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify trace headers
-		traceID := r.Header.Get("X-B3-TraceId")
-		if traceID == "" {
-			t.Error("Expected X-B3-TraceId header in request")
-		}
+	tracedClient := trace.NewTracedClient(&http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			// Verify trace headers
+			traceID := r.Header.Get("X-B3-TraceId")
+			if traceID == "" {
+				t.Error("Expected X-B3-TraceId header in request")
+			}
 
-		if r.Method != "DELETE" {
-			t.Errorf("Expected DELETE, got %s", r.Method)
-		}
+			if r.Method != "DELETE" {
+				t.Errorf("Expected DELETE, got %s", r.Method)
+			}
 
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer ts.Close()
-
-	tracedClient := trace.NewTracedClient(nil)
-	client := NewAZNSPClientWithTrace(tracedClient)
+			return jsonResponse(http.StatusNoContent, ""), nil
+		}),
+	})
+	client := NewAZNSPClientWithTrace(tracedClient, nil)
 
 	tc := &trace.TraceContext{
 		TraceID:    "test-delete-vpc-trace-id",
@@ -103,44 +115,43 @@ func TestDeleteVPCWithTrace(t *testing.T) {
 	}
 	ctx := trace.ContextWithTrace(context.Background(), tc)
 
-	err := client.DeleteVPC(ctx, ts.URL, "test-vpc")
+	err := client.DeleteVPC(ctx, "http://example.com", "test-vpc")
 	if err != nil {
 		t.Fatalf("DeleteVPC failed: %v", err)
 	}
 }
 
 func TestDeleteVPCWithoutTrace(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "DELETE" {
-			t.Errorf("Expected DELETE, got %s", r.Method)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ts.Close()
+	client := NewAZNSPClient(nil)
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method != "DELETE" {
+				t.Errorf("Expected DELETE, got %s", r.Method)
+			}
+			return jsonResponse(http.StatusOK, ""), nil
+		}),
+	}
 
-	client := NewAZNSPClient()
-
-	err := client.DeleteVPC(context.Background(), ts.URL, "test-vpc")
+	err := client.DeleteVPC(context.Background(), "http://example.com", "test-vpc")
 	if err != nil {
 		t.Fatalf("DeleteVPC without trace failed: %v", err)
 	}
 }
 
 func TestHealthCheckWithTrace(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		traceID := r.Header.Get("X-B3-TraceId")
-		if traceID == "" {
-			t.Error("Expected X-B3-TraceId header")
-		}
-		if r.Method != "GET" {
-			t.Errorf("Expected GET, got %s", r.Method)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ts.Close()
-
-	tracedClient := trace.NewTracedClient(nil)
-	client := NewAZNSPClientWithTrace(tracedClient)
+	tracedClient := trace.NewTracedClient(&http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			traceID := r.Header.Get("X-B3-TraceId")
+			if traceID == "" {
+				t.Error("Expected X-B3-TraceId header")
+			}
+			if r.Method != "GET" {
+				t.Errorf("Expected GET, got %s", r.Method)
+			}
+			return jsonResponse(http.StatusOK, ""), nil
+		}),
+	})
+	client := NewAZNSPClientWithTrace(tracedClient, nil)
 
 	tc := &trace.TraceContext{
 		TraceID:    "test-health-trace-id",
@@ -150,8 +161,38 @@ func TestHealthCheckWithTrace(t *testing.T) {
 	}
 	ctx := trace.ContextWithTrace(context.Background(), tc)
 
-	err := client.HealthCheck(ctx, ts.URL)
+	err := client.HealthCheck(ctx, "http://example.com")
 	if err != nil {
 		t.Fatalf("HealthCheck failed: %v", err)
+	}
+}
+
+func TestCreateVPCWithSigner(t *testing.T) {
+	client := NewAZNSPClient(auth.NewSigner("top-nsp", "test-secret-key-12345"))
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Header.Get("Authorization") == "" {
+				t.Error("Expected Authorization header in request")
+			}
+			if r.Header.Get(auth.HeaderTimestamp) == "" {
+				t.Error("Expected signed timestamp header in request")
+			}
+			if r.Header.Get(auth.HeaderNonce) == "" {
+				t.Error("Expected signed nonce header in request")
+			}
+
+			resp := models.VPCResponse{Success: true, Message: "VPC created"}
+			body, _ := json.Marshal(resp)
+			return jsonResponse(http.StatusOK, string(body)), nil
+		}),
+	}
+
+	req := &models.VPCRequest{VPCName: "test-vpc", Region: "region-1"}
+	resp, err := client.CreateVPC(context.Background(), "http://example.com", req)
+	if err != nil {
+		t.Fatalf("CreateVPC failed: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("Expected success, got: %s", resp.Message)
 	}
 }

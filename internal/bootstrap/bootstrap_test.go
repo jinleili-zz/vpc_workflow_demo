@@ -2,8 +2,10 @@ package bootstrap
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,12 @@ import (
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/trace"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // ========== TC-LOG: Logger 模块测试 ==========
 
@@ -197,13 +205,17 @@ func TestTracedHTTPClient(t *testing.T) {
 		t.Fatal("TracedHTTP should not be nil")
 	}
 
-	// Create a test server to verify trace headers are injected
 	var receivedTraceID string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedTraceID = r.Header.Get("X-B3-TraceId")
-		w.WriteHeader(200)
-	}))
-	defer ts.Close()
+	components.TracedHTTP = trace.NewTracedClient(&http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			receivedTraceID = r.Header.Get("X-B3-TraceId")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	})
 
 	// Set up trace context
 	tc := &trace.TraceContext{
@@ -214,7 +226,7 @@ func TestTracedHTTPClient(t *testing.T) {
 	}
 	ctx := trace.ContextWithTrace(context.Background(), tc)
 
-	resp, err := components.TracedHTTP.Get(ctx, ts.URL+"/test")
+	resp, err := components.TracedHTTP.Get(ctx, "http://example.com/test")
 	if err != nil {
 		t.Fatalf("TracedHTTP.Get failed: %v", err)
 	}
@@ -231,6 +243,10 @@ func TestAuthInit(t *testing.T) {
 	cfg := DefaultConfig("test-auth")
 	cfg.EnableAuth = true
 	cfg.EnableSaga = false
+	cfg.Credentials = []*auth.Credential{
+		{AccessKey: "test-ak", SecretKey: "test-secret-key-12345", Label: "Test", Enabled: true},
+	}
+	cfg.ServiceAccessKey = "test-ak"
 
 	components, err := Initialize(context.Background(), cfg)
 	if err != nil {
@@ -269,6 +285,7 @@ func TestAKSKSignAndVerify(t *testing.T) {
 	cfg.Credentials = []*auth.Credential{
 		{AccessKey: "test-ak", SecretKey: "test-secret-key-12345", Label: "Test", Enabled: true},
 	}
+	cfg.ServiceAccessKey = "test-ak"
 
 	components, err := Initialize(context.Background(), cfg)
 	if err != nil {
@@ -305,6 +322,7 @@ func TestAuthMiddleware(t *testing.T) {
 	cfg.Credentials = []*auth.Credential{
 		{AccessKey: "test-ak", SecretKey: "test-secret-key-12345", Label: "Test", Enabled: true},
 	}
+	cfg.ServiceAccessKey = "test-ak"
 
 	components, err := Initialize(context.Background(), cfg)
 	if err != nil {
@@ -359,6 +377,10 @@ func TestFullBootstrap(t *testing.T) {
 	cfg.EnableSaga = false // No PostgreSQL available in test env
 	cfg.LogLevel = "debug"
 	cfg.Development = true
+	cfg.Credentials = []*auth.Credential{
+		{AccessKey: "test-ak", SecretKey: "test-secret-key-12345", Label: "Test", Enabled: true},
+	}
+	cfg.ServiceAccessKey = "test-ak"
 
 	components, err := Initialize(context.Background(), cfg)
 	if err != nil {

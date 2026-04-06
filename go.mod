@@ -2,6 +2,8 @@ module workflow_qoder
 
 go 1.25.6
 
+replace github.com/jinleili-zz/nsp-platform => ./third_party/nsp-platform
+
 require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/google/uuid v1.6.0

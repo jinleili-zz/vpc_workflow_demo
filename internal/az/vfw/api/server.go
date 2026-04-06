@@ -15,6 +15,7 @@ import (
 	"workflow_qoder/internal/models"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
 	"github.com/jinleili-zz/nsp-platform/trace"
@@ -27,7 +28,7 @@ type Server struct {
 	db           *sql.DB
 }
 
-func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, inspector taskqueue.Inspector, tracedHTTP *trace.TracedClient, db *sql.DB) *Server {
+func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, inspector taskqueue.Inspector, tracedHTTP *trace.TracedClient, db *sql.DB, verifier *auth.Verifier) *Server {
 	router := gin.New()
 	router.Use(gin.Recovery())
 
@@ -35,6 +36,21 @@ func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, inspector taskque
 	instanceID := fmt.Sprintf("az-nsp-vfw-%s-%s", cfg.Region, cfg.AZ)
 	router.Use(trace.TraceMiddleware(instanceID))
 	router.Use(ginLoggerMiddleware())
+	if cfg.Auth.EnableAuth && verifier != nil {
+		skipPaths := cfg.Auth.SkipAuthPaths
+		if len(skipPaths) == 0 {
+			skipPaths = []string{"/api/v1/health"}
+		}
+		router.Use(auth.AKSKAuthMiddleware(verifier, &auth.MiddlewareOption{
+			Skipper: auth.NewSkipperByPath(skipPaths...),
+			OnAuthFailed: func(c *gin.Context, err error) {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"code":    http.StatusUnauthorized,
+					"message": err.Error(),
+				})
+			},
+		}))
+	}
 
 	orch := orchestrator.NewVFWOrchestrator(db, broker, inspector, tracedHTTP, cfg.Region, cfg.AZ)
 
