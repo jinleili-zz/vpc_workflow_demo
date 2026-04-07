@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"net/http"
 
+	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
 	"workflow_qoder/internal/top/orchestrator"
 	"workflow_qoder/internal/top/registry"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/trace"
 )
@@ -16,17 +18,17 @@ import (
 type Server struct {
 	registry     *registry.Registry
 	orchestrator *orchestrator.Orchestrator
-	tracedHTTP   *trace.TracedClient
+	signedHTTP   *client.SignedTracedClient
 	router       *gin.Engine
 }
 
-func NewServer(registry *registry.Registry, orchestrator *orchestrator.Orchestrator, tracedHTTP *trace.TracedClient) *Server {
+func NewServer(registry *registry.Registry, orchestrator *orchestrator.Orchestrator, tracedHTTP *trace.TracedClient, signer *auth.Signer) *Server {
 	router := gin.New()
 
 	server := &Server{
 		registry:     registry,
 		orchestrator: orchestrator,
-		tracedHTTP:   tracedHTTP,
+		signedHTTP:   client.NewSignedTracedClient(tracedHTTP, signer),
 		router:       router,
 	}
 
@@ -469,7 +471,16 @@ func (s *Server) getSubnetStatus(c *gin.Context) {
 	}
 
 	// 直接查询 AZ 获取子网状态
-	subnetStatus, err := s.tracedHTTP.Get(ctx, fmt.Sprintf("%s/api/v1/subnet/%s/status", azInfo.NSPAddr, subnetName))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/api/v1/subnet/%s/status", azInfo.NSPAddr, subnetName), nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("创建请求失败: %v", err),
+		})
+		return
+	}
+
+	subnetStatus, err := s.signedHTTP.Do(req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -517,7 +528,7 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 
 	// 转发删除请求到 AZ
 	req, _ := http.NewRequestWithContext(ctx, "DELETE", fmt.Sprintf("%s/api/v1/subnet/%s", azInfo.NSPAddr, subnetName), nil)
-	resp, err := s.tracedHTTP.Do(req)
+	resp, err := s.signedHTTP.Do(req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -578,7 +589,7 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 	}
 
 	req, _ := http.NewRequestWithContext(ctx, "DELETE", fmt.Sprintf("%s/api/v1/subnet/%s", azInfo.NSPAddr, subnet.SubnetName), nil)
-	resp, err := s.tracedHTTP.Do(req)
+	resp, err := s.signedHTTP.Do(req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,

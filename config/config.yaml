@@ -37,3 +37,14 @@ top_nsp:
 az_nsp:
   top_nsp_addr: "http://top-nsp:8080"
   worker_count: 2
+
+# AK/SK 认证配置
+auth:
+  enable_auth: false
+  skip_auth_paths:
+    - "/api/v1/health"
+  credentials:
+    - access_key: "top-nsp"
+      secret_key: "top-nsp-secret-key"
+      label: "Top NSP"
+      enabled: true

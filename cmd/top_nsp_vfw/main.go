@@ -1,29 +1,57 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"strconv"
 
+	"workflow_qoder/internal/bootstrap"
+	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/top/vfw/api"
 	"workflow_qoder/internal/top/vfw/service"
 
 	"github.com/jinleili-zz/nsp-platform/logger"
-
 	_ "github.com/lib/pq"
 )
 
 func main() {
-	// 初始化 logger
-	logCfg := logger.DefaultConfig("top-nsp-vfw")
-	if os.Getenv("DEVELOPMENT") == "true" {
-		logCfg = logger.DevelopmentConfig("top-nsp-vfw")
+	ctx := context.Background()
+
+	configLoader, err := config.NewConfigLoader("./config/config.yaml", "NSP", true)
+	if err != nil {
+		fmt.Printf("加载配置失败: %v\n", err)
+		os.Exit(1)
 	}
-	if err := logger.Init(logCfg); err != nil {
-		panic("初始化日志失败: " + err.Error())
+	defer configLoader.Close()
+
+	cfg := configLoader.GetConfig()
+	cfg.ServiceType = "top"
+
+	authCreds, err := cfg.AuthCredentials()
+	if err != nil {
+		fmt.Printf("解析认证配置失败: %v\n", err)
+		os.Exit(1)
 	}
-	defer logger.Sync()
+	signerCred, err := cfg.ResolveSignerCredential("top-nsp")
+	if err != nil {
+		fmt.Printf("解析签名凭证失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	bootstrapCfg := bootstrap.DefaultConfig("top-nsp-vfw")
+	bootstrapCfg.EnableAuth = false
+	bootstrapCfg.EnableSaga = false
+	bootstrapCfg.Credentials = authCreds
+	bootstrapCfg.ServiceAccessKey = signerCred.AccessKey
+
+	components, err := bootstrap.Initialize(ctx, bootstrapCfg)
+	if err != nil {
+		fmt.Printf("初始化基础组件失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer components.Shutdown()
 
 	logger.Platform().Info("========================================")
 	logger.Platform().Info("Top NSP VFW 启动中...")
@@ -37,10 +65,10 @@ func main() {
 	}
 
 	// Build PostgreSQL DSN
-	pgHost := getEnvOrDefault("POSTGRES_HOST", "postgres")
-	pgPort := getEnvOrDefault("POSTGRES_PORT", "5432")
-	pgUser := getEnvOrDefault("POSTGRES_USER", "nsp_user")
-	pgPassword := getEnvOrDefault("POSTGRES_PASSWORD", "nsp_password")
+	pgHost := getEnvOrDefault("POSTGRES_HOST", cfg.PostgreSQL.Host)
+	pgPort := getEnvOrDefault("POSTGRES_PORT", fmt.Sprintf("%d", cfg.PostgreSQL.Port))
+	pgUser := getEnvOrDefault("POSTGRES_USER", cfg.PostgreSQL.User)
+	pgPassword := getEnvOrDefault("POSTGRES_PASSWORD", cfg.PostgreSQL.Password)
 
 	vpcDSN := buildPostgresDSN(pgHost, pgPort, pgUser, pgPassword, "top_nsp_vpc")
 	vfwDSN := buildPostgresDSN(pgHost, pgPort, pgUser, pgPassword, "top_nsp_vfw")
@@ -71,7 +99,7 @@ func main() {
 	}
 	logger.Platform().Info("[Top NSP VFW] VFW数据库连接成功")
 
-	policyService := service.NewPolicyService(vpcDB, vfwDB)
+	policyService := service.NewPolicyService(vpcDB, vfwDB, components.Signer)
 
 	server := api.NewServer(policyService)
 

@@ -23,8 +23,9 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "nsp_demo" <<-EOSQL
 EOSQL
 
 # Run migrations on all databases that need them
-MIGRATION_FILE="/migrations/001_init_postgresql.sql"
+# Note: Use the nsp-platform saga.sql which has correct column order
 SAGA_FILE="/migrations/saga.sql"
+MIGRATION_FILE="/migrations/001_init_postgresql.sql"
 PCCN_FILE="/migrations/004_create_pccn_tables.sql"
 
 for DB in top_nsp_vpc top_nsp_vfw nsp_cn_beijing_1a_vpc nsp_cn_beijing_1a_vfw nsp_demo; do

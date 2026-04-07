@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/trace"
 	"workflow_qoder/internal/models"
 )
@@ -17,22 +18,25 @@ import (
 type AZNSPClient struct {
 	httpClient   *http.Client
 	tracedClient *trace.TracedClient
+	signer       *auth.Signer
 }
 
 // NewAZNSPClient 创建AZ NSP客户端
-func NewAZNSPClient() *AZNSPClient {
+func NewAZNSPClient(signer *auth.Signer) *AZNSPClient {
 	return &AZNSPClient{
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		signer: signer,
 	}
 }
 
 // NewAZNSPClientWithTrace 创建带链路追踪的AZ NSP客户端
-func NewAZNSPClientWithTrace(tracedClient *trace.TracedClient) *AZNSPClient {
+func NewAZNSPClientWithTrace(tracedClient *trace.TracedClient, signer *auth.Signer) *AZNSPClient {
 	return &AZNSPClient{
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 		tracedClient: tracedClient,
+		signer:       signer,
 	}
 }
 
@@ -45,20 +49,13 @@ func (c *AZNSPClient) CreateVPC(ctx context.Context, azAddr string, req *models.
 		return nil, fmt.Errorf("序列化请求失败: %v", err)
 	}
 
-	var resp *http.Response
-	if c.tracedClient != nil {
-		// 使用带链路追踪的客户端
-		resp, err = c.tracedClient.Post(ctx, url, "application/json", bytes.NewBuffer(body))
-	} else {
-		// 使用普通客户端
-		var httpReq *http.Request
-		httpReq, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
-		if err != nil {
-			return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		resp, err = c.httpClient.Do(httpReq)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.do(httpReq)
 
 	if err != nil {
 		return nil, fmt.Errorf("发送请求失败: %v", err)
@@ -92,20 +89,13 @@ func (c *AZNSPClient) CreateSubnet(ctx context.Context, azAddr string, req *mode
 		return nil, fmt.Errorf("序列化请求失败: %v", err)
 	}
 
-	var resp *http.Response
-	if c.tracedClient != nil {
-		// 使用带链路追踪的客户端
-		resp, err = c.tracedClient.Post(ctx, url, "application/json", bytes.NewBuffer(body))
-	} else {
-		// 使用普通客户端
-		var httpReq *http.Request
-		httpReq, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
-		if err != nil {
-			return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		resp, err = c.httpClient.Do(httpReq)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.do(httpReq)
 
 	if err != nil {
 		return nil, fmt.Errorf("发送请求失败: %v", err)
@@ -134,20 +124,11 @@ func (c *AZNSPClient) CreateSubnet(ctx context.Context, azAddr string, req *mode
 func (c *AZNSPClient) HealthCheck(ctx context.Context, azAddr string) error {
 	url := fmt.Sprintf("%s/api/v1/health", azAddr)
 
-	var resp *http.Response
-	var err error
-	if c.tracedClient != nil {
-		// 使用带链路追踪的客户端
-		resp, err = c.tracedClient.Get(ctx, url)
-	} else {
-		// 使用普通客户端
-		var httpReq *http.Request
-		httpReq, err = http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			return fmt.Errorf("创建HTTP请求失败: %v", err)
-		}
-		resp, err = c.httpClient.Do(httpReq)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
+	resp, err := c.do(httpReq)
 
 	if err != nil {
 		return fmt.Errorf("发送请求失败: %v", err)
@@ -165,23 +146,11 @@ func (c *AZNSPClient) HealthCheck(ctx context.Context, azAddr string) error {
 func (c *AZNSPClient) DeleteVPC(ctx context.Context, azAddr string, vpcName string) error {
 	url := fmt.Sprintf("%s/api/v1/vpc/%s", azAddr, vpcName)
 
-	var resp *http.Response
-	var err error
-	if c.tracedClient != nil {
-		// 使用带链路追踪的客户端（TracedClient没有Delete方法，使用Do）
-		httpReq, reqErr := http.NewRequestWithContext(ctx, "DELETE", url, nil)
-		if reqErr != nil {
-			return fmt.Errorf("创建HTTP请求失败: %v", reqErr)
-		}
-		resp, err = c.tracedClient.Do(httpReq)
-	} else {
-		// 使用普通客户端
-		httpReq, reqErr := http.NewRequestWithContext(ctx, "DELETE", url, nil)
-		if reqErr != nil {
-			return fmt.Errorf("创建HTTP请求失败: %v", reqErr)
-		}
-		resp, err = c.httpClient.Do(httpReq)
+	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
+	resp, err := c.do(httpReq)
 
 	if err != nil {
 		return fmt.Errorf("发送请求失败: %v", err)
@@ -200,18 +169,11 @@ func (c *AZNSPClient) DeleteVPC(ctx context.Context, azAddr string, vpcName stri
 func (c *AZNSPClient) GetVPCStatus(ctx context.Context, azAddr string, vpcName string) (*models.VPCStatusResponse, error) {
 	url := fmt.Sprintf("%s/api/v1/vpc/%s/status", azAddr, vpcName)
 
-	var resp *http.Response
-	var err error
-	if c.tracedClient != nil {
-		resp, err = c.tracedClient.Get(ctx, url)
-	} else {
-		var httpReq *http.Request
-		httpReq, err = http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
-		}
-		resp, err = c.httpClient.Do(httpReq)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
+	resp, err := c.do(httpReq)
 
 	if err != nil {
 		return nil, fmt.Errorf("发送请求失败: %v", err)
@@ -248,18 +210,13 @@ func (c *AZNSPClient) CreatePCCN(ctx context.Context, azAddr string, req *models
 		return nil, fmt.Errorf("序列化请求失败: %v", err)
 	}
 
-	var resp *http.Response
-	if c.tracedClient != nil {
-		resp, err = c.tracedClient.Post(ctx, url, "application/json", bytes.NewBuffer(body))
-	} else {
-		var httpReq *http.Request
-		httpReq, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
-		if err != nil {
-			return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		resp, err = c.httpClient.Do(httpReq)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.do(httpReq)
 
 	if err != nil {
 		return nil, fmt.Errorf("发送请求失败: %v", err)
@@ -288,18 +245,11 @@ func (c *AZNSPClient) CreatePCCN(ctx context.Context, azAddr string, req *models
 func (c *AZNSPClient) GetPCCNStatus(ctx context.Context, azAddr string, pccnName string) (*models.PCCNStatusResponse, error) {
 	url := fmt.Sprintf("%s/api/v1/pccn/%s/status", azAddr, pccnName)
 
-	var resp *http.Response
-	var err error
-	if c.tracedClient != nil {
-		resp, err = c.tracedClient.Get(ctx, url)
-	} else {
-		var httpReq *http.Request
-		httpReq, err = http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
-		}
-		resp, err = c.httpClient.Do(httpReq)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
+	resp, err := c.do(httpReq)
 
 	if err != nil {
 		return nil, fmt.Errorf("发送请求失败: %v", err)
@@ -327,21 +277,11 @@ func (c *AZNSPClient) GetPCCNStatus(ctx context.Context, azAddr string, pccnName
 func (c *AZNSPClient) DeletePCCN(ctx context.Context, azAddr string, pccnName string) error {
 	url := fmt.Sprintf("%s/api/v1/pccn/%s", azAddr, pccnName)
 
-	var resp *http.Response
-	var err error
-	if c.tracedClient != nil {
-		httpReq, reqErr := http.NewRequestWithContext(ctx, "DELETE", url, nil)
-		if reqErr != nil {
-			return fmt.Errorf("创建HTTP请求失败: %v", reqErr)
-		}
-		resp, err = c.tracedClient.Do(httpReq)
-	} else {
-		httpReq, reqErr := http.NewRequestWithContext(ctx, "DELETE", url, nil)
-		if reqErr != nil {
-			return fmt.Errorf("创建HTTP请求失败: %v", reqErr)
-		}
-		resp, err = c.httpClient.Do(httpReq)
+	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
+	resp, err := c.do(httpReq)
 
 	if err != nil {
 		return fmt.Errorf("发送请求失败: %v", err)
@@ -354,4 +294,16 @@ func (c *AZNSPClient) DeletePCCN(ctx context.Context, azAddr string, pccnName st
 	}
 
 	return nil
+}
+
+func (c *AZNSPClient) do(req *http.Request) (*http.Response, error) {
+	if c.signer != nil {
+		if err := c.signer.Sign(req); err != nil {
+			return nil, fmt.Errorf("签名请求失败: %w", err)
+		}
+	}
+	if c.tracedClient != nil {
+		return c.tracedClient.Do(req)
+	}
+	return c.httpClient.Do(req)
 }

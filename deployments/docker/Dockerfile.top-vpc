@@ -5,13 +5,14 @@ WORKDIR /build
 
 ENV GOPROXY=https://goproxy.cn,direct
 
-# 复制 nsp-common 模块
+# 复制 nsp-platform 替换模块
+COPY nsp-platform third_party/nsp-platform
 
-# 复制主项目
-COPY vpc_workflow_demo/go.mod vpc_workflow_demo/go.sum ./
-RUN go mod download
-
+# 复制主项目代码
 COPY vpc_workflow_demo/ .
+
+# Docker 环境中修改 replace 路径以匹配构建上下文
+RUN sed -i 's|../nsp-platform|./third_party/nsp-platform|g' go.mod && go mod tidy
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o top-nsp-vpc ./cmd/top_nsp
 

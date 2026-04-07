@@ -26,3 +26,15 @@ top_nsp:
 az_nsp:
   top_nsp_addr: "http://e2e-top-nsp-vpc:8080"
   worker_count: 2
+
+auth:
+  enable_auth: false
+  skip_auth_paths:
+    - "/api/v1/health"
+    - "/api/v1/register/az"
+    - "/api/v1/heartbeat"
+  credentials:
+    - access_key: "top-nsp"
+      secret_key: "test-secret-key-for-top-nsp"
+      label: "top-nsp-signer"
+      enabled: true

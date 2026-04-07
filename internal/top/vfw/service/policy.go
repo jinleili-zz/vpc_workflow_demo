@@ -9,25 +9,32 @@ import (
 	"net/http"
 	"sync"
 
-	topdao "workflow_qoder/internal/top/vpc/dao"
-	vfwdao "workflow_qoder/internal/top/vfw/dao"
+	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
+	vfwdao "workflow_qoder/internal/top/vfw/dao"
+	topdao "workflow_qoder/internal/top/vpc/dao"
 
 	"github.com/google/uuid"
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/logger"
+	"github.com/jinleili-zz/nsp-platform/trace"
 )
 
 type PolicyService struct {
-	vpcDAO *topdao.TopVPCDAO
-	vfwDAO *vfwdao.TopVFWDAO
+	vpcDAO     *topdao.TopVPCDAO
+	vfwDAO     *vfwdao.TopVFWDAO
+	signer     *auth.Signer
+	signedHTTP *client.SignedTracedClient
 	azRegistry map[string]string
 	mu         sync.RWMutex
 }
 
-func NewPolicyService(vpcDB, vfwDB *sql.DB) *PolicyService {
+func NewPolicyService(vpcDB, vfwDB *sql.DB, signer *auth.Signer) *PolicyService {
 	return &PolicyService{
 		vpcDAO:     topdao.NewTopVPCDAO(vpcDB),
 		vfwDAO:     vfwdao.NewTopVFWDAO(vfwDB),
+		signer:     signer,
+		signedHTTP: client.NewSignedTracedClient(trace.NewTracedClient(nil), signer),
 		azRegistry: make(map[string]string),
 	}
 }
@@ -186,7 +193,14 @@ func (s *PolicyService) CreatePolicy(ctx context.Context, req *models.FirewallPo
 
 			body, _ := json.Marshal(azReq)
 			url := fmt.Sprintf("%s/api/v1/firewall/policy", addr)
-			resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+			httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(body))
+			if reqErr != nil {
+				resultChan <- &azResult{az: az, err: reqErr, success: false}
+				s.vfwDAO.UpdateAZRecord(ctx, policyID, az, "", "failed", reqErr.Error())
+				return
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			resp, err := s.signedHTTP.Do(httpReq)
 
 			result := &azResult{az: az}
 			if err != nil {
