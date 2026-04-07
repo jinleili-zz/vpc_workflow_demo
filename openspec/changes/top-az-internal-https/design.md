@@ -61,37 +61,44 @@ AZ NSP 进程直接使用 Go 标准库 `tls.Listen()` / `http.Server.ServeTLS()`
 
 **决策：选择方案 A（AZ 进程内终止 TLS）。** 理由：当前系统以 Docker Compose 部署为主，进程内终止 TLS 更简单直接。同时在配置中预留 `tls.mode` 字段（值为 `process` 或 `lb`），方便未来切换到 LB 终止模式——切换时 AZ 进程只需关闭 TLS 监听并将上报地址指向 LB 的 HTTPS 入口即可。
 
-### Decision 2: Top 侧统一 TLS Transport 构造
+### Decision 2: Top 侧统一 TLS Transport 构造（可重载）
 
 在 `internal/bootstrap/bootstrap.go` 中新增 TLS Transport 初始化逻辑：
 
 - 读取配置中的 CA 证书路径，构造 `*tls.Config` 并设置 `RootCAs`
 - 基于该 `*tls.Config` 创建 `*http.Transport`
-- 将此 Transport 注入到所有 Top -> AZ 出站 client：
-  - `AZNSPClient` - 通过新增构造参数接收 `*http.Transport`
-  - `SignedTracedClient` / `TracedClient` - 通过新增构造参数接收 `*http.Transport`
+- 引入 `TransportProvider` 函数类型（`type TransportProvider func() *http.Transport`），内部通过 `atomic.Value` 管理当前 Transport 指针
+- 将 `TransportProvider` 注入到所有 Top -> AZ 出站 client：
+  - `AZNSPClient` - 构造时接收 `TransportProvider`，每次 `do()` 请求时调用 provider 获取最新 Transport
+  - `SignedTracedClient` / `TracedClient` - 同上，每次请求时通过 provider 获取当前 Transport
   - 散落的 `http.Get()`/`http.Post()` - 替换为使用统一 client 的调用
+  - SAGA Executor - 通过 `saga.ExecutorConfig.HTTPTransportProvider` 传入同一个 provider（见 Decision 3）
 
-**不新建独立 TLS 工具包**。TLS Transport 构造逻辑直接在 bootstrap 中实现，作为初始化步骤之一。如果未来需要在更多场景复用，再提取为独立 package。
+**关键设计点**：client 不持有 `*http.Transport` 指针的快照，而是持有 `TransportProvider` 回调。CA 文件变更时，bootstrap 的后台 goroutine 重建 Transport 并原子更新到 provider 内部，所有 client（包括 SAGA Executor）的后续请求自动使用新 Transport，无需重建 client 实例。
 
-### Decision 3: SAGA 引擎 TLS 适配 - 职责边界
+**不新建独立 TLS 工具包**。TLS Transport 构造和 provider 逻辑直接在 bootstrap 中实现，作为初始化步骤之一。如果未来需要在更多场景复用，再提取为独立 package。
 
-**业务仓库（`vpc_workflow_demo`）职责：**
-- 构造带 TLS 配置的 `*http.Client` 或 `*http.Transport`
-- 通过 `saga.Config` 或 `saga.ExecutorConfig` 传入 SAGA 引擎
-- 在 `internal/bootstrap/bootstrap.go` 的 `initSaga()` 中完成注入
+### Decision 3: SAGA 引擎 TLS 适配 - 职责边界与前置依赖
+
+**SAGA 是 Top -> AZ 主链路的硬依赖。** VPC/PCCN 的创建和删除通过 SAGA sync step 调用 AZ，这是核心业务流量。一旦 AZ 侧切换到 `https://` 地址，SAGA Executor 的 `*http.Client` 必须具备自定义 RootCAs 才能完成 TLS 握手。因此 **nsp_platform 侧提供 Transport 注入能力是整个 HTTPS 改造的前置条件**，不能作为独立的后续阶段。
 
 **平台仓库（`nsp_platform`）职责：**
-- 在 `saga.ExecutorConfig` 中新增 `HTTPClient *http.Client` 或 `HTTPTransport *http.Transport` 字段
-- `NewExecutor()` 中优先使用注入的 client/transport，若为 nil 则 fallback 到当前行为（自建 plain `*http.Client`）
+- 在 `saga.ExecutorConfig` 中新增 `HTTPTransportProvider func() *http.Transport` 字段（函数类型，支持动态获取 Transport）
+- `NewExecutor()` 中：若 `HTTPTransportProvider` 非 nil，Executor 内部 `*http.Client` 的每次请求通过 provider 获取当前 Transport；若为 nil，保持当前行为（自建 plain `*http.Client`）
 - 平台侧不负责 TLS 配置细节、CA 加载、证书管理
 
-**本仓库不修改 `nsp_platform` 代码。** 本仓库仅描述对平台接口的需求，并在平台侧提供接口后进行接入。
+**业务仓库（`vpc_workflow_demo`）职责：**
+- 构造 `TransportProvider`（与 Decision 2 相同的 provider 实例）
+- 在 `internal/bootstrap/bootstrap.go` 的 `initSaga()` 中将 provider 传入 `saga.ExecutorConfig.HTTPTransportProvider`
+- 业务仓库必须等待 `nsp_platform` 模块发布包含该字段的版本后才能编译集成
+
+**本仓库不修改 `nsp_platform` 代码。** 但 SAGA 注入接口是本仓库 HTTPS 改造上线的阻塞依赖，而非可选的后续增强。实施顺序为：先推动平台侧发布接口 -> 业务仓库 `go mod` 升级依赖 -> 统一注入 provider -> AZ 侧切换 HTTPS。
 
 ### Decision 4: AZ 地址 scheme 升级
 
-AZ 自注册时根据 TLS 配置决定上报地址的 scheme：
-- TLS 启用时：`https://az-nsp-{az}:{port}`
+AZ 自注册时根据 TLS 配置和模式决定上报地址的 scheme：
+- `tls.mode = "process"` 且 TLS 启用时：`https://az-nsp-{az}:{port}`
+- `tls.mode = "lb"` 时：**必须**通过 `NSP_ADDR` / `NSP_VFW_ADDR` 环境变量显式指定地址（因为 AZ 进程本身不监听 TLS，无法自动推断正确的 HTTPS 入口）；若环境变量未设置，回退到 `http://az-nsp-{az}:{port}`（HTTP 明文），并输出警告日志
 - TLS 未启用时：保持 `http://az-nsp-{az}:{port}`
 
 地址 scheme 由 AZ 侧决定（AZ 知道自己是否启用了 TLS），Top 侧不做 scheme 推断或覆盖。Top 侧的 TLS client 需同时支持 http 和 https 目标（渐进式迁移期间可能混合存在）。
@@ -112,9 +119,10 @@ AZ 自注册时根据 TLS 配置决定上报地址的 scheme：
    - 第三步：从 Top 侧 CA bundle 中移除旧 CA
 4. 双信任期确保切换过程中不中断
 
-**Transport 原子替换机制：**
-- 使用 `atomic.Value` 存储当前 `*http.Transport` 指针
-- 各 client 每次发起请求时通过 `atomic.Value.Load()` 获取最新 Transport
+**Transport 动态获取机制：**
+- 使用 `atomic.Value` 在 `TransportProvider` 内部存储当前 `*http.Transport` 指针
+- 所有 client（`AZNSPClient`、`SignedTracedClient`、SAGA Executor）持有 `TransportProvider` 回调而非 `*http.Transport` 指针
+- 每次发起请求时通过 `provider()` 调用获取最新 Transport，确保 CA 更新后的新 Transport 立即生效
 - 旧 Transport 上的活跃连接自然结束后由 GC 回收
 
 ### Decision 6: 配置项设计
@@ -141,7 +149,7 @@ tls:
 
 ## Risks / Trade-offs
 
-**[风险] SAGA 平台侧接口未就绪** → 缓解：业务仓库先完成非 SAGA 链路的 HTTPS 改造，SAGA 链路在平台侧提供注入接口后再接入。两条路径可独立推进。代码中预留 SAGA client 注入点，初期传入 nil 使用 fallback 行为。
+**[风险] SAGA 平台侧接口未就绪** → 缓解：SAGA 是 VPC/PCCN 主链路的唯一调用路径，因此 `nsp_platform` 的 `HTTPTransportProvider` 注入接口是整个 HTTPS 改造上线的阻塞依赖。业务仓库在平台接口就绪前可以完成 TLS 配置、TransportProvider 构造、AZ 侧 TLS 监听等所有准备工作并合入主干，但 **不能将任何 AZ 的注册地址切换到 `https://`**。实际切换 HTTPS 需等平台侧发布后统一进行。
 
 **[风险] 证书文件挂载错误导致启动失败** → 缓解：启动时校验证书文件可读性和有效性（到期时间检查），失败时输出明确错误日志。`tls.enabled = false` 时完全跳过 TLS 初始化，保持向后兼容。
 
@@ -151,12 +159,12 @@ tls:
 
 **[Trade-off] 进程内 TLS vs LB 终止** → 选择进程内 TLS 增加了每个 AZ 进程的证书管理负担，但避免了引入额外基础设施。通过 `tls.mode` 配置项保留未来切换到 LB 模式的能力。
 
-**[Trade-off] `atomic.Value` Transport 替换** → 提供了无锁的热更新能力，但增加了间接引用层。替代方案（如 `sync.RWMutex`）在高并发场景下性能较差。
+**[Trade-off] `atomic.Value` + TransportProvider 间接引用** → 每次 HTTP 请求多一次函数调用 + atomic.Load 开销（纳秒级），换来 CA 热更新对所有 client（包括 SAGA）即时生效。替代方案（重建 client 实例）需要在所有持有 client 引用的位置同步替换，侵入性大且容易遗漏。
 
 ## Migration Plan
 
-1. **阶段一（非 SAGA 链路）**：实现 TLS 配置、Top 侧统一 Transport、AZ 进程内 TLS 监听，覆盖 `AZNSPClient` 和 `SignedTracedClient` 路径。`tls.enabled` 默认 `false`，可按环境逐步开启。
-2. **阶段二（SAGA 链路）**：平台侧提供 client 注入接口后，业务仓库通过 bootstrap 注入 TLS Transport 到 SAGA Executor。
+1. **阶段一（准备工作，不依赖平台）**：实现 TLS 配置段、`TransportProvider` 构造、CA 热更新 goroutine、AZ 进程内 TLS 监听、client 改造（接受 provider）。全部代码以 `tls.enabled = false` 默认值合入主干，不影响现有运行。
+2. **阶段二（平台依赖就绪后，统一切换）**：`nsp_platform` 发布 `HTTPTransportProvider` 注入接口 -> 业务仓库升级 `go.mod` -> `initSaga()` 注入 provider -> AZ 侧开启 TLS 监听并上报 `https://` 地址 -> Top 侧开启 `tls.enabled`。此阶段是一个原子切换，所有 client 路径（包括 SAGA）同时获得 TLS 能力。
 3. **阶段三（清理）**：确认所有 AZ 均已切换 HTTPS 后，可选地将 `tls.enabled` 默认值改为 `true`。
 
 **回滚策略**：将 `NSP_TLS_ENABLED` 设为 `false` 即可恢复全链路 HTTP 明文通信。AZ 侧同步回退到 HTTP 监听并上报 `http://` 地址。无数据迁移需求。

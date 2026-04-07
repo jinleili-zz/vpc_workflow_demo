@@ -27,10 +27,10 @@ AZ NSP SHALL 支持在不重启进程的情况下加载更新后的叶子证书�
 - **THEN** 系统 MUST 使用 `tls.Config.GetCertificate` 回调从文件系统动态加载证书，而非在启动时一次性加载
 
 ### Requirement: AZ 注册地址 scheme 与 TLS 状态一致
-AZ NSP 向 Top NSP 自注册时上报的地址 scheme SHALL 与自身的 TLS 监听状态一致。
+AZ NSP 向 Top NSP 自注册时上报的地址 scheme SHALL 与自身的实际 TLS 终止状态一致。仅当 AZ 进程自身监听 TLS（`tls.mode = "process"`）时才自动合成 `https://` 地址；LB 模式下 AZ 进程不监听 TLS，不得自动合成 `https://` 地址。
 
-#### Scenario: TLS 启用时上报 https 地址
-- **WHEN** AZ NSP 启用 TLS 并向 Top 自注册
+#### Scenario: process 模式 TLS 启用时上报 https 地址
+- **WHEN** AZ NSP 启用 TLS 且 `tls.mode = "process"` 且未设置 `NSP_ADDR` / `NSP_VFW_ADDR` 环境变量
 - **THEN** 上报地址 MUST 使用 `https://` scheme（如 `https://az-nsp-cn-north-1a:8080`）
 
 #### Scenario: TLS 未启用时上报 http 地址
@@ -42,7 +42,7 @@ AZ NSP 向 Top NSP 自注册时上报的地址 scheme SHALL 与自身的 TLS 监
 - **THEN** 系统 MUST 使用环境变量中的地址值，不自动推断 scheme
 
 ### Requirement: LB 终止模式支持
-当 `tls.mode` 配置为 `lb` 时，AZ NSP SHALL 保持 HTTP 明文监听，但上报地址可通过环境变量指向 LB 的 HTTPS 入口。
+当 `tls.mode` 配置为 `lb` 时，AZ NSP SHALL 保持 HTTP 明文监听。LB 模式下 AZ 进程不进行 TLS 终止，上报地址 MUST 通过 `NSP_ADDR` / `NSP_VFW_ADDR` 环境变量显式指定 LB 的 HTTPS 入口地址。
 
 #### Scenario: LB 模式下 AZ 保持 HTTP 监听
 - **WHEN** AZ NSP 启动且 `tls.mode = "lb"`
@@ -51,3 +51,7 @@ AZ NSP 向 Top NSP 自注册时上报的地址 scheme SHALL 与自身的 TLS 监
 #### Scenario: LB 模式下通过环境变量指定 HTTPS 入口
 - **WHEN** `tls.mode = "lb"` 且 `NSP_ADDR` 设置为 `https://lb-addr:443`
 - **THEN** AZ 自注册 MUST 使用环境变量中的 `https://` 地址
+
+#### Scenario: LB 模式下未设置环境变量时回退到 http 并警告
+- **WHEN** `tls.mode = "lb"` 且 `tls.enabled = true` 且 `NSP_ADDR` / `NSP_VFW_ADDR` 未设置
+- **THEN** AZ 自注册 MUST 回退到 `http://` scheme 地址，并输出警告日志提示需要设置 `NSP_ADDR` 以指向 LB 的 HTTPS 入口

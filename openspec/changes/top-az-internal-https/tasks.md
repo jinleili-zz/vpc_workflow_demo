@@ -7,10 +7,10 @@
 
 ## 2. Top 侧统一 TLS Transport 构造
 
-- [ ] 2.1 在 `internal/bootstrap/bootstrap.go` 中新增 TLS Transport 初始化函数：加载 CA 证书、构造 `*tls.Config`、创建 `*http.Transport`，使用 `atomic.Value` 存储
-- [ ] 2.2 实现 CA 文件变更检测与 Transport 原子替换的后台 goroutine（按 `ca_reload_interval` 定期检查文件修改时间）
-- [ ] 2.3 修改 `internal/client/az_client.go` 的 `AZNSPClient` 构造函数，新增 `*http.Transport` 参数，使内部 `*http.Client` 使用注入的 Transport
-- [ ] 2.4 修改 `internal/client/signed_traced_client.go` 的 `SignedTracedClient` 构造函数，支持接收外部 `*http.Transport`
+- [ ] 2.1 定义 `TransportProvider` 函数类型（`type TransportProvider func() *http.Transport`），在 `internal/bootstrap/bootstrap.go` 中新增 TLS Transport 初始化函数：加载 CA 证书、构造 `*tls.Config`、创建 `*http.Transport`，封装为 `TransportProvider`（内部使用 `atomic.Value`）
+- [ ] 2.2 实现 CA 文件变更检测后台 goroutine：按 `ca_reload_interval` 定期检查文件修改时间，变更时重建 Transport 并原子更新到 provider 内部
+- [ ] 2.3 修改 `internal/client/az_client.go` 的 `AZNSPClient` 构造函数，接收 `TransportProvider`；修改 `do()` 方法在每次请求时调用 provider 获取当前 Transport
+- [ ] 2.4 修改 `internal/client/signed_traced_client.go` 的 `SignedTracedClient` 构造函数，接收 `TransportProvider`；确保每次 `Do()` 调用时通过 provider 获取当前 Transport
 - [ ] 2.5 将 `internal/top/orchestrator/orchestrator.go` 中 `CheckZonePolicies` 的 `http.Get()` 调用替换为使用统一 client
 - [ ] 2.6 检查并替换 Top 侧其他散落的 `http.Get()`/`http.Post()` 直接调用（如 Top API Server 中的调用），统一收口到带 TLS 的 client 路径
 - [ ] 2.7 更新 `cmd/top_nsp/main.go` 和 `cmd/top_nsp_vfw/main.go` 的 bootstrap 流程，传入 TLS Transport
@@ -19,15 +19,15 @@
 
 - [ ] 3.1 修改 `internal/az/api/server.go` 的 HTTP Server 启动逻辑，当 `tls.enabled = true` 且 `tls.mode = "process"` 时使用 `ServeTLS()` 监听
 - [ ] 3.2 实现 `tls.Config.GetCertificate` 回调，支持每次 TLS 握手时从文件动态加载证书（叶子证书热更新）
-- [ ] 3.3 修改 AZ VPC NSP 自注册逻辑（`internal/az/api/server.go`），根据 TLS 启用状态决定上报 `https://` 或 `http://` scheme
-- [ ] 3.4 对 `internal/az/vfw/api/server.go` 执行与 3.1-3.3 相同的改造（VFW AZ 侧 TLS 监听和地址上报）
+- [ ] 3.3 修改 AZ VPC NSP 自注册逻辑（`internal/az/api/server.go`）：`tls.mode = "process"` 且 TLS 启用时上报 `https://` scheme；`tls.mode = "lb"` 时依赖 `NSP_ADDR` 环境变量（未设置则回退 `http://` 并输出警告）；TLS 未启用时保持 `http://`
+- [ ] 3.4 对 `internal/az/vfw/api/server.go` 执行与 3.1-3.3 相同的改造（VFW AZ 侧 TLS 监听和地址上报，LB 模式同理依赖 `NSP_VFW_ADDR`）
 - [ ] 3.5 更新 `cmd/az_nsp/main.go` 和 `cmd/az_nsp_vfw/main.go`，在 bootstrap 中传入 TLS 配置
 
-## 4. SAGA 引擎 TLS 适配（依赖平台侧）
+## 4. SAGA 引擎 TLS 适配（阻塞依赖，需先完成平台侧变更）
 
-- [ ] 4.1 在 `internal/bootstrap/bootstrap.go` 的 `initSaga()` 中预留 TLS Transport 注入点：当平台侧 `saga.ExecutorConfig` 提供 `HTTPClient` 或 `HTTPTransport` 字段时传入，否则传 nil 使用 fallback
-- [ ] 4.2 确认 `nsp_platform` SAGA 模块的 `ExecutorConfig` 注入接口需求，向平台团队提出接口变更请求
-- [ ] 4.3 平台侧接口就绪后，移除 fallback 逻辑，正式注入 TLS Transport 到 SAGA Executor
+- [ ] 4.1 向平台团队提出 `nsp_platform` SAGA 模块变更需求：在 `saga.ExecutorConfig` 中新增 `HTTPTransportProvider func() *http.Transport` 字段，`NewExecutor()` 中若非 nil 则每次请求通过 provider 获取 Transport
+- [ ] 4.2 平台侧发布新版本后，业务仓库升级 `go.mod` 中 `nsp-platform` 依赖版本
+- [ ] 4.3 在 `internal/bootstrap/bootstrap.go` 的 `initSaga()` 中将 `TransportProvider` 传入 `saga.ExecutorConfig.HTTPTransportProvider`
 
 ## 5. Docker 部署适配
 
