@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS saga_steps (
     compensate_method   VARCHAR(10)  NOT NULL,
     compensate_url      TEXT         NOT NULL,
     compensate_payload  JSONB,
+    auth_ak             TEXT         NOT NULL DEFAULT '',
 
     -- 轮询配置 (仅 async 类型步骤使用)
     poll_url            TEXT,
@@ -95,6 +96,7 @@ COMMENT ON COLUMN saga_steps.action_response IS '正向操作响应体';
 COMMENT ON COLUMN saga_steps.compensate_method IS '补偿操作 HTTP 方法';
 COMMENT ON COLUMN saga_steps.compensate_url IS '补偿操作 URL';
 COMMENT ON COLUMN saga_steps.compensate_payload IS '补偿操作请求体';
+COMMENT ON COLUMN saga_steps.auth_ak IS 'AK 标识；非空时通过 CredentialStore 解析 SK 并执行 NSP-HMAC-SHA256 签名';
 COMMENT ON COLUMN saga_steps.poll_url IS '轮询 URL（async 步骤使用）';
 COMMENT ON COLUMN saga_steps.poll_method IS '轮询 HTTP 方法，默认 GET';
 COMMENT ON COLUMN saga_steps.poll_interval_sec IS '轮询间隔秒数';
@@ -151,3 +153,6 @@ COMMENT ON COLUMN saga_transactions.locked_until IS '锁过期时间，超过此
 
 CREATE INDEX IF NOT EXISTS idx_saga_tx_lock ON saga_transactions(locked_until)
     WHERE status IN ('pending', 'running', 'compensating');
+
+ALTER TABLE saga_steps
+    ADD COLUMN IF NOT EXISTS auth_ak TEXT NOT NULL DEFAULT '';

@@ -16,6 +16,7 @@ import (
 	"workflow_qoder/internal/top/orchestrator"
 	"workflow_qoder/internal/top/registry"
 
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/logger"
 
 	_ "github.com/lib/pq"
@@ -42,10 +43,16 @@ func main() {
 		fmt.Printf("解析认证配置失败: %v\n", err)
 		os.Exit(1)
 	}
-	signerCred, err := cfg.ResolveSignerCredential("top-nsp")
-	if err != nil {
-		fmt.Printf("解析签名凭证失败: %v\n", err)
-		os.Exit(1)
+	
+	// 只在有凭证时才解析签名凭证（用于服务间调用签名）
+	var signerCred *auth.Credential
+	if len(authCreds) > 0 {
+		// 不指定 preferred access key，使用第一个可用凭证
+		signerCred, err = cfg.ResolveSignerCredential("")
+		if err != nil {
+			fmt.Printf("解析签名凭证失败: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// 从环境变量获取端口（高优先级覆盖配置文件）
@@ -105,7 +112,9 @@ func main() {
 	bootstrapCfg.EnableSaga = true
 	bootstrapCfg.EnableAuth = false
 	bootstrapCfg.Credentials = authCreds
-	bootstrapCfg.ServiceAccessKey = signerCred.AccessKey
+	if signerCred != nil {
+		bootstrapCfg.ServiceAccessKey = signerCred.AccessKey
+	}
 	bootstrapCfg.SkipAuthPaths = []string{
 		"/api/v1/health",
 		"/api/v1/register/az",
