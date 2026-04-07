@@ -2,274 +2,380 @@
 
 This file provides guidance to Qoder (qoder.com) when working with code in this repository.
 
-## NSP System Overview
+## Project Positioning
 
-### 项目定位
+This repository implements an NSP (Network Service Platform) demo focused on multi-Region, multi-AZ network resource orchestration.
 
-NSP（Network Service Platform，网络服务平台）部署在私有云的云管区，作为网络基础设施编排的核心组件，对外提供RESTful API接口，供云管平台门户后端调用，实现对底层硬件网络设备（交换机、防火墙、负载均衡器等）的自动化编排与配置下发。
+The current codebase is no longer the early single-server demo. The active implementation is a distributed NSP architecture with:
 
-### 多AZ架构
+- `top-nsp-vpc`: Top-layer VPC orchestrator
+- `top-nsp-vfw`: Top-layer firewall policy orchestrator
+- `az-nsp-vpc`: AZ-layer VPC/Subnet/PCCN workflow service
+- `az-nsp-vfw`: AZ-layer firewall policy workflow service
+- `worker`: device-specific task worker for `switch`, `firewall`, and `loadbalancer`
 
-NSP采用多可用区（Multi-AZ）架构设计，支持跨Region和AZ的资源编排：
+## Current Architecture
 
-- **一朵云**：可包含多个Region（如 cn-beijing、cn-shanghai）
-- **一个Region**：最多支持3个可用区（AZ），命名格式为 `{region}-1a`、`{region}-1b`、`{region}-1c`
-- **资源隔离**：每个AZ部署独立的AZ-NSP和Worker，队列隔离防止跨AZ任务竞争
+### Layering
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                           一朵云                                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │                      TOP-NSP                                │  │
-│  │            (top-nsp-vpc / top-nsp-vfw)                      │  │
-│  │                   HTTP REST API                             │  │
-│  └─────────────────────────┬──────────────────────────────────┘  │
-│                            │ HTTP                                 │
-│         ┌──────────────────┼──────────────────┐                  │
-│         ▼                  ▼                  ▼                  │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
-│  │  Region     │    │  Region     │    │  Region     │          │
-│  │ cn-beijing  │    │ cn-shanghai │    │ cn-guangzhou│          │
-│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘          │
-│         │                  │                  │                  │
-│    ┌────┴────┐        ┌────┴────┐        ┌────┴────┐            │
-│    ▼    ▼    ▼        ▼         ▼        ▼         ▼            │
-│  ┌───┐┌───┐┌───┐    ┌───┐     ┌───┐    ┌───┐     ┌───┐          │
-│  │1a││1b││1c│      │1a│     │1b│      │1a│     │1b│            │
-│  └─┬─┘└─┬─┘└─┬─┘    └─┬─┘     └─┬─┘    └─┬─┘     └─┬─┘          │
-│    │    │    │        │         │        │         │            │
-│  Workers  Workers  Workers  Workers  Workers  Workers           │
-└──────────────────────────────────────────────────────────────────┘
-```
+- **Top NSP**: Receives northbound API requests, manages AZ registration and heartbeat state, coordinates cross-AZ and cross-Region orchestration, and persists top-level topology.
+- **AZ NSP**: Owns AZ-local workflow submission, reply consumption, compensation scanning, and AZ-local resource/task persistence.
+- **Workers**: Execute device-specific tasks from Redis-backed queues and publish replies back to the AZ NSP reply queue.
 
-### 层次架构
+### Service Split
 
-NSP采用三层分布式架构设计：
+- **VPC service**: Implemented end to end.
+- **VFW service**: Implemented end to end for firewall policy orchestration.
+- **PCCN service**: Implemented end to end for cross-VPC connectivity orchestration.
+- **ELB service**: Handler and worker scaffolding exists, but this is not a complete top-to-bottom product path yet.
+- **NAT service**: Not implemented.
 
-- **TOP-NSP（云级编排层）**：作为全局编排器，负责跨Region的资源协调、AZ注册管理、健康监控，以及Region级资源（如VPC）的并行分发与自动回滚。TOP-NSP通过HTTP接口与AZ-NSP通信。
+### Multi-AZ Model
 
-- **AZ-NSP（可用区服务层）**：部署在每个可用区，负责本AZ内的资源管理与工作流编排。AZ-NSP启动时自动向TOP-NSP注册，并以60秒间隔发送心跳维持在线状态。AZ-NSP通过基于Redis的asynq消息队列向Worker下发任务。
+- A cloud can contain multiple Regions.
+- A Region can contain multiple AZs.
+- Each AZ runs its own AZ NSP and workers.
+- Top NSP discovers AZs dynamically through registration and heartbeat.
+- Queue isolation is per Region, per AZ, and per device type.
 
-- **Worker（任务执行层）**：按设备类型分为Switch Worker（交换机配置）、Firewall Worker（防火墙配置）、LoadBalancer Worker（负载均衡配置）。Worker监听AZ专属队列（格式：`tasks_{region}_{az}_{device_type}`），执行具体的设备配置任务，并通过回调队列返回执行结果。
+## Persistence and Messaging
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        TOP-NSP                              │
-│              (top-nsp-vpc / top-nsp-vfw)                    │
-│                    HTTP REST API                            │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ HTTP
-        ┌─────────────┼─────────────┐
-        ▼             ▼             ▼
-   ┌─────────┐   ┌─────────┐   ┌─────────┐
-   │ AZ-NSP  │   │ AZ-NSP  │   │ AZ-NSP  │
-   │ beijing │   │ beijing │   │ shanghai│
-   │   -1a   │   │   -1b   │   │   -1a   │
-   └────┬────┘   └────┴────┘   └────┬────┘
-        │ Redis/asynq              │
-   ┌────┴────┐   ┌─────────┐   ┌────┴────┐
-   │ Workers │   │ Workers │   │ Workers │
-   │switch/fw│   │switch/fw│   │switch/fw│
-   └─────────┘   └─────────┘   └─────────┘
-```
+### Redis
 
-### 微服务划分
+Redis is used for two purposes:
 
-NSP对外呈现为以下微服务：
+- AZ registration and heartbeat state in the Top NSP registry
+- asynq task queues and reply queues
 
-| 服务 | 功能范围 | 实现状态 |
-|------|---------|---------|
-| **VPC服务** | VPC创建/删除（跨AZ并行）、子网管理、VRF/VLAN配置 | 已实现 |
-| **VFW服务** | 防火墙安全区域管理、安全策略配置 | 已实现 |
-| **ELB服务** | 负载均衡池管理、监听器配置 | 框架已就绪 |
-| **NAT服务** | NAT网关、EIP等互联网访问功能 | 规划中 |
+The code supports both single-node Redis and Redis Cluster. In Docker, the main compose file uses a 3-node Redis Cluster.
 
-### 部署架构
+Relevant code:
 
-NSP基于容器化部署，核心组件包括：
+- `internal/top/registry`
+- `internal/config/redis.go`
+- `internal/queue/queue.go`
 
-- **Redis Cluster**（3节点）：双数据库设计，DB0用于数据存储，DB1用于消息队列
-- **MySQL**：持久化存储资源拓扑与状态数据
-- **服务容器**：TOP-NSP、AZ-NSP按服务类型独立部署，Worker按设备类型和AZ维度部署
+### PostgreSQL
 
-生产环境计划使用Kubernetes编排工具实现多副本高可用部署（每个服务3副本）。当前测试环境受限于资源，docker-compose配置为单实例部署。
+PostgreSQL is the active persistent storage layer for resource state, task state, topology, firewall policy data, and Saga state.
 
----
+Key persisted data includes:
 
-## Project Overview (Technical)
+- AZ-layer resources: `vpc_resources`, `subnet_resources`, `pccn_resources`, `firewall_policies`
+- AZ-layer task tracking: `tasks`
+- Top-layer topology: `vpc_registry`, `subnet_registry`, `cidr_zone_mapping`, `pccn_registry`, `policy_registry`, `policy_az_records`
+- Saga engine tables
 
-This is a distributed VPC workflow system built with Go 1.22+ that orchestrates network infrastructure provisioning across multiple regions and availability zones using Redis-backed task queues (asynq).
+Do not assume MySQL is current. The repository still contains older MySQL-era docs and scripts, but the active implementation uses PostgreSQL.
 
-**Key Architecture:**
-- **Top NSP**: Global orchestrator that coordinates region-level services and manages AZ registration
-- **AZ NSP**: Regional service nodes that execute workflows in specific availability zones
-- **Workers**: Task processors (switch workers, firewall workers) that handle device configuration
-- **Redis**: Dual-purpose backend (DB0: data storage, DB1: message queue)
+Relevant code:
 
-## Build and Development Commands
+- `internal/db/migrations/001_init_postgresql.sql`
+- `internal/db/migrations/004_create_pccn_tables.sql`
+- `deployments/docker/init-postgres.sh`
+- `deployments/docker/saga-migration.sql`
 
-### Building
-```bash
-# Build all components for legacy deployment
-go build -o bin/api_server ./cmd/api_server
-go build -o bin/switch_worker ./cmd/switch_worker
-go build -o bin/firewall_worker ./cmd/firewall_worker
+## Workflow Model
 
-# Build Docker images (recommended)
-cd deployments/docker && ./build-images.sh
-```
+### Top-layer orchestration
 
-### Running Tests
-```bash
-# Local end-to-end test
-./scripts/test-e2e-local.sh
+Top-layer orchestration is HTTP-based and Saga-backed.
 
-# Docker end-to-end test
-cd deployments/docker && ./test-e2e.sh
-```
+- Region-level VPC creation submits one Saga sync step per AZ.
+- PCCN creation submits one Saga sync step per involved AZ.
+- After Saga submission succeeds, Top NSP continues polling AZ-local status and updates top-level topology tables.
 
-### Starting Services
+Relevant code:
 
-**Docker (recommended):**
+- `internal/top/orchestrator/orchestrator.go`
+- `cmd/top_nsp/main.go`
+
+### AZ-layer orchestration
+
+AZ NSP persists workflow/task records in PostgreSQL and submits device tasks to asynq through the broker abstraction.
+
+- VPC workflow steps:
+  1. `create_vrf_on_switch`
+  2. `create_vlan_subinterface`
+  3. `create_firewall_zone`
+- Subnet workflow steps:
+  1. `create_subnet_on_switch`
+  2. `configure_subnet_routing`
+- PCCN workflow steps:
+  1. `create_pccn_connection`
+  2. `configure_pccn_routing`
+- VFW policy workflow uses AZ-local task orchestration and reply consumption in the same pattern.
+
+Relevant code:
+
+- `internal/az/orchestrator/orchestrator.go`
+- `internal/az/vfw/orchestrator/orchestrator.go`
+- `internal/orchestration`
+
+### Worker execution
+
+Workers are selected by `WORKER_TYPE`:
+
+- `switch`
+- `firewall`
+- `loadbalancer`
+
+Handlers currently live in:
+
+- `tasks/handlers.go`
+- `tasks/pccn_handlers.go`
+
+This is still a demo system. Handlers mainly log and simulate device-side work rather than calling real device SDKs.
+
+## Queue Naming
+
+Queue naming is not the old underscore format.
+
+Current queue patterns:
+
+- Task queue: `tasks:{region}:{az}:{device_type}`
+- Priority queues:
+  - `tasks:{region}:{az}:{device_type}_critical`
+  - `tasks:{region}:{az}:{device_type}_high`
+  - `tasks:{region}:{az}:{device_type}`
+  - `tasks:{region}:{az}:{device_type}_low`
+- Reply queue: `replies:{region}:{az}:{service}`
+
+Relevant code:
+
+- `internal/queue/queue.go`
+
+## Auth, Trace, and Bootstrap
+
+The active services share common bootstrap logic for:
+
+- logger setup
+- distributed trace middleware and traced HTTP client
+- optional AK/SK authentication
+- Saga engine setup
+
+Relevant code:
+
+- `internal/bootstrap/bootstrap.go`
+- `internal/config/config.go`
+- `config/config.yaml`
+
+Notes:
+
+- Config loading is based on `config/config.yaml` plus `NSP_`-prefixed environment variable overrides.
+- `top_nsp` and `az_nsp` use the hot-reload-capable config loader.
+- Service-to-service signing support exists through configured credentials.
+- `top-nsp-vpc` currently forces `EnableAuth = false` in code even though auth primitives are initialized.
+
+## Main Entry Points
+
+The active binaries are:
+
+- `cmd/top_nsp/main.go`
+- `cmd/top_nsp_vfw/main.go`
+- `cmd/az_nsp/main.go`
+- `cmd/az_nsp_vfw/main.go`
+- `cmd/worker/main.go`
+
+Do not assume there is a current `cmd/api_server`, `cmd/switch_worker`, or `cmd/firewall_worker` implementation. Older docs and helper scripts may still reference those paths, but they are not the current entry points.
+
+## Build and Run
+
+### Recommended build path
+
+Docker is the canonical way to run the current system.
+
 ```bash
 cd deployments/docker
+./build-images.sh
 docker-compose up -d
 ```
 
-**Local (legacy):**
+The build script builds:
+
+- `nsp-top-vpc`
+- `nsp-top-vfw`
+- `nsp-az-vpc`
+- `nsp-az-vfw`
+- `nsp-worker`
+
+### Direct Go builds
+
+If you need local binaries, build the current entry points instead of the old legacy ones:
+
 ```bash
-# Requires Redis running on localhost:6379
-./start.sh
+go build -o bin/top_nsp ./cmd/top_nsp
+go build -o bin/top_nsp_vfw ./cmd/top_nsp_vfw
+go build -o bin/az_nsp ./cmd/az_nsp
+go build -o bin/az_nsp_vfw ./cmd/az_nsp_vfw
+go build -o bin/worker ./cmd/worker
 ```
 
-### Deployment Configuration
+### Test entry points
 
-Key environment variables for services:
-- `REDIS_ADDR`: Redis address (default: redis:6379 in Docker, localhost:6379 local)
-- `REDIS_DATA_DB`: Redis database for data storage (default: 0)
-- `REDIS_BROKER_DB`: Redis database for task queue (default: 1)
-- `REGION`: Region identifier (e.g., cn-beijing, cn-shanghai)
-- `AZ`: Availability zone identifier (e.g., cn-beijing-1a)
-- `TOP_NSP_ADDR`: Top NSP address for AZ registration
-- `WORKER_COUNT`: Number of concurrent workers (default: 2)
+- Docker end-to-end script: `deployments/docker/test-e2e.sh`
+- Local shell E2E script: `scripts/test-e2e-local.sh`
+- Go E2E tests: `tests/e2e`
+- Go functional tests: `tests/functional`
 
-## Architecture
+Notes:
 
-### Service Hierarchy
-```
-Top NSP (Global)
-  ├── cn-beijing Region
-  │   ├── cn-beijing-1a (AZ NSP + Workers)
-  │   └── cn-beijing-1b (AZ NSP + Workers)
-  └── cn-shanghai Region
-      └── cn-shanghai-1a (AZ NSP + Workers)
-```
+- `tests/e2e` expects the dedicated E2E Docker environment.
+- `tests/functional` expects a reachable PostgreSQL instance with the expected schema.
 
-### Service Levels
-- **Region-level services** (VPC): Top NSP orchestrates parallel creation across all AZs in a region
-- **AZ-level services** (Subnet): Top NSP routes requests to specific AZ NSP
+## Environment Variables
 
-### Workflow Execution
-VPC creation uses Chain mode with sequential task execution:
-1. `create_vrf_on_switch` - Create VRF on switch
-2. `create_vlan_subinterface` - Create VLAN subinterface  
-3. `create_firewall_zone` - Create firewall security zone
+Important runtime variables:
 
-Each task enqueues the next task upon completion. Tasks are processed by dedicated workers monitoring AZ-specific queues (format: `vpc_tasks_{region}_{az}`).
+- `REGION`
+- `AZ`
+- `PORT`
+- `WORKER_TYPE`
+- `WORKER_COUNT`
+- `REDIS_ADDR`
+- `REDIS_BROKER_DB`
+- `POSTGRES_HOST`
+- `POSTGRES_PORT`
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
+- `TOP_NSP_ADDR`
+- `TOP_NSP_VFW_ADDR`
+- `AZ_NSP_VFW_ADDR`
+- `NSP_ADDR`
+- `NSP_VFW_ADDR`
 
-### Key Packages
-- `internal/top/orchestrator`: Region/AZ orchestration logic, parallel task distribution, automatic rollback on partial failures
-- `internal/top/registry`: AZ registration, health monitoring (60s heartbeat)
-- `internal/az/api`: AZ NSP API server with auto-registration to Top NSP
-- `internal/client`: HTTP client for inter-NSP communication
-- `internal/config`: Configuration and Redis client management
-- `tasks/vpc_tasks.go`: VPC workflow task definitions (asynq handlers)
-- `tasks/subnet_tasks.go`: Subnet workflow task definitions
+Also note:
 
-### Critical Implementation Details
-- **Queue isolation**: Each AZ uses dedicated queues to prevent cross-AZ task competition
-- **State management**: Workflow states stored in Redis with format `workflow:{id}:state`
-- **VPC lookup**: VPC status queryable by VPC name stored in Redis with key `vpc:{name}`
-- **Rollback mechanism**: If any AZ fails during Region-level VPC creation, all successful AZs are automatically rolled back (see `internal/top/orchestrator/orchestrator.go:162`)
-- **Dynamic AZ registration**: AZ NSPs auto-register on startup and send heartbeats every 60 seconds
+- Config-file-driven settings can be overridden with `NSP_`-prefixed variables because the config loader uses the `NSP` prefix.
+- The compose files currently mix direct env vars and `NSP_` env vars.
 
-### Main Entry Points
-- `cmd/api_server/main.go`: Legacy single-server mode (not used in NSP architecture)
-- Top NSP and AZ NSP share binaries - behavior controlled by `SERVICE_TYPE` environment variable
-- Workers are separate binaries that connect to Redis queue for their AZ
+## API Surface
 
-## API Reference
+### Top NSP VPC
 
-### Top NSP API (Port 8080)
+Main routes include:
 
-**Health Check:**
-```bash
-GET /api/v1/health
-```
+- `GET /api/v1/health`
+- `GET /api/v1/regions`
+- `GET /api/v1/regions/:region/azs`
+- `GET /api/v1/azs`
+- `POST /api/v1/register/az`
+- `POST /api/v1/heartbeat`
+- `POST /api/v1/vpc`
+- `GET /api/v1/vpcs`
+- `GET /api/v1/vpc/:vpc_name/status`
+- `DELETE /api/v1/vpc/:vpc_name`
+- `POST /api/v1/subnet`
+- `GET /api/v1/subnet/:subnet_name/status`
+- `DELETE /api/v1/subnet/:subnet_name`
+- `POST /api/v1/pccn`
+- `GET /api/v1/pccn/:pccn_name/status`
+- `GET /api/v1/pccns`
+- `DELETE /api/v1/pccn/:pccn_name`
 
-**List Regions:**
-```bash
-GET /api/v1/regions
-```
+Relevant code:
 
-**List AZs in Region:**
-```bash
-GET /api/v1/regions/:region/azs
-```
+- `internal/top/api/server.go`
 
-**Create Region-level VPC** (parallel across all AZs):
-```bash
-POST /api/v1/vpc
-{
-  "vpc_name": "test-vpc-001",
-  "region": "cn-beijing",
-  "vrf_name": "VRF-001",
-  "vlan_id": 100,
-  "firewall_zone": "trust-zone"
-}
-```
+### AZ NSP VPC
 
-**Create AZ-level Subnet** (single AZ):
-```bash
-POST /api/v1/subnet
-{
-  "subnet_name": "test-subnet-001",
-  "vpc_name": "test-vpc-001",
-  "region": "cn-beijing",
-  "az": "cn-beijing-1a",
-  "cidr": "10.0.1.0/24"
-}
-```
+Main routes include:
 
-### AZ NSP API (Port varies by deployment)
+- `GET /api/v1/health`
+- `GET /api/v1/vpcs`
+- `POST /api/v1/vpc`
+- `GET /api/v1/vpc/:vpc_name/status`
+- `DELETE /api/v1/vpc/:vpc_name`
+- `POST /api/v1/subnet`
+- `GET /api/v1/subnet/:subnet_name/status`
+- `DELETE /api/v1/subnet/:subnet_name`
+- `POST /api/v1/pccn`
+- `GET /api/v1/pccn/:pccn_name/status`
+- `GET /api/v1/pccns`
+- `DELETE /api/v1/pccn/:pccn_name`
+- `POST /api/v1/task/replay/:task_id`
+- `GET /api/v1/task/:task_id`
 
-**Query VPC Status:**
-```bash
-GET /api/v1/vpc/:vpc_name/status
-```
+Relevant code:
 
-**Query Subnet Status:**
-```bash
-GET /api/v1/subnet/:subnet_name/status
-```
+- `internal/az/api/server.go`
 
-## Adding New Features
+### Top NSP VFW
 
-### Adding New Task Types
-1. Define task handler in `tasks/vpc_tasks.go` or create new task file
-2. Register handler in AZ NSP worker initialization
-3. Update workflow chain in AZ NSP API to include new task
-4. Rebuild Docker images
+Main routes include:
 
-### Adding New Regions/AZs
-Modify `deployments/docker/docker-compose.yml`:
-- Add new AZ NSP service with appropriate `REGION` and `AZ` environment variables
-- Add corresponding switch and firewall workers for the new AZ
-- No Top NSP changes needed - AZs auto-register on startup
+- `GET /api/v1/health`
+- `POST /api/v1/register/az`
+- `POST /api/v1/heartbeat`
+- `POST /api/v1/firewall/policy`
+- `GET /api/v1/firewall/policy/:policy_id/status`
+- `DELETE /api/v1/firewall/policy/:policy_id`
+- `GET /api/v1/firewall/policies`
+- `GET /api/v1/firewall/zone/:zone/policy-count`
+
+Relevant code:
+
+- `internal/top/vfw/api/server.go`
+
+### AZ NSP VFW
+
+Main routes include:
+
+- `GET /api/v1/health`
+- `GET /api/v1/firewall/policies`
+- `POST /api/v1/firewall/policy`
+- `GET /api/v1/firewall/policy/:policy_name/status`
+- `DELETE /api/v1/firewall/policy/:policy_name`
+- `GET /api/v1/firewall/policy/id/:policy_id`
+- `GET /api/v1/firewall/zone/:zone/policy-count`
+
+Relevant code:
+
+- `internal/az/vfw/api/server.go`
+
+## Key Packages
+
+- `internal/top/orchestrator`: top-layer VPC and PCCN orchestration
+- `internal/top/registry`: AZ registration and health tracking in Redis
+- `internal/top/vpc/dao`: top-layer VPC and subnet topology persistence
+- `internal/top/pccn/dao`: top-layer PCCN persistence
+- `internal/top/vfw`: top-layer firewall policy API, DAO, and service
+- `internal/az/orchestrator`: AZ-layer VPC, Subnet, PCCN orchestration
+- `internal/az/vfw`: AZ-layer firewall policy orchestration
+- `internal/orchestration`: shared workflow manager and reply-handling logic
+- `internal/db/dao`: AZ-layer DAOs for resources and tasks
+- `internal/client`: HTTP clients for AZ NSP communication
+- `internal/config`: config loading and Redis helpers
+- `internal/bootstrap`: logger/auth/trace/saga bootstrap
+- `tasks`: worker handlers
+
+## Development Guidance
+
+### Adding a new worker task
+
+1. Add or update the handler in `tasks/handlers.go` or another task file under `tasks/`.
+2. Register the handler in `cmd/worker/main.go`.
+3. If it participates in an AZ workflow, add the step in the relevant AZ orchestrator.
+4. If Top NSP needs awareness of the new resource, update top-layer orchestration and persistence.
+5. Update Docker images if you test through compose.
+
+### Adding a new AZ
+
+The code supports dynamic AZ registration, but deployment still requires explicit service definitions.
+
+For the main Docker deployment:
+
+- add an `az-nsp-vpc-*` service
+- add an `az-nsp-vfw-*` service if VFW should be present in that AZ
+- add worker services for the required device types
+
+Top NSP does not need static AZ configuration as long as the new AZ NSP can register successfully.
 
 ## Important Notes
 
-- This system is a demonstration - task handlers only log actions without actual device SDKs
-- All inter-NSP communication uses HTTP; worker-to-queue uses Redis/asynq
-- Redis must be running before starting any services
-- Docker deployment manages service dependencies automatically via healthchecks
+- This repository contains both current code and older transitional artifacts. Prefer code under `cmd/top_nsp`, `cmd/az_nsp`, `cmd/worker`, `internal/top`, `internal/az`, and `internal/db`.
+- Files such as `start.sh` and some old docs still reference pre-refactor entry points. Treat them as legacy unless verified against current code.
+- The system uses HTTP for inter-NSP calls and Redis/asynq for worker dispatch.
+- Top-level orchestration relies on PostgreSQL-backed Saga state.
+- AZ heartbeat interval is 60 seconds; health check logic currently treats an AZ as unhealthy after 5 minutes without heartbeat.
+- The module currently declares `go 1.25.6` in `go.mod`.
