@@ -142,6 +142,12 @@ AZ VFW 不受影响，继续上报 `http://` 地址。
 - 所有使用该 `*http.Client` 的调用方（包括 SAGA Executor）自动获得新 Transport
 - 旧 Transport 上的活跃连接自然结束后由 GC 回收
 
+**热更新错误恢复策略：**
+- 证书文件被删除或不可读时：保留当前 Transport 不变，输出 error 级别日志，下次轮询周期重试
+- 新证书文件内容损坏（格式错误、cert/key 不匹配等）时：保留当前 Transport 不变，输出 error 级别日志并包含具体解析错误信息，下次轮询周期重试
+- 后台 goroutine 内部 panic 时：通过 `recover()` 捕获，输出 error 日志后继续下一轮轮询，不终止 goroutine
+- 原则：**热更新失败绝不降级或清空当前 Transport**，始终保持最后一次成功加载的 Transport 继续服务
+
 ### Decision 6: 配置项设计
 
 在 `NSPConfig` 中新增 `TLS` 配置段：

@@ -53,6 +53,21 @@
 - **WHEN** AZ VPC NSP 启动且 `tls.enabled = true` 且 `tls.mode = "lb"` 且 `NSP_ADDR` 环境变量未设置
 - **THEN** 系统 MUST 输出错误日志（提示 LB 模式下必须通过 `NSP_ADDR` 指定 HTTPS 入口地址）并终止启动，不得静默回退到 HTTP
 
+### Requirement: insecure_skip_verify 行为
+当 `tls.insecure_skip_verify` 配置为 `true` 时，系统 SHALL 跳过对端证书的验证。此选项仅用于测试/开发环境，生产环境 MUST 保持 `false`。
+
+#### Scenario: 测试环境跳过服务端证书验证
+- **WHEN** Top VPC NSP 启动且 `tls.enabled = true` 且 `tls.insecure_skip_verify = true`
+- **THEN** Top VPC 侧 `reloadableTransport` 的 `tls.Config.InsecureSkipVerify` MUST 设为 `true`，出站请求不验证 AZ 服务端证书的 CA 签名和域名
+
+#### Scenario: insecure_skip_verify 不影响客户端证书发送
+- **WHEN** `tls.insecure_skip_verify = true` 且 `tls.cert_path`/`tls.key_path` 已配置
+- **THEN** Top VPC 侧仍 MUST 发送客户端证书（mTLS 握手），仅跳过对服务端证书的验证
+
+#### Scenario: 默认关闭 insecure_skip_verify
+- **WHEN** 配置文件中未指定 `tls.insecure_skip_verify`
+- **THEN** 该字段 MUST 默认为 `false`，系统正常验证对端证书
+
 ### Requirement: Docker 部署证书挂载
 Docker Compose 部署 SHALL 支持将证书文件通过 volume 挂载到 VPC 服务容器中。证书使用 openssl 手动生成。
 
