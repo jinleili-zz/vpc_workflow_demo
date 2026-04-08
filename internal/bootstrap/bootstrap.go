@@ -113,6 +113,8 @@ func Initialize(ctx context.Context, cfg *Config) (*Components, error) {
 		}
 	}
 
+	// Reuse the same outbound client under tracing so AZNSPClient and SAGA share
+	// one transport stack when VPC mTLS is enabled.
 	// 5. Initialize Traced HTTP Client
 	c.TracedHTTP = trace.NewTracedClient(c.VPCHTTP)
 

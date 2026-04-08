@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -19,6 +20,9 @@ import (
 )
 
 func TestNewServerTLSConfigWithClientAuth(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	ca := newTestCA(t, "ca-1")
 	serverCert := newIssuedCert(t, ca, certSpec{
 		commonName: "az-nsp",
@@ -37,7 +41,7 @@ func TestNewServerTLSConfigWithClientAuth(t *testing.T) {
 		CAReloadInterval: time.Hour,
 	}
 
-	tlsConfig, err := newServerTLSConfig(cfg)
+	tlsConfig, err := newServerTLSConfig(ctx, cfg)
 	if err != nil {
 		t.Fatalf("newServerTLSConfig failed: %v", err)
 	}
@@ -50,6 +54,9 @@ func TestNewServerTLSConfigWithClientAuth(t *testing.T) {
 }
 
 func TestNewServerTLSConfigGetCertificateReloadsLeaf(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	ca := newTestCA(t, "ca-1")
 	serverCert1 := newIssuedCert(t, ca, certSpec{commonName: "az-1"})
 	serverCert2 := newIssuedCert(t, ca, certSpec{commonName: "az-2"})
@@ -59,7 +66,7 @@ func TestNewServerTLSConfigGetCertificateReloadsLeaf(t *testing.T) {
 	certPath := writeTLSFile(t, dir, "server.crt", serverCert1.certPEM)
 	keyPath := writeTLSFile(t, dir, "server.key", serverCert1.keyPEM)
 
-	tlsConfig, err := newServerTLSConfig(config.TLSConfig{
+	tlsConfig, err := newServerTLSConfig(ctx, config.TLSConfig{
 		Enabled:    true,
 		Mode:       "process",
 		CACertPath: caPath,
@@ -83,6 +90,9 @@ func TestNewServerTLSConfigGetCertificateReloadsLeaf(t *testing.T) {
 }
 
 func TestNewServerTLSConfigReloadsClientCAs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	ca1 := newTestCA(t, "ca-1")
 	ca2 := newTestCA(t, "ca-2")
 	serverCert := newIssuedCert(t, ca1, certSpec{commonName: "az"})
@@ -94,7 +104,7 @@ func TestNewServerTLSConfigReloadsClientCAs(t *testing.T) {
 	certPath := writeTLSFile(t, dir, "server.crt", serverCert.certPEM)
 	keyPath := writeTLSFile(t, dir, "server.key", serverCert.keyPEM)
 
-	tlsConfig, err := newServerTLSConfig(config.TLSConfig{
+	tlsConfig, err := newServerTLSConfig(ctx, config.TLSConfig{
 		Enabled:          true,
 		Mode:             "process",
 		CACertPath:       caPath,

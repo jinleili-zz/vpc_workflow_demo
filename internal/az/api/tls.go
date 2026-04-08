@@ -24,7 +24,7 @@ type clientCAReloader struct {
 	state atomic.Value
 }
 
-func newServerTLSConfig(cfg config.TLSConfig) (*tls.Config, error) {
+func newServerTLSConfig(ctx context.Context, cfg config.TLSConfig) (*tls.Config, error) {
 	if _, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath); err != nil {
 		return nil, fmt.Errorf("load server certificate: %w", err)
 	}
@@ -63,7 +63,7 @@ func newServerTLSConfig(cfg config.TLSConfig) (*tls.Config, error) {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
-	go reloader.watch(context.Background(), interval)
+	go reloader.watch(ctx, interval)
 
 	return tlsConfig, nil
 }

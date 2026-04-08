@@ -533,7 +533,10 @@ func (s *Server) listPCCNs(c *gin.Context) {
 func (s *Server) Run(addr string) error {
 	logger.Info("服务启动", "az", s.cfg.AZ, "addr", addr)
 	if s.cfg.TLS.Enabled && s.cfg.TLS.Mode == "process" {
-		tlsConfig, err := newServerTLSConfig(s.cfg.TLS)
+		tlsCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		tlsConfig, err := newServerTLSConfig(tlsCtx, s.cfg.TLS)
 		if err != nil {
 			return err
 		}
