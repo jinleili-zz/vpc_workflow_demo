@@ -49,6 +49,10 @@
 - **WHEN** AZ VPC NSP 启动且 `tls.enabled = true` 且 `tls.mode = "lb"`
 - **THEN** 系统 MUST 不要求 `tls.cert_path` 和 `tls.key_path`，因为 TLS 由 LB 终止
 
+#### Scenario: AZ VPC 侧 LB 模式且 TLS 启用但未设置 NSP_ADDR 时启动失败
+- **WHEN** AZ VPC NSP 启动且 `tls.enabled = true` 且 `tls.mode = "lb"` 且 `NSP_ADDR` 环境变量未设置
+- **THEN** 系统 MUST 输出错误日志（提示 LB 模式下必须通过 `NSP_ADDR` 指定 HTTPS 入口地址）并终止启动，不得静默回退到 HTTP
+
 ### Requirement: Docker 部署证书挂载
 Docker Compose 部署 SHALL 支持将证书文件通过 volume 挂载到 VPC 服务容器中。证书使用 openssl 手动生成。
 

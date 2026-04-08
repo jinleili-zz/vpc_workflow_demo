@@ -11,25 +11,29 @@
 4. **SignedTracedClient** (`internal/client/signed_traced_client.go`) - Top VFW PolicyService 用于 VFW 策略下发
 5. **散落的 `http.Get()`/`http.Post()`** - `orchestrator.CheckZonePolicies()` 等位置调用 AZ VFW 端点
 
-当前 VPC 和 VFW 路径均使用 AK/SK 签名 + HTTP 明文。本次改造将 VPC 路径的安全模型从 AK/SK 切换为 mTLS（双向证书认证），VFW 路径保持 AK/SK 不变。两种安全模型独立运行，不叠加使用。
+当前 VPC 和 VFW 路径均使用 AK/SK 签名 + HTTP 明文。本次改造将 VPC 路径的安全模型从 AK/SK 切换为 mTLS（双向证书认证），VFW 路径保持 AK/SK 不变。
+
+**AK/SK 到 mTLS 迁移约束**：AZ VPC 的 `internal/az/api/server.go` 在 `cfg.Auth.EnableAuth=true` 时会挂载 `AKSKAuthMiddleware`，拦截所有不在 `SkipAuthPaths` 中的请求。mTLS 与 AK/SK 不能简单地"原子替换"——如果 Top 侧先去掉 AK/SK 签名而 AZ 侧中间件仍在运行，所有请求会被 401 拒绝。因此迁移分为两步：
+1. **阶段二 mTLS 上线时**：Top VPC 侧的 mTLS client 仍保留 AK/SK 签名（mTLS + AK/SK 共存），AZ VPC 侧同时启用 mTLS 监听和 AK/SK 中间件，确保请求同时通过两道验证
+2. **阶段三清理时**：确认 mTLS 全面生效后，AZ VPC 侧关闭 `AKSKAuthMiddleware`（`tls.enabled=true` 时自动跳过，或通过 `auth.enable_auth=false` 配置），Top VPC 侧同步移除 AK/SK 签名逻辑
 
 AZ VPC 自注册时硬编码 `http://` scheme（`internal/az/api/server.go:551`），Top registry 存储的 VPC AZ 地址也是 `http://` 前缀。
 
 ## Goals / Non-Goals
 
 **Goals:**
-- 为 Top VPC -> AZ VPC 内部出站链路引入 mTLS（双向证书认证），替代当前的 AK/SK 签名机制
+- 为 Top VPC -> AZ VPC 内部出站链路引入 mTLS（双向证书认证），最终替代当前的 AK/SK 签名机制
 - Top 验证 AZ VPC 服务端证书，AZ VPC 同时验证 Top 客户端证书，形成传输加密 + 双向身份认证的安全模型
 - 统一 Top VPC 侧所有到 AZ VPC 的出站调用（`AZNSPClient`、SAGA、Top API Server 中的 Subnet/PCCN 操作）使用同一个 mTLS `*http.Client`
 - 通过 SAGA 引擎已有的 `HTTPClient` 注入接口（`saga.Config.HTTPClient`）传入带 mTLS 的 client，无需平台侧额外改造
-- 支持证书热更新：叶子证书续期和 CA 轮换场景下不中断服务
+- 支持证书热更新：叶子证书续期和 CA 轮换场景下不中断服务（Top 侧和 AZ 侧均支持 CA 热更新）
 - AZ VPC 地址 scheme 从 `http://` 升级为 `https://`
+- 安全地从 AK/SK 迁移到 mTLS：通过 mTLS + AK/SK 共存阶段避免迁移中断
 - Docker Compose 环境使用 openssl 手动生成测试证书
 - E2E 测试覆盖 mTLS 链路
 
 **Non-Goals:**
 - VFW 路径改造（VFW 继续使用 AK/SK + HTTP，不引入 TLS）
-- mTLS 与 AK/SK 叠加使用（两种安全模型独立运行）
 - Top 对外 API HTTPS（Top 对外入口不改）
 - AZ -> Top 注册/心跳 HTTPS（不纳入实施范围）
 - Redis / PostgreSQL 连接加密
@@ -104,7 +108,7 @@ Top VFW 服务不使用此 mTLS client，继续使用 `SignedTracedClient` + AK/
 
 AZ VPC 自注册时根据 TLS 配置和模式决定上报地址的 scheme：
 - `tls.mode = "process"` 且 TLS 启用时：`https://az-nsp-{az}:{port}`
-- `tls.mode = "lb"` 时：**必须**通过 `NSP_ADDR` 环境变量显式指定地址（因为 AZ 进程本身不监听 TLS，无法自动推断正确的 HTTPS 入口）；若环境变量未设置，回退到 `http://az-nsp-{az}:{port}`（HTTP 明文），并输出警告日志
+- `tls.mode = "lb"` 且 TLS 启用时：**必须**通过 `NSP_ADDR` 环境变量显式指定 HTTPS 入口地址（因为 AZ 进程本身不监听 TLS，无法自动推断）；若 `NSP_ADDR` 未设置，**启动失败**并输出明确错误日志（不得静默回退到 `http://`，否则会在声称启用 TLS 的部署中产生明文通信）
 - TLS 未启用时：保持 `http://az-nsp-{az}:{port}`
 
 地址 scheme 由 AZ VPC 侧决定（AZ 知道自己是否启用了 TLS），Top 侧不做 scheme 推断或覆盖。Top VPC 侧的 mTLS client 需同时支持 http 和 https 目标（渐进式迁移期间可能混合存在）。
@@ -176,6 +180,8 @@ Top VFW 和 AZ VFW 不使用 TLS 配置（`tls.enabled` 保持 `false`），继�
 
 ## Risks / Trade-offs
 
+**[风险] AK/SK 中间件与 mTLS 迁移时序错误导致 401** → 缓解：阶段二（mTLS 上线）期间 Top VPC 侧保留 AK/SK 签名，AZ VPC 侧保留 AK/SK 中间件，确保 mTLS 与 AK/SK 共存。仅在阶段三确认 mTLS 全面生效后才关闭 AK/SK。回滚时只需关闭 `tls.enabled`，AK/SK 仍在位。
+
 **[风险] 证书文件挂载错误导致 VPC 服务启动失败** → 缓解：启动时校验证书文件可读性和有效性（到期时间检查），失败时输出明确错误日志。`tls.enabled = false` 时完全跳过 TLS 初始化，保持向后兼容。VFW 服务不受影响。
 
 **[风险] 渐进式迁移期间 http/https 混合** → 缓解：Top VPC 侧 mTLS client 同时支持 http 和 https 目标。AZ VPC 地址 scheme 由 AZ 自行上报，Top 按实际 scheme 发起请求。
@@ -194,9 +200,9 @@ Top VFW 和 AZ VFW 不使用 TLS 配置（`tls.enabled` 保持 `false`），继�
 
 由于 SAGA 引擎已具备 `HTTPClient` 注入能力，不存在平台侧阻塞依赖，业务仓库可以独立完成全部改造。
 
-1. **阶段一（代码改造）**：实现 mTLS 配置段、`reloadableTransport`（RoundTripper wrapper + atomic.Value）、CA/证书热更新 goroutine、AZ VPC 进程内 mTLS 监听（服务端证书 + ClientAuth）、Top VPC 侧 client 改造（`AZNSPClient` 和 SAGA 统一使用 mTLS `*http.Client`）。全部代码以 `tls.enabled = false` 默认值合入主干，不影响现有运行。VFW 服务不做任何改动。
-2. **阶段二（证书部署与切换）**：使用 openssl 手动生成内部 CA 及双方证书 -> Docker Compose 挂载证书 volume -> AZ VPC 侧开启 mTLS 监听并上报 `https://` 地址 -> Top VPC 侧开启 `tls.enabled` -> 验证全链路 mTLS。
-3. **阶段三（清理）**：确认所有 AZ VPC 均已切换 HTTPS 后，可选地移除 VPC 路径上残留的 AK/SK 签名逻辑。
+1. **阶段一（代码改造）**：实现 mTLS 配置段、`reloadableTransport`（RoundTripper wrapper + atomic.Value）、CA/证书热更新 goroutine（Top 侧和 AZ 侧均实现）、AZ VPC 进程内 mTLS 监听（服务端证书 + ClientAuth + ClientCAs 热更新）、Top VPC 侧 client 改造（`AZNSPClient` 和 SAGA 统一使用 mTLS `*http.Client`）。全部代码以 `tls.enabled = false` 默认值合入主干，不影响现有运行。VFW 服务不做任何改动。
+2. **阶段二（mTLS 上线，与 AK/SK 共存）**：使用 openssl 手动生成内部 CA 及双方证书 -> Docker Compose 挂载证书 volume -> AZ VPC 侧开启 mTLS 监听并上报 `https://` 地址（AK/SK 中间件保持开启） -> Top VPC 侧开启 `tls.enabled`（mTLS client 仍保留 AK/SK 签名） -> 验证全链路 mTLS + AK/SK 共存正常。
+3. **阶段三（AK/SK 退役）**：确认所有 AZ VPC 均已切换 mTLS 后，AZ VPC 侧关闭 `AKSKAuthMiddleware`（当 `tls.enabled=true` 时自动跳过中间件，或通过 `auth.enable_auth=false` 显式关闭），Top VPC 侧同步移除 SAGA 步骤中的 `AuthAK` 和 `AZNSPClient` 中的 AK/SK 签名逻辑。
 
 **回滚策略**：将 VPC 服务的 `NSP_TLS_ENABLED` 设为 `false` 即可恢复 VPC 链路 HTTP 明文通信。AZ VPC 侧同步回退到 HTTP 监听并上报 `http://` 地址。VFW 链路不受影响。无数据迁移需求。
 

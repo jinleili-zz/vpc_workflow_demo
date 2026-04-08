@@ -56,6 +56,6 @@ AZ VPC NSP 向 Top NSP 自注册时上报的地址 scheme SHALL 与自身的实�
 - **WHEN** `tls.mode = "lb"` 且 `NSP_ADDR` 设置为 `https://lb-addr:443`
 - **THEN** AZ 自注册 MUST 使用环境变量中的 `https://` 地址
 
-#### Scenario: LB 模式下未设置环境变量时回退到 http 并警告
+#### Scenario: LB 模式下未设置环境变量时启动失败
 - **WHEN** `tls.mode = "lb"` 且 `tls.enabled = true` 且 `NSP_ADDR` 未设置
-- **THEN** AZ VPC 自注册 MUST 回退到 `http://` scheme 地址，并输出警告日志提示需要设置 `NSP_ADDR` 以指向 LB 的 HTTPS 入口
+- **THEN** AZ VPC NSP MUST 输出明确错误日志（提示 LB 模式下必须设置 `NSP_ADDR` 指向 HTTPS 入口）并终止启动，不得静默回退到 `http://` scheme（否则会在声称启用 TLS 的部署中产生明文通信）
