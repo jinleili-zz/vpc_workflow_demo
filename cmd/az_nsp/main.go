@@ -95,6 +95,11 @@ func main() {
 	portInt, _ := strconv.Atoi(port)
 	cfg.Port = portInt
 
+	if err := cfg.ValidateTLSStartup(os.Getenv("NSP_ADDR")); err != nil {
+		fmt.Printf("TLS 配置校验失败: %v\n", err)
+		os.Exit(1)
+	}
+
 	authCreds, err := cfg.AuthCredentials()
 	if err != nil {
 		fmt.Printf("解析认证配置失败: %v\n", err)

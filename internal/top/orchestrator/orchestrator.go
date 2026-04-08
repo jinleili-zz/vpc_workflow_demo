@@ -45,9 +45,9 @@ func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sq
 	// Create AZ client with trace support
 	var azClient *client.AZNSPClient
 	if tracedHTTP != nil {
-		azClient = client.NewAZNSPClientWithTrace(tracedHTTP, signer)
+		azClient = client.NewAZNSPClientWithTrace(tracedHTTP, tracedHTTP.Client(), signer)
 	} else {
-		azClient = client.NewAZNSPClient(signer)
+		azClient = client.NewAZNSPClient(nil, signer)
 	}
 
 	// Initialize PCCN DAO

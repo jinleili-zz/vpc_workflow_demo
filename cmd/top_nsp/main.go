@@ -43,7 +43,7 @@ func main() {
 		fmt.Printf("解析认证配置失败: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	// 只在有凭证时才解析签名凭证（用于服务间调用签名）
 	var signerCred *auth.Credential
 	if len(authCreds) > 0 {
@@ -87,6 +87,11 @@ func main() {
 		_ = pgDB
 	}
 
+	if err := cfg.ValidateTLSStartup(""); err != nil {
+		fmt.Printf("TLS 配置校验失败: %v\n", err)
+		os.Exit(1)
+	}
+
 	logger.Platform().Info("========================================")
 	logger.Platform().Info("Top NSP VPC 启动中...")
 	logger.Platform().Info("配置信息", "region", cfg.Region, "port", port)
@@ -114,6 +119,14 @@ func main() {
 	bootstrapCfg.Credentials = authCreds
 	if signerCred != nil {
 		bootstrapCfg.ServiceAccessKey = signerCred.AccessKey
+	}
+	bootstrapCfg.OutboundTLS = bootstrap.TLSClientConfig{
+		Enabled:            cfg.TLS.Enabled,
+		CACertPath:         cfg.TLS.CACertPath,
+		CertPath:           cfg.TLS.CertPath,
+		KeyPath:            cfg.TLS.KeyPath,
+		CAReloadInterval:   cfg.TLS.CAReloadInterval,
+		InsecureSkipVerify: cfg.TLS.InsecureSkipVerify,
 	}
 	bootstrapCfg.SkipAuthPaths = []string{
 		"/api/v1/health",

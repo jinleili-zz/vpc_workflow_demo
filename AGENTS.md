@@ -351,6 +351,12 @@ Relevant code:
 
 ## Development Guidance
 
+### Git submission workflow
+
+- Any code submission in this repository must follow a PR workflow rather than stopping at a local commit.
+- The expected flow is: create or reuse the working branch, commit the intended changes, push the branch to the remote, and open a GitHub PR.
+- Do not treat "commit only" as a completed submission unless the user explicitly asks for a local-only commit without PR.
+
 ### Adding a new worker task
 
 1. Add or update the handler in `tasks/handlers.go` or another task file under `tasks/`.

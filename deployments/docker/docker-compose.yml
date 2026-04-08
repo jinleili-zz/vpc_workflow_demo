@@ -118,6 +118,12 @@ services:
       - NSP_POSTGRESQL_PASSWORD=nsp_password
       - NSP_TOP_NSP_AZ_NSP_PREFIX=az-nsp-vpc
       - NSP_TOP_NSP_AZ_NSP_PORT=8080
+      - NSP_TLS_ENABLED=true
+      - NSP_TLS_MODE=process
+      - NSP_TLS_CA_CERT_PATH=/certs/ca/ca.crt
+      - NSP_TLS_CERT_PATH=/certs/top/top-client.crt
+      - NSP_TLS_KEY_PATH=/certs/top/top-client.key
+      - NSP_TLS_CLIENT_AUTH=true
       - AZ_NSP_PREFIX=az-nsp-vpc
       - AZ_NSP_PORT=8080
     ports:
@@ -129,6 +135,8 @@ services:
         condition: service_healthy
     networks:
       - nsp-network
+    volumes:
+      - ./certs/generated:/certs:ro
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/v1/health"]
       interval: 10s
@@ -185,9 +193,15 @@ services:
       - NSP_POSTGRESQL_PORT=5432
       - NSP_POSTGRESQL_USER=nsp_user
       - NSP_POSTGRESQL_PASSWORD=nsp_password
+      - NSP_TLS_ENABLED=true
+      - NSP_TLS_MODE=process
+      - NSP_TLS_CA_CERT_PATH=/certs/ca/ca.crt
+      - NSP_TLS_CERT_PATH=/certs/az/az-nsp-vpc-cn-beijing-1a/server.crt
+      - NSP_TLS_KEY_PATH=/certs/az/az-nsp-vpc-cn-beijing-1a/server.key
+      - NSP_TLS_CLIENT_AUTH=true
       - TOP_NSP_ADDR=http://top-nsp-vpc:8080
       - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-beijing-1a:8080
-      - NSP_ADDR=http://az-nsp-vpc-cn-beijing-1a:8080
+      - NSP_ADDR=https://az-nsp-vpc-cn-beijing-1a:8080
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
@@ -197,6 +211,8 @@ services:
         condition: service_healthy
     networks:
       - nsp-network
+    volumes:
+      - ./certs/generated:/certs:ro
     mem_limit: 64m
 
   az-nsp-vfw-cn-beijing-1a:
@@ -288,9 +304,15 @@ services:
       - NSP_POSTGRESQL_PORT=5432
       - NSP_POSTGRESQL_USER=nsp_user
       - NSP_POSTGRESQL_PASSWORD=nsp_password
+      - NSP_TLS_ENABLED=true
+      - NSP_TLS_MODE=process
+      - NSP_TLS_CA_CERT_PATH=/certs/ca/ca.crt
+      - NSP_TLS_CERT_PATH=/certs/az/az-nsp-vpc-cn-beijing-1b/server.crt
+      - NSP_TLS_KEY_PATH=/certs/az/az-nsp-vpc-cn-beijing-1b/server.key
+      - NSP_TLS_CLIENT_AUTH=true
       - TOP_NSP_ADDR=http://top-nsp-vpc:8080
       - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-beijing-1b:8080
-      - NSP_ADDR=http://az-nsp-vpc-cn-beijing-1b:8080
+      - NSP_ADDR=https://az-nsp-vpc-cn-beijing-1b:8080
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
@@ -300,6 +322,8 @@ services:
         condition: service_healthy
     networks:
       - nsp-network
+    volumes:
+      - ./certs/generated:/certs:ro
     mem_limit: 64m
 
   az-nsp-vfw-cn-beijing-1b:
@@ -391,9 +415,15 @@ services:
       - NSP_POSTGRESQL_PORT=5432
       - NSP_POSTGRESQL_USER=nsp_user
       - NSP_POSTGRESQL_PASSWORD=nsp_password
+      - NSP_TLS_ENABLED=true
+      - NSP_TLS_MODE=process
+      - NSP_TLS_CA_CERT_PATH=/certs/ca/ca.crt
+      - NSP_TLS_CERT_PATH=/certs/az/az-nsp-vpc-cn-shanghai-1a/server.crt
+      - NSP_TLS_KEY_PATH=/certs/az/az-nsp-vpc-cn-shanghai-1a/server.key
+      - NSP_TLS_CLIENT_AUTH=true
       - TOP_NSP_ADDR=http://top-nsp-vpc:8080
       - AZ_NSP_VFW_ADDR=http://az-nsp-vfw-cn-shanghai-1a:8080
-      - NSP_ADDR=http://az-nsp-vpc-cn-shanghai-1a:8080
+      - NSP_ADDR=https://az-nsp-vpc-cn-shanghai-1a:8080
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
@@ -403,6 +433,8 @@ services:
         condition: service_healthy
     networks:
       - nsp-network
+    volumes:
+      - ./certs/generated:/certs:ro
     mem_limit: 64m
 
   az-nsp-vfw-cn-shanghai-1a:

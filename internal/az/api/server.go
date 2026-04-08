@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -531,6 +532,27 @@ func (s *Server) listPCCNs(c *gin.Context) {
 
 func (s *Server) Run(addr string) error {
 	logger.Info("服务启动", "az", s.cfg.AZ, "addr", addr)
+	if s.cfg.TLS.Enabled && s.cfg.TLS.Mode == "process" {
+		tlsCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		tlsConfig, err := newServerTLSConfig(tlsCtx, s.cfg.TLS)
+		if err != nil {
+			return err
+		}
+
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			return err
+		}
+
+		server := &http.Server{
+			Addr:      addr,
+			Handler:   s.router,
+			TLSConfig: tlsConfig,
+		}
+		return server.ServeTLS(listener, "", "")
+	}
 	return s.router.Run(addr)
 }
 
@@ -546,9 +568,9 @@ func (s *Server) RegisterToTopNSP() error {
 	topNSPAddr := s.cfg.AZNSP.TopNSPAddr
 	registerURL := fmt.Sprintf("%s/api/v1/register/az", topNSPAddr)
 
-	nspAddr := os.Getenv("NSP_ADDR")
+	nspAddr := s.advertisedNSPAddr()
 	if nspAddr == "" {
-		nspAddr = fmt.Sprintf("http://az-nsp-%s:%d", s.cfg.AZ, s.cfg.Port)
+		return fmt.Errorf("advertised NSP address is empty")
 	}
 
 	reqData := models.RegisterAZRequest{
@@ -574,6 +596,19 @@ func (s *Server) RegisterToTopNSP() error {
 
 	logger.Info("成功注册到Top NSP", "az", s.cfg.AZ, "topNSPAddr", topNSPAddr)
 	return nil
+}
+
+func (s *Server) advertisedNSPAddr() string {
+	nspAddr := os.Getenv("NSP_ADDR")
+	if nspAddr != "" {
+		return nspAddr
+	}
+
+	scheme := "http"
+	if s.cfg.TLS.Enabled && s.cfg.TLS.Mode == "process" {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://az-nsp-%s:%d", scheme, s.cfg.AZ, s.cfg.Port)
 }
 
 func (s *Server) StartHeartbeat(ctx context.Context) {
