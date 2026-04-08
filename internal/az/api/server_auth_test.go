@@ -18,6 +18,11 @@ func TestServerAuthMiddleware(t *testing.T) {
 	cfg := &config.NSPConfig{
 		Region: "cn-test-1",
 		AZ:     "cn-test-1a",
+		TLS: config.TLSConfig{
+			Enabled:    true,
+			Mode:       "process",
+			ClientAuth: true,
+		},
 		Auth: config.AuthConfig{
 			EnableAuth:    true,
 			SkipAuthPaths: []string{"/api/v1/health"},

@@ -48,3 +48,13 @@ auth:
       secret_key: "top-nsp-secret-key"
       label: "Top NSP"
       enabled: true
+
+tls:
+  enabled: false
+  mode: "process"
+  ca_cert_path: ""
+  cert_path: ""
+  key_path: ""
+  client_auth: true
+  ca_reload_interval: "5m"
+  insecure_skip_verify: false

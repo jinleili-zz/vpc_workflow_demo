@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -40,6 +41,19 @@ type Config struct {
 	// SAGA settings
 	EnableSaga      bool
 	SagaWorkerCount int
+
+	// VPC outbound TLS settings
+	OutboundTLS TLSClientConfig
+}
+
+// TLSClientConfig configures the shared Top VPC outbound HTTP client.
+type TLSClientConfig struct {
+	Enabled            bool
+	CACertPath         string
+	CertPath           string
+	KeyPath            string
+	CAReloadInterval   time.Duration
+	InsecureSkipVerify bool
 }
 
 // DefaultConfig returns a default configuration
@@ -66,6 +80,7 @@ type Components struct {
 	Signer     *auth.Signer
 	SagaEngine *saga.Engine
 	TracedHTTP *trace.TracedClient
+	VPCHTTP    *http.Client
 
 	config *Config
 }
@@ -86,15 +101,20 @@ func Initialize(ctx context.Context, cfg *Config) (*Components, error) {
 		return nil, fmt.Errorf("failed to initialize auth: %w", err)
 	}
 
-	// 3. Initialize SAGA Engine (if enabled and DSN provided)
+	// 3. Initialize shared Top VPC outbound HTTP client
+	if err := c.initVPCHTTPClient(ctx); err != nil {
+		return nil, fmt.Errorf("failed to initialize VPC outbound http client: %w", err)
+	}
+
+	// 4. Initialize SAGA Engine (if enabled and DSN provided)
 	if cfg.EnableSaga && cfg.PostgresDSN != "" {
 		if err := c.initSaga(ctx); err != nil {
 			return nil, fmt.Errorf("failed to initialize saga: %w", err)
 		}
 	}
 
-	// 4. Initialize Traced HTTP Client
-	c.TracedHTTP = trace.NewTracedClient(nil)
+	// 5. Initialize Traced HTTP Client
+	c.TracedHTTP = trace.NewTracedClient(c.VPCHTTP)
 
 	logger.Platform().Info("nsp-common components initialized",
 		"service", cfg.ServiceName,
@@ -173,6 +193,20 @@ func (c *Components) initAuth() error {
 	return nil
 }
 
+func (c *Components) initVPCHTTPClient(ctx context.Context) error {
+	if !c.config.OutboundTLS.Enabled {
+		return nil
+	}
+
+	client, err := newReloadableMTLSHTTPClient(ctx, c.config.OutboundTLS)
+	if err != nil {
+		return err
+	}
+
+	c.VPCHTTP = client
+	return nil
+}
+
 // initSaga initializes the SAGA engine
 func (c *Components) initSaga(ctx context.Context) error {
 	sagaCfg := &saga.Config{
@@ -180,6 +214,9 @@ func (c *Components) initSaga(ctx context.Context) error {
 		WorkerCount:     c.config.SagaWorkerCount,
 		InstanceID:      c.config.InstanceID,
 		CredentialStore: c.CredStore,
+	}
+	if c.config.OutboundTLS.Enabled {
+		sagaCfg.HTTPClient = c.VPCHTTP
 	}
 
 	engine, err := saga.NewEngine(sagaCfg)

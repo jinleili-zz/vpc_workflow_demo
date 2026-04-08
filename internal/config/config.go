@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/config"
@@ -32,6 +33,9 @@ type NSPConfig struct {
 
 	// Auth 配置
 	Auth AuthConfig `mapstructure:"auth"`
+
+	// TLS 配置，仅 VPC 路径使用
+	TLS TLSConfig `mapstructure:"tls"`
 }
 
 // RedisConfig Redis配置
@@ -81,6 +85,18 @@ type AuthCredentialConfig struct {
 	Enabled   bool   `mapstructure:"enabled"`
 }
 
+// TLSConfig VPC 内部 HTTPS/mTLS 配置
+type TLSConfig struct {
+	Enabled            bool          `mapstructure:"enabled"`
+	Mode               string        `mapstructure:"mode"`
+	CACertPath         string        `mapstructure:"ca_cert_path"`
+	CertPath           string        `mapstructure:"cert_path"`
+	KeyPath            string        `mapstructure:"key_path"`
+	ClientAuth         bool          `mapstructure:"client_auth"`
+	CAReloadInterval   time.Duration `mapstructure:"ca_reload_interval"`
+	InsecureSkipVerify bool          `mapstructure:"insecure_skip_verify"`
+}
+
 // ConfigLoader 配置加载器，支持热更新
 type ConfigLoader struct {
 	loader config.Loader
@@ -97,24 +113,32 @@ func NewConfigLoader(configFile, envPrefix string, watch bool) (*ConfigLoader, e
 		EnvPrefix:  envPrefix,
 		Watch:      watch,
 		Defaults: map[string]any{
-			"port":                  8080,
-			"redis.host":            "localhost",
-			"redis.port":            6379,
-			"redis.data_db":         0,
-			"redis.broker_db":       1,
-			"redis.max_idle":        3,
-			"redis.max_active":      10,
-			"redis.idle_timeout":    240,
-			"postgresql.host":       "localhost",
-			"postgresql.port":       5432,
-			"postgresql.user":       "nsp_user",
-			"postgresql.password":   "nsp_password",
-			"top_nsp.az_nsp_prefix": "az-nsp",
-			"top_nsp.az_nsp_port":   8080,
-			"az_nsp.top_nsp_addr":   "http://top-nsp:8080",
-			"az_nsp.worker_count":   2,
-			"auth.enable_auth":      false,
-			"auth.skip_auth_paths":  []string{"/api/v1/health"},
+			"port":                     8080,
+			"redis.host":               "localhost",
+			"redis.port":               6379,
+			"redis.data_db":            0,
+			"redis.broker_db":          1,
+			"redis.max_idle":           3,
+			"redis.max_active":         10,
+			"redis.idle_timeout":       240,
+			"postgresql.host":          "localhost",
+			"postgresql.port":          5432,
+			"postgresql.user":          "nsp_user",
+			"postgresql.password":      "nsp_password",
+			"top_nsp.az_nsp_prefix":    "az-nsp",
+			"top_nsp.az_nsp_port":      8080,
+			"az_nsp.top_nsp_addr":      "http://top-nsp:8080",
+			"az_nsp.worker_count":      2,
+			"auth.enable_auth":         false,
+			"auth.skip_auth_paths":     []string{"/api/v1/health"},
+			"tls.enabled":              false,
+			"tls.mode":                 "process",
+			"tls.ca_cert_path":         "",
+			"tls.cert_path":            "",
+			"tls.key_path":             "",
+			"tls.client_auth":          true,
+			"tls.ca_reload_interval":   "5m",
+			"tls.insecure_skip_verify": false,
 		},
 	})
 	if err != nil {
@@ -249,6 +273,13 @@ func LoadConfig() *NSPConfig {
 				EnableAuth:    false,
 				SkipAuthPaths: []string{"/api/v1/health"},
 			},
+			TLS: TLSConfig{
+				Enabled:            false,
+				Mode:               "process",
+				ClientAuth:         true,
+				CAReloadInterval:   5 * time.Minute,
+				InsecureSkipVerify: false,
+			},
 		}
 	}
 	// 注意：使用 LoadConfig 时，调用方需要自行管理 ConfigLoader 的生命周期
@@ -321,4 +352,36 @@ func resolveEnvValue(value string) string {
 		return os.Getenv(strings.TrimSuffix(strings.TrimPrefix(value, "${"), "}"))
 	}
 	return value
+}
+
+// ValidateTLSStartup validates VPC TLS settings at process startup.
+func (c *NSPConfig) ValidateTLSStartup(nspAddr string) error {
+	if !c.TLS.Enabled {
+		return nil
+	}
+
+	switch c.ServiceType {
+	case "top":
+		if c.TLS.CACertPath == "" {
+			return fmt.Errorf("tls.ca_cert_path is required when top VPC TLS is enabled")
+		}
+		if c.TLS.CertPath == "" || c.TLS.KeyPath == "" {
+			return fmt.Errorf("tls.cert_path and tls.key_path are required when top VPC TLS is enabled")
+		}
+	case "az":
+		if c.TLS.ClientAuth && c.TLS.CACertPath == "" {
+			return fmt.Errorf("tls.ca_cert_path is required when AZ VPC client_auth is enabled")
+		}
+		if c.TLS.Mode == "lb" {
+			if nspAddr == "" {
+				return fmt.Errorf("NSP_ADDR is required when AZ VPC TLS is enabled in lb mode")
+			}
+			return nil
+		}
+		if c.TLS.CertPath == "" || c.TLS.KeyPath == "" {
+			return fmt.Errorf("tls.cert_path and tls.key_path are required when AZ VPC TLS is enabled in process mode")
+		}
+	}
+
+	return nil
 }

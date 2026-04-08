@@ -22,19 +22,25 @@ type AZNSPClient struct {
 }
 
 // NewAZNSPClient 创建AZ NSP客户端
-func NewAZNSPClient(signer *auth.Signer) *AZNSPClient {
-	return &AZNSPClient{
-		httpClient: &http.Client{
+func NewAZNSPClient(httpClient *http.Client, signer *auth.Signer) *AZNSPClient {
+	if httpClient == nil {
+		httpClient = &http.Client{
 			Timeout: 30 * time.Second,
-		},
-		signer: signer,
+		}
+	}
+	return &AZNSPClient{
+		httpClient: httpClient,
+		signer:     signer,
 	}
 }
 
 // NewAZNSPClientWithTrace 创建带链路追踪的AZ NSP客户端
-func NewAZNSPClientWithTrace(tracedClient *trace.TracedClient, signer *auth.Signer) *AZNSPClient {
+func NewAZNSPClientWithTrace(tracedClient *trace.TracedClient, httpClient *http.Client, signer *auth.Signer) *AZNSPClient {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
 	return &AZNSPClient{
-		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		httpClient:   httpClient,
 		tracedClient: tracedClient,
 		signer:       signer,
 	}
