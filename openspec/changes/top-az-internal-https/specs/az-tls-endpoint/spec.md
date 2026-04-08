@@ -1,11 +1,15 @@
 ## ADDED Requirements
 
-### Requirement: AZ 进程内 TLS 监听
-AZ NSP 进程（VPC 和 VFW）SHALL 在 TLS 启用时使用 `http.Server.ServeTLS()` 监听 HTTPS 端口，提供 TLS 终止能力。
+### Requirement: AZ 进程内 mTLS 监听
+AZ NSP 进程（VPC 和 VFW）SHALL 在 TLS 启用时使用 `http.Server.ServeTLS()` 监听 HTTPS 端口，提供 mTLS 终止能力：既提供服务端证书供 Top 验证，同时当 `tls.client_auth = true` 时要求并验证 Top 的客户端证书。
 
-#### Scenario: TLS 启用时 AZ 监听 HTTPS
-- **WHEN** AZ NSP 启动且 `tls.enabled = true` 且 `tls.cert_path` 和 `tls.key_path` 指向有效的证书和私钥文件
-- **THEN** AZ NSP MUST 使用 TLS 监听指定端口，接受 HTTPS 连接
+#### Scenario: mTLS 启用时 AZ 监听 HTTPS 并验证客户端证书
+- **WHEN** AZ NSP 启动且 `tls.enabled = true` 且 `tls.client_auth = true` 且 `tls.cert_path`、`tls.key_path` 和 `tls.ca_cert_path` 指向有效文件
+- **THEN** AZ NSP MUST 使用 TLS 监听指定端口，`tls.Config.ClientAuth` 设为 `tls.RequireAndVerifyClientCert`，`tls.Config.ClientCAs` 加载 `tls.ca_cert_path` 指定的 CA 证书用于验证 Top 客户端证书
+
+#### Scenario: TLS 启用但 client_auth 关闭时仅做单向 TLS
+- **WHEN** AZ NSP 启动且 `tls.enabled = true` 且 `tls.client_auth = false`
+- **THEN** AZ NSP MUST 使用 TLS 监听但不要求客户端证书（`tls.Config.ClientAuth` 保持 `tls.NoClientCert`）
 
 #### Scenario: TLS 未启用时 AZ 保持 HTTP 监听
 - **WHEN** AZ NSP 启动且 `tls.enabled = false`

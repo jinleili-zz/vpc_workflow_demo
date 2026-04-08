@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
-### Requirement: Top 侧统一 TLS Transport 构造
-系统 SHALL 在 Top NSP 启动时，当 TLS 启用时，基于配置的 CA 证书路径构造一个共享的 `TransportProvider`（封装 `*http.Transport` 并支持运行时原子替换），并将该 provider 注入到所有 Top -> AZ 出站 HTTP client 中。
+### Requirement: Top 侧统一 mTLS reloadableTransport 构造
+系统 SHALL 在 Top NSP 启动时，当 TLS 启用时，基于配置的 CA 证书路径和客户端证书/私钥路径构造一个 `reloadableTransport`（实现 `http.RoundTripper` 接口，内部通过 `atomic.Value` 持有 `*http.Transport` 并支持运行时原子替换），创建共享的 `*http.Client{Transport: reloadableTransport}` 并将其注入到所有 Top -> AZ 出站 HTTP client 中。
 
-#### Scenario: TLS 启用时构造 TransportProvider
-- **WHEN** Top NSP 启动且 `tls.enabled = true` 且 `tls.ca_cert_path` 指向有效的 CA 证书文件
-- **THEN** 系统 MUST 加载 CA 证书到 RootCAs 信任池，创建 `TransportProvider`，并将其注入 `AZNSPClient`、`SignedTracedClient` 和 SAGA Executor
+#### Scenario: TLS 启用时构造 reloadableTransport 和共享 HTTPClient
+- **WHEN** Top NSP 启动且 `tls.enabled = true` 且 `tls.ca_cert_path` 指向有效的 CA 证书文件且 `tls.cert_path`/`tls.key_path` 指向有效的客户端证书和私钥
+- **THEN** 系统 MUST 加载 CA 证书到 RootCAs 信任池、加载客户端证书到 Certificates，创建 `reloadableTransport`，构造共享 `*http.Client`，并将其注入 `AZNSPClient`、`SignedTracedClient` 和 SAGA Engine（`saga.Config.HTTPClient`）
 
 #### Scenario: TLS 未启用时保持默认行为
 - **WHEN** Top NSP 启动且 `tls.enabled = false`
@@ -15,38 +15,42 @@
 - **WHEN** Top NSP 启动且 `tls.enabled = true` 且 `tls.ca_cert_path` 指向不存在或不可读的文件
 - **THEN** 系统 MUST 输出明确的错误日志并终止启动
 
-### Requirement: 所有 Top -> AZ 出站调用统一使用共享 TransportProvider
-系统 SHALL 确保 Top 侧所有到 AZ 的出站 HTTP 调用（包括 `AZNSPClient`、`SignedTracedClient`、SAGA Executor、以及原先散落的 `http.Get()`/`http.Post()` 调用）均通过同一个 `TransportProvider` 获取 Transport 后发起请求。Client 不得在构造时持有 `*http.Transport` 指针快照，MUST 在每次请求时调用 provider 获取当前 Transport。
+#### Scenario: 客户端证书文件不可读时启动失败
+- **WHEN** Top NSP 启动且 `tls.enabled = true` 且 `tls.cert_path` 或 `tls.key_path` 指向不存在或不可读的文件
+- **THEN** 系统 MUST 输出明确的错误日志并终止启动
 
-#### Scenario: AZNSPClient 通过 provider 获取 Transport
+### Requirement: 所有 Top -> AZ 出站调用统一使用共享 mTLS HTTPClient
+系统 SHALL 确保 Top 侧所有到 AZ 的出站 HTTP 调用（包括 `AZNSPClient`、`SignedTracedClient`、SAGA Engine、以及原先散落的 `http.Get()`/`http.Post()` 调用）均通过同一个 `*http.Client`（Transport 为 `reloadableTransport`）发起请求。
+
+#### Scenario: AZNSPClient 使用共享 HTTPClient
 - **WHEN** Top VPC orchestrator 通过 `AZNSPClient` 向 AZ 发起健康检查、状态轮询或 Subnet/PCCN 请求
-- **THEN** 请求 MUST 通过调用 `TransportProvider` 获取当前 Transport 后发出
+- **THEN** 请求 MUST 通过共享的 `*http.Client`（底层 `reloadableTransport`）发出
 
-#### Scenario: SignedTracedClient 通过 provider 获取 Transport
+#### Scenario: SignedTracedClient 使用共享 HTTPClient
 - **WHEN** Top VFW PolicyService 或 Top API Server 通过 `SignedTracedClient` 向 AZ 发起请求
-- **THEN** 请求 MUST 通过调用 `TransportProvider` 获取当前 Transport 后发出
+- **THEN** 请求 MUST 通过共享的 `*http.Client`（底层 `reloadableTransport`）发出
 
 #### Scenario: 消除散落的 stdlib 直接 HTTP 调用
 - **WHEN** 代码中存在 `http.Get()` 或 `http.Post()` 直接调用 AZ 地址的位置（如 `CheckZonePolicies`）
 - **THEN** 这些调用 MUST 被替换为使用统一 client 路径，通过共享 TLS Transport 发出
 
-### Requirement: SAGA Executor TLS Transport 注入（前置依赖）
-SAGA Executor 是 VPC/PCCN 创建/删除的唯一调用路径。系统 SHALL 在 `nsp_platform` 提供 `HTTPTransportProvider` 注入接口后，通过 bootstrap 将 `TransportProvider` 传入 SAGA Executor，使 SAGA 执行的 Top -> AZ 同步步骤使用与其他 client 相同的 TLS Transport。此能力是 AZ 侧切换 HTTPS 的阻塞前置条件。
+### Requirement: SAGA Engine mTLS 适配（利用已有 HTTPClient 注入接口）
+SAGA Engine 是 VPC/PCCN 创建/删除的唯一调用路径。系统 SHALL 在 bootstrap 时将带 mTLS 的共享 `*http.Client` 通过 `saga.Config.HTTPClient` 传入 SAGA Engine，使 SAGA 执行的 Top -> AZ 同步步骤使用与其他 client 相同的 mTLS Transport。`nsp-platform` 已提供此注入接口，无需平台侧额外改造。
 
-#### Scenario: nsp_platform 提供注入接口后注入 TransportProvider
-- **WHEN** `nsp_platform` SAGA 模块的 `ExecutorConfig` 包含 `HTTPTransportProvider` 字段，且 `tls.enabled = true`
-- **THEN** bootstrap 的 `initSaga()` MUST 将与其他 client 相同的 `TransportProvider` 实例传入 SAGA Executor
+#### Scenario: bootstrap 时注入 mTLS HTTPClient 到 SAGA
+- **WHEN** `tls.enabled = true` 且 Top NSP 初始化 SAGA Engine
+- **THEN** bootstrap 的 `initSaga()` MUST 将与其他 client 相同的共享 `*http.Client`（底层 `reloadableTransport`）传入 `saga.Config.HTTPClient`
 
-#### Scenario: nsp_platform 接口就绪前不切换 AZ 到 HTTPS
-- **WHEN** `nsp_platform` SAGA 模块尚未提供 `HTTPTransportProvider` 注入接口
-- **THEN** 所有 AZ MUST 保持 `http://` 地址注册和 HTTP 监听，业务仓库可以完成 TLS 配置、TransportProvider 构造、AZ TLS 监听等准备工作并合入主干，但不得将 `tls.enabled` 设为 `true` 上线
+#### Scenario: TLS 未启用时 SAGA 保持默认行为
+- **WHEN** `tls.enabled = false`
+- **THEN** `saga.Config.HTTPClient` MUST 保持 nil，SAGA Engine 使用内部自建的 plain `*http.Client`
 
-### Requirement: Top 侧 CA 证书热更新
-系统 SHALL 支持在不重启 Top NSP 进程的情况下更新 CA 信任链，以支持叶子证书续期和 CA 轮换。
+### Requirement: Top 侧 CA 和客户端证书热更新
+系统 SHALL 支持在不重启 Top NSP 进程的情况下更新 CA 信任链和客户端证书，以支持叶子证书续期和 CA 轮换。
 
-#### Scenario: CA 文件更新后所有 client 的新请求使用新 CA
-- **WHEN** Top NSP 运行中且 `tls.ca_cert_path` 指向的文件被替换为包含新 CA 的 bundle
-- **THEN** 系统 MUST 在 `tls.ca_reload_interval` 时间内检测到文件变更，重建 `*http.Transport` 并通过 `TransportProvider` 内部原子替换，后续所有 client（包括 `AZNSPClient`、`SignedTracedClient`、SAGA Executor）的新请求 MUST 使用更新后的 CA 信任池
+#### Scenario: CA 或客户端证书文件更新后所有 client 的新请求使用新证书
+- **WHEN** Top NSP 运行中且 `tls.ca_cert_path`、`tls.cert_path` 或 `tls.key_path` 指向的文件被替换
+- **THEN** 系统 MUST 在 `tls.ca_reload_interval` 时间内检测到文件变更，重建内部 `*http.Transport` 并通过 `reloadableTransport` 内部 `atomic.Value` 原子替换，后续所有 client（包括 `AZNSPClient`、`SignedTracedClient`、SAGA Engine）的新请求 MUST 使用更新后的 CA 信任池和客户端证书
 
 #### Scenario: CA 文件更新期间已有连接不中断
 - **WHEN** CA 文件被替换且系统执行 Transport 原子替换

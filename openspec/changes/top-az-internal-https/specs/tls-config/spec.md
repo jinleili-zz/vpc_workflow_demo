@@ -5,11 +5,11 @@
 
 #### Scenario: 配置文件包含完整 TLS 配置段
 - **WHEN** `config/config.yaml` 加载配置
-- **THEN** 系统 MUST 支持以下配置字段：`tls.enabled`（bool）、`tls.mode`（string，值为 `process` 或 `lb`）、`tls.ca_cert_path`（string）、`tls.cert_path`（string）、`tls.key_path`（string）、`tls.ca_reload_interval`（duration string）、`tls.insecure_skip_verify`（bool）
+- **THEN** 系统 MUST 支持以下配置字段：`tls.enabled`（bool）、`tls.mode`（string，值为 `process` 或 `lb`）、`tls.ca_cert_path`（string）、`tls.cert_path`（string）、`tls.key_path`（string）、`tls.client_auth`（bool）、`tls.ca_reload_interval`（duration string）、`tls.insecure_skip_verify`（bool）
 
 #### Scenario: TLS 配置缺省值
 - **WHEN** 配置文件中未指定 TLS 配置段
-- **THEN** `tls.enabled` MUST 默认为 `false`，`tls.mode` MUST 默认为 `"process"`，`tls.ca_reload_interval` MUST 默认为 `"5m"`，`tls.insecure_skip_verify` MUST 默认为 `false`
+- **THEN** `tls.enabled` MUST 默认为 `false`，`tls.mode` MUST 默认为 `"process"`，`tls.client_auth` MUST 默认为 `true`，`tls.ca_reload_interval` MUST 默认为 `"5m"`，`tls.insecure_skip_verify` MUST 默认为 `false`
 
 ### Requirement: TLS 环境变量覆盖
 系统 SHALL 支持通过 `NSP_` 前缀的环境变量覆盖 TLS 配置项，与现有配置覆盖机制一致。
@@ -33,9 +33,17 @@
 - **WHEN** Top NSP 启动且 `tls.enabled = true` 且 `tls.ca_cert_path` 为空
 - **THEN** 系统 MUST 输出错误日志（提示需要 CA 证书路径）并终止启动
 
+#### Scenario: Top 侧 TLS 启用但未指定客户端证书路径
+- **WHEN** Top NSP 启动且 `tls.enabled = true` 且 `tls.cert_path` 或 `tls.key_path` 为空
+- **THEN** 系统 MUST 输出错误日志（提示需要客户端证书和私钥路径用于 mTLS）并终止启动
+
 #### Scenario: AZ 侧 TLS 启用且 mode 为 process 但未指定证书路径
 - **WHEN** AZ NSP 启动且 `tls.enabled = true` 且 `tls.mode = "process"` 且 `tls.cert_path` 或 `tls.key_path` 为空
 - **THEN** 系统 MUST 输出错误日志（提示需要证书和私钥路径）并终止启动
+
+#### Scenario: AZ 侧 mTLS 启用但未指定 CA 路径
+- **WHEN** AZ NSP 启动且 `tls.enabled = true` 且 `tls.client_auth = true` 且 `tls.ca_cert_path` 为空
+- **THEN** 系统 MUST 输出错误日志（提示需要 CA 证书路径用于验证客户端证书）并终止启动
 
 #### Scenario: AZ 侧 TLS 启用且 mode 为 lb 时不要求证书路径
 - **WHEN** AZ NSP 启动且 `tls.enabled = true` 且 `tls.mode = "lb"`
