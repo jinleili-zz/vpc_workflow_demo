@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/trace"
 	"workflow_qoder/internal/models"
 )
@@ -28,7 +29,7 @@ func jsonResponse(status int, body string) *http.Response {
 
 func TestAZNSPClientWithTrace(t *testing.T) {
 	tracedClient := trace.NewTracedClient(nil)
-	client := NewAZNSPClientWithTrace(tracedClient, tracedClient.Client())
+	client := NewAZNSPClientWithTrace(tracedClient, tracedClient.Client(), nil)
 
 	if client.tracedClient == nil {
 		t.Fatal("tracedClient should not be nil")
@@ -36,7 +37,7 @@ func TestAZNSPClientWithTrace(t *testing.T) {
 }
 
 func TestAZNSPClientWithoutTrace(t *testing.T) {
-	client := NewAZNSPClient(nil)
+	client := NewAZNSPClient(nil, nil)
 
 	if client.tracedClient != nil {
 		t.Fatal("tracedClient should be nil for plain client")
@@ -67,7 +68,7 @@ func TestCreateVPCWithTrace(t *testing.T) {
 			return jsonResponse(http.StatusOK, string(body)), nil
 		}),
 	})
-	client := NewAZNSPClientWithTrace(tracedClient, tracedClient.Client())
+	client := NewAZNSPClientWithTrace(tracedClient, tracedClient.Client(), nil)
 
 	// Create trace context
 	tc := &trace.TraceContext{
@@ -104,7 +105,7 @@ func TestDeleteVPCWithTrace(t *testing.T) {
 			return jsonResponse(http.StatusNoContent, ""), nil
 		}),
 	})
-	client := NewAZNSPClientWithTrace(tracedClient, tracedClient.Client())
+	client := NewAZNSPClientWithTrace(tracedClient, tracedClient.Client(), nil)
 
 	tc := &trace.TraceContext{
 		TraceID:    "test-delete-vpc-trace-id",
@@ -121,7 +122,7 @@ func TestDeleteVPCWithTrace(t *testing.T) {
 }
 
 func TestDeleteVPCWithoutTrace(t *testing.T) {
-	client := NewAZNSPClient(nil)
+	client := NewAZNSPClient(nil, nil)
 	client.httpClient = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			if r.Method != "DELETE" {
@@ -150,7 +151,7 @@ func TestHealthCheckWithTrace(t *testing.T) {
 			return jsonResponse(http.StatusOK, ""), nil
 		}),
 	})
-	client := NewAZNSPClientWithTrace(tracedClient, tracedClient.Client())
+	client := NewAZNSPClientWithTrace(tracedClient, tracedClient.Client(), nil)
 
 	tc := &trace.TraceContext{
 		TraceID:    "test-health-trace-id",
@@ -175,8 +176,38 @@ func TestAZNSPClientUsesInjectedHTTPClient(t *testing.T) {
 		}),
 	}
 
-	client := NewAZNSPClient(injected)
+	client := NewAZNSPClient(injected, nil)
 	if client.httpClient != injected {
 		t.Fatalf("httpClient was not preserved")
+	}
+}
+
+func TestCreateVPCWithSigner(t *testing.T) {
+	client := NewAZNSPClient(nil, auth.NewSigner("top-nsp", "test-secret-key-12345"))
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Header.Get("Authorization") == "" {
+				t.Error("Expected Authorization header in request")
+			}
+			if r.Header.Get(auth.HeaderTimestamp) == "" {
+				t.Error("Expected signed timestamp header in request")
+			}
+			if r.Header.Get(auth.HeaderNonce) == "" {
+				t.Error("Expected signed nonce header in request")
+			}
+
+			resp := models.VPCResponse{Success: true, Message: "VPC created"}
+			body, _ := json.Marshal(resp)
+			return jsonResponse(http.StatusOK, string(body)), nil
+		}),
+	}
+
+	req := &models.VPCRequest{VPCName: "test-vpc", Region: "region-1"}
+	resp, err := client.CreateVPC(context.Background(), "http://example.com", req)
+	if err != nil {
+		t.Fatalf("CreateVPC failed: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("Expected success, got: %s", resp.Message)
 	}
 }

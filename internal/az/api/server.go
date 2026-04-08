@@ -38,10 +38,12 @@ func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, inspector taskque
 	router.Use(trace.TraceMiddleware(instanceID))
 	router.Use(ginLoggerMiddleware())
 
-	// When mTLS client authentication is enabled, AKSK middleware is skipped
+	// When mTLS client authentication is enabled in process mode, AKSK middleware is skipped
 	// because mTLS already provides identity authentication.
-	if cfg.TLS.Enabled && cfg.TLS.ClientAuth {
-		logger.Info("mTLS client authentication enabled, skipping AKSK auth middleware")
+	// Note: In tls.mode=lb, the AZ process serves plain HTTP and TLS termination happens
+	// at the LB, so AKSK middleware must remain active for in-process protection.
+	if cfg.TLS.Enabled && cfg.TLS.Mode == "process" && cfg.TLS.ClientAuth {
+		logger.Info("mTLS client authentication enabled in process mode, skipping AKSK auth middleware")
 	} else if cfg.Auth.EnableAuth && verifier != nil {
 		skipPaths := cfg.Auth.SkipAuthPaths
 		if len(skipPaths) == 0 {

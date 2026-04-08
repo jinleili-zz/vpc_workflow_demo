@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/trace"
 	"workflow_qoder/internal/models"
 )
@@ -17,10 +18,12 @@ import (
 type AZNSPClient struct {
 	httpClient   *http.Client
 	tracedClient *trace.TracedClient
+	signer       *auth.Signer
 }
 
 // NewAZNSPClient 创建AZ NSP客户端
-func NewAZNSPClient(httpClient *http.Client) *AZNSPClient {
+// signer: 当mTLS未启用时用于AK/SK签名，mTLS启用时传nil
+func NewAZNSPClient(httpClient *http.Client, signer *auth.Signer) *AZNSPClient {
 	if httpClient == nil {
 		httpClient = &http.Client{
 			Timeout: 30 * time.Second,
@@ -28,17 +31,20 @@ func NewAZNSPClient(httpClient *http.Client) *AZNSPClient {
 	}
 	return &AZNSPClient{
 		httpClient: httpClient,
+		signer:     signer,
 	}
 }
 
 // NewAZNSPClientWithTrace 创建带链路追踪的AZ NSP客户端
-func NewAZNSPClientWithTrace(tracedClient *trace.TracedClient, httpClient *http.Client) *AZNSPClient {
+// signer: 当mTLS未启用时用于AK/SK签名，mTLS启用时传nil
+func NewAZNSPClientWithTrace(tracedClient *trace.TracedClient, httpClient *http.Client, signer *auth.Signer) *AZNSPClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &AZNSPClient{
 		httpClient:   httpClient,
 		tracedClient: tracedClient,
+		signer:       signer,
 	}
 }
 
@@ -299,6 +305,12 @@ func (c *AZNSPClient) DeletePCCN(ctx context.Context, azAddr string, pccnName st
 }
 
 func (c *AZNSPClient) do(req *http.Request) (*http.Response, error) {
+	// Only sign when AK/SK auth is needed (mTLS not active)
+	if c.signer != nil {
+		if err := c.signer.Sign(req); err != nil {
+			return nil, fmt.Errorf("签名请求失败: %w", err)
+		}
+	}
 	if c.tracedClient != nil {
 		return c.tracedClient.Do(req)
 	}

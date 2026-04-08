@@ -17,10 +17,13 @@ import (
 	topdao "workflow_qoder/internal/top/vpc/dao"
 
 	"github.com/google/uuid"
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/saga"
 	"github.com/jinleili-zz/nsp-platform/trace"
 )
+
+const topNSPAccessKey = "top-nsp"
 
 type Orchestrator struct {
 	ctx        context.Context // 长生命周期 context，用于后台 goroutine
@@ -31,20 +34,25 @@ type Orchestrator struct {
 	sagaEngine *saga.Engine
 	tracedHTTP *trace.TracedClient
 	wg         sync.WaitGroup
+	useMTLS    bool // true when mTLS client auth is active (TLS.Enabled && TLS.Mode=="process" && TLS.ClientAuth)
 }
 
-func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sql.DB, sagaEngine *saga.Engine, tracedHTTP *trace.TracedClient) *Orchestrator {
+// NewOrchestrator creates a new orchestrator.
+// When useMTLS is true, AK/SK signing is skipped because mTLS provides authentication.
+// When useMTLS is false, signer must be provided for AK/SK authentication.
+func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sql.DB, sagaEngine *saga.Engine, tracedHTTP *trace.TracedClient, signer *auth.Signer, useMTLS bool) *Orchestrator {
 	var dao *topdao.TopVPCDAO
 	if topDB != nil {
 		dao = topdao.NewTopVPCDAO(topDB)
 	}
 
 	// Create AZ client with trace support
+	// Pass signer only when not using mTLS (AK/SK fallback mode)
 	var azClient *client.AZNSPClient
 	if tracedHTTP != nil {
-		azClient = client.NewAZNSPClientWithTrace(tracedHTTP, tracedHTTP.Client())
+		azClient = client.NewAZNSPClientWithTrace(tracedHTTP, tracedHTTP.Client(), signer)
 	} else {
-		azClient = client.NewAZNSPClient(nil)
+		azClient = client.NewAZNSPClient(nil, signer)
 	}
 
 	// Initialize PCCN DAO
@@ -61,6 +69,7 @@ func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sq
 		pccnDAO:    pccnDAO,
 		sagaEngine: sagaEngine,
 		tracedHTTP: tracedHTTP,
+		useMTLS:    useMTLS,
 	}
 }
 
@@ -101,7 +110,8 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 		payloadBytes, _ := json.Marshal(&reqWithID)
 		var payloadMap map[string]any
 		json.Unmarshal(payloadBytes, &payloadMap)
-		builder.AddStep(saga.Step{
+
+		step := saga.Step{
 			Name:             fmt.Sprintf("创建VPC-%s", az.ID),
 			Type:             saga.StepTypeSync,
 			ActionMethod:     "POST",
@@ -109,7 +119,12 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 			ActionPayload:    payloadMap,
 			CompensateMethod: "DELETE",
 			CompensateURL:    fmt.Sprintf("%s/api/v1/vpc/%s", az.NSPAddr, req.VPCName),
-		})
+		}
+		// Only use AK/SK auth when mTLS is not active
+		if !o.useMTLS {
+			step.AuthAK = topNSPAccessKey
+		}
+		builder.AddStep(step)
 	}
 
 	def, err := builder.Build()
@@ -646,7 +661,7 @@ func (o *Orchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest) 
 		var payloadMap map[string]any
 		json.Unmarshal(payloadBytes, &payloadMap)
 
-		builder.AddStep(saga.Step{
+		step := saga.Step{
 			Name:             fmt.Sprintf("提交PCCN创建-%s", az.ID),
 			Type:             saga.StepTypeSync,
 			ActionMethod:     "POST",
@@ -654,7 +669,12 @@ func (o *Orchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest) 
 			ActionPayload:    payloadMap,
 			CompensateMethod: "DELETE",
 			CompensateURL:    fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, req.PCCNName),
-		})
+		}
+		// Only use AK/SK auth when mTLS is not active
+		if !o.useMTLS {
+			step.AuthAK = topNSPAccessKey
+		}
+		builder.AddStep(step)
 	}
 
 	def, err := builder.Build()
@@ -953,14 +973,19 @@ func (o *Orchestrator) DeletePCCN(ctx context.Context, pccnName string) (*models
 
 	// 为每个AZ添加删除Step（删除操作不需要补偿，因为本身就是回滚操作）
 	for _, az := range allAZs {
-		builder.AddStep(saga.Step{
+		step := saga.Step{
 			Name:             fmt.Sprintf("删除PCCN-%s", az.ID),
 			Type:             saga.StepTypeSync,
 			ActionMethod:     "DELETE",
 			ActionURL:        fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, pccnName),
 			CompensateMethod: "DELETE", // 补偿操作也是删除（幂等）
 			CompensateURL:    fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, pccnName),
-		})
+		}
+		// Only use AK/SK auth when mTLS is not active
+		if !o.useMTLS {
+			step.AuthAK = topNSPAccessKey
+		}
+		builder.AddStep(step)
 	}
 
 	def, err := builder.Build()
