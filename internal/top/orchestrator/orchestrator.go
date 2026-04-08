@@ -17,13 +17,10 @@ import (
 	topdao "workflow_qoder/internal/top/vpc/dao"
 
 	"github.com/google/uuid"
-	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/saga"
 	"github.com/jinleili-zz/nsp-platform/trace"
 )
-
-const topNSPAccessKey = "top-nsp"
 
 type Orchestrator struct {
 	ctx        context.Context // 长生命周期 context，用于后台 goroutine
@@ -36,7 +33,7 @@ type Orchestrator struct {
 	wg         sync.WaitGroup
 }
 
-func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sql.DB, sagaEngine *saga.Engine, tracedHTTP *trace.TracedClient, signer *auth.Signer) *Orchestrator {
+func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sql.DB, sagaEngine *saga.Engine, tracedHTTP *trace.TracedClient) *Orchestrator {
 	var dao *topdao.TopVPCDAO
 	if topDB != nil {
 		dao = topdao.NewTopVPCDAO(topDB)
@@ -45,9 +42,9 @@ func NewOrchestrator(ctx context.Context, registry *registry.Registry, topDB *sq
 	// Create AZ client with trace support
 	var azClient *client.AZNSPClient
 	if tracedHTTP != nil {
-		azClient = client.NewAZNSPClientWithTrace(tracedHTTP, tracedHTTP.Client(), signer)
+		azClient = client.NewAZNSPClientWithTrace(tracedHTTP, tracedHTTP.Client())
 	} else {
-		azClient = client.NewAZNSPClient(nil, signer)
+		azClient = client.NewAZNSPClient(nil)
 	}
 
 	// Initialize PCCN DAO
@@ -110,7 +107,6 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 			ActionMethod:     "POST",
 			ActionURL:        fmt.Sprintf("%s/api/v1/vpc", az.NSPAddr),
 			ActionPayload:    payloadMap,
-			AuthAK:           topNSPAccessKey,
 			CompensateMethod: "DELETE",
 			CompensateURL:    fmt.Sprintf("%s/api/v1/vpc/%s", az.NSPAddr, req.VPCName),
 		})
@@ -656,7 +652,6 @@ func (o *Orchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest) 
 			ActionMethod:     "POST",
 			ActionURL:        fmt.Sprintf("%s/api/v1/pccn", az.NSPAddr),
 			ActionPayload:    payloadMap,
-			AuthAK:           topNSPAccessKey,
 			CompensateMethod: "DELETE",
 			CompensateURL:    fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, req.PCCNName),
 		})
@@ -963,7 +958,6 @@ func (o *Orchestrator) DeletePCCN(ctx context.Context, pccnName string) (*models
 			Type:             saga.StepTypeSync,
 			ActionMethod:     "DELETE",
 			ActionURL:        fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, pccnName),
-			AuthAK:           topNSPAccessKey,
 			CompensateMethod: "DELETE", // 补偿操作也是删除（幂等）
 			CompensateURL:    fmt.Sprintf("%s/api/v1/pccn/%s", az.NSPAddr, pccnName),
 		})

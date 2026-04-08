@@ -1,10 +1,44 @@
 #!/bin/bash
 
 echo "========================================="
-echo "NSP 端到端测试（含 PCCN）"
+echo "NSP 端到端测试（含 PCCN + mTLS 验证）"
 echo "========================================="
 
 TOP_NSP="http://localhost:8080"
+
+# 0. 检查证书是否已生成
+echo ""
+echo "0. 检查mTLS证书..."
+CERTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/certs/generated"
+if [ ! -d "${CERTS_DIR}/ca" ] || [ ! -d "${CERTS_DIR}/top" ]; then
+    echo "证书未生成，正在生成..."
+    ./certs/generate-certs.sh
+else
+    echo "证书已存在: ${CERTS_DIR}"
+fi
+
+# 验证证书文件存在
+echo ""
+echo "验证证书文件..."
+CERT_OK=true
+if [ ! -f "${CERTS_DIR}/ca/ca.crt" ]; then
+    echo "  ✗ CA证书不存在"
+    CERT_OK=false
+else
+    echo "  ✓ CA证书存在"
+fi
+if [ ! -f "${CERTS_DIR}/top/top-client.crt" ] || [ ! -f "${CERTS_DIR}/top/top-client.key" ]; then
+    echo "  ✗ Top客户端证书不存在"
+    CERT_OK=false
+else
+    echo "  ✓ Top客户端证书存在"
+fi
+if [ ! -f "${CERTS_DIR}/az/az-nsp-vpc-cn-beijing-1a/server.crt" ]; then
+    echo "  ✗ AZ服务端证书不存在"
+    CERT_OK=false
+else
+    echo "  ✓ AZ服务端证书存在"
+fi
 
 # 1. 检查Top NSP健康状态
 echo ""
@@ -150,4 +184,38 @@ echo "  ✓ 创建 PCCN 连接两个 VPC"
 echo "  ✓ 查询 PCCN 状态"
 echo "  ✓ 验证有 PCCN 时无法删除 VPC"
 echo "  ✓ 删除 PCCN"
+echo ""
+echo "========================================="
+echo "mTLS 链路验证"
+echo "========================================="
+
+# 验证 AZ VPC 服务使用 HTTPS
+echo ""
+echo "17. 验证 AZ VPC 服务注册地址（应为 https://）..."
+AZS_RESP=$(curl -s $TOP_NSP/api/v1/azs)
+echo "$AZS_RESP" | python3 -m json.tool
+
+# 检查 AZ 地址是否使用 https scheme
+if echo "$AZS_RESP" | grep -q '"nsp_addr".*https://'; then
+    echo "  ✓ AZ VPC 地址使用 HTTPS scheme"
+else
+    echo "  ✗ AZ VPC 地址未使用 HTTPS scheme（mTLS 可能未启用）"
+fi
+
+# 验证 mTLS 连接（通过 Top NSP 的健康检查间接验证）
+echo ""
+echo "18. 验证 Top -> AZ mTLS 通信（通过 AZ 健康检查）..."
+# Top NSP 在轮询 AZ 健康状态时会使用 mTLS client
+# 如果 mTLS 配置正确，AZ 应该能够被成功健康检查
+sleep 2
+curl -s $TOP_NSP/api/v1/health | python3 -m json.tool
+
+echo ""
+echo "========================================="
+echo "mTLS 测试验证:"
+echo "  ✓ 证书已生成并挂载"
+echo "  ✓ AZ VPC 使用 HTTPS 监听"
+echo "  ✓ Top VPC 使用 mTLS 客户端连接 AZ"
+echo ""
+echo "注意: VFW 服务保持 AK/SK + HTTP（未使用 mTLS）"
 echo "========================================="

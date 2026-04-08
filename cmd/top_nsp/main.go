@@ -154,7 +154,7 @@ func main() {
 	reg := registry.NewRegistry(redisClient)
 
 	// Initialize orchestrator with SAGA engine
-	orch := orchestrator.NewOrchestrator(ctx, reg, topDB, components.SagaEngine, components.TracedHTTP, components.Signer)
+	orch := orchestrator.NewOrchestrator(ctx, reg, topDB, components.SagaEngine, components.TracedHTTP)
 
 	// Initialize API server
 	server := api.NewServer(reg, orch, components.TracedHTTP, components.Signer)
