@@ -12,7 +12,10 @@ COPY nsp-platform third_party/nsp-platform
 COPY vpc_workflow_demo/ .
 
 # Docker 环境中修改 replace 路径以匹配构建上下文
-RUN sed -i 's|../nsp-platform|./third_party/nsp-platform|g' go.mod && go mod tidy
+# 使用绝对路径确保 replace 正确指向本地 nsp-platform
+RUN sed -i 's|../nsp-platform|/build/third_party/nsp-platform|g' go.mod && \
+    go mod edit -replace github.com/jinleili-zz/nsp-platform=/build/third_party/nsp-platform && \
+    go mod tidy
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o top-nsp-vfw ./cmd/top_nsp_vfw
 
