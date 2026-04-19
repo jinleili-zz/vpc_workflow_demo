@@ -1,5 +1,50 @@
 package models
 
+// =====================================================
+// Error codes for AZ-NSP response envelope
+// =====================================================
+
+const (
+	// CodeSuccess indicates success, required by the saga envelope protocol.
+	CodeSuccess = "0"
+
+	// VPC error codes: 100000~109999
+	CodeVPCInvalidParam      = "100001"
+	CodeVPCCreateRecordFail  = "100002"
+	CodeVPCSerializeFail     = "100003"
+	CodeVPCWorkflowFail      = "100004"
+	CodeVPCNotFound          = "100005"
+	CodeVPCDeleteFail        = "100006"
+	CodeVPCInternalError     = "100099"
+
+	// Subnet error codes: 101000~101999
+	CodeSubnetInvalidParam     = "101001"
+	CodeSubnetCreateRecordFail = "101002"
+	CodeSubnetSerializeFail    = "101003"
+	CodeSubnetWorkflowFail     = "101004"
+	CodeSubnetNotFound         = "101005"
+	CodeSubnetDeleteFail       = "101006"
+
+	// PCCN error codes: 102000~102999
+	CodePCCNInvalidParam     = "102001"
+	CodePCCNVPCNotFound      = "102002"
+	CodePCCNCreateRecordFail = "102003"
+	CodePCCNSerializeFail    = "102004"
+	CodePCCNWorkflowFail     = "102005"
+	CodePCCNNotFound         = "102006"
+	CodePCCNDeleteFail       = "102007"
+
+	// ELB error codes: 110000~119999 (reserved)
+
+	// VFW error codes: 120000~129999
+	CodeVFWInvalidParam     = "120001"
+	CodeVFWCreateRecordFail = "120002"
+	CodeVFWSerializeFail    = "120003"
+	CodeVFWWorkflowFail     = "120004"
+	CodeVFWNotFound         = "120005"
+	CodeVFWDeleteFail       = "120006"
+)
+
 // ServiceLevel 服务级别
 type ServiceLevel string
 
@@ -37,8 +82,9 @@ type VPCRequest struct {
 
 // VPCResponse VPC创建响应
 type VPCResponse struct {
-	Success    bool              `json:"success"`
+	Code       string            `json:"code"`
 	Message    string            `json:"message"`
+	Success    bool              `json:"success"`
 	VPCID      string            `json:"vpc_id,omitempty"`
 	WorkflowID string            `json:"workflow_id,omitempty"`
 	AZResults  map[string]string `json:"az_results,omitempty"` // AZ级别的结果
@@ -55,8 +101,9 @@ type SubnetRequest struct {
 
 // SubnetResponse 子网创建响应
 type SubnetResponse struct {
-	Success    bool   `json:"success"`
+	Code       string `json:"code"`
 	Message    string `json:"message"`
+	Success    bool   `json:"success"`
 	SubnetID   string `json:"subnet_id,omitempty"`
 	WorkflowID string `json:"workflow_id,omitempty"`
 }
@@ -94,6 +141,7 @@ type PCCNRequest struct {
 
 // PCCNResponse PCCN创建响应
 type PCCNResponse struct {
+	Code    string `json:"code"`
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 	PCCNID  string `json:"pccn_id,omitempty"`  // PCCN唯一标识

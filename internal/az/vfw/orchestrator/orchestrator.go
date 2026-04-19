@@ -85,12 +85,12 @@ func (o *VFWOrchestrator) CreatePolicy(ctx context.Context, req *models.AZFirewa
 	}
 
 	if err := o.policyDAO.Create(ctx, policy); err != nil {
-		return &models.AZFirewallPolicyResponse{Success: false, Message: fmt.Sprintf("创建策略记录失败: %v", err)}, nil
+		return &models.AZFirewallPolicyResponse{Code: models.CodeVFWCreateRecordFail, Success: false, Message: fmt.Sprintf("创建策略记录失败: %v", err)}, nil
 	}
 
 	params, err := o.buildPolicyTaskParams(req)
 	if err != nil {
-		return &models.AZFirewallPolicyResponse{Success: false, Message: fmt.Sprintf("序列化策略参数失败: %v", err)}, nil
+		return &models.AZFirewallPolicyResponse{Code: models.CodeVFWSerializeFail, Success: false, Message: fmt.Sprintf("序列化策略参数失败: %v", err)}, nil
 	}
 
 	workflowID, err := o.workflowMgr.SubmitWorkflow(ctx, orchestration.WorkflowDef{
@@ -109,12 +109,13 @@ func (o *VFWOrchestrator) CreatePolicy(ctx context.Context, req *models.AZFirewa
 		},
 	})
 	if err != nil {
-		return &models.AZFirewallPolicyResponse{Success: false, Message: fmt.Sprintf("提交工作流失败: %v", err)}, nil
+		return &models.AZFirewallPolicyResponse{Code: models.CodeVFWWorkflowFail, Success: false, Message: fmt.Sprintf("提交工作流失败: %v", err)}, nil
 	}
 
 	logger.InfoContext(ctx, "防火墙策略创建流程启动成功", "az", o.az, "policy_name", req.PolicyName, "policy_id", policyID, "workflowID", workflowID)
 
 	return &models.AZFirewallPolicyResponse{
+		Code:       models.CodeSuccess,
 		Success:    true,
 		Message:    "防火墙策略创建工作流已启动",
 		PolicyID:   policyID,

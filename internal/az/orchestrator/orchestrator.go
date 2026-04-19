@@ -96,6 +96,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 
 	if err := o.vpcDAO.Create(ctx, vpcResource); err != nil {
 		return &models.VPCResponse{
+			Code:    models.CodeVPCCreateRecordFail,
 			Success: false,
 			Message: fmt.Sprintf("创建VPC资源记录失败: %v", err),
 		}, nil
@@ -104,6 +105,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	params, err := o.buildVPCTaskParams(req)
 	if err != nil {
 		return &models.VPCResponse{
+			Code:    models.CodeVPCSerializeFail,
 			Success: false,
 			Message: fmt.Sprintf("序列化VPC任务参数失败: %v", err),
 		}, nil
@@ -121,6 +123,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	})
 	if err != nil {
 		return &models.VPCResponse{
+			Code:    models.CodeVPCWorkflowFail,
 			Success: false,
 			Message: fmt.Sprintf("提交工作流失败: %v", err),
 		}, nil
@@ -129,6 +132,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	logger.InfoContext(ctx, "VPC创建流程启动成功", "az", o.az, "vpcName", req.VPCName, "vpcID", vpcID, "workflowID", workflowID)
 
 	return &models.VPCResponse{
+		Code:       models.CodeSuccess,
 		Success:    true,
 		Message:    "VPC创建工作流已启动",
 		VPCID:      vpcID,
@@ -165,6 +169,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 
 	if err := o.subnetDAO.Create(ctx, subnetResource); err != nil {
 		return &models.SubnetResponse{
+			Code:    models.CodeSubnetCreateRecordFail,
 			Success: false,
 			Message: fmt.Sprintf("创建子网资源记录失败: %v", err),
 		}, nil
@@ -173,6 +178,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	params, err := o.buildSubnetTaskParams(req)
 	if err != nil {
 		return &models.SubnetResponse{
+			Code:    models.CodeSubnetSerializeFail,
 			Success: false,
 			Message: fmt.Sprintf("序列化子网任务参数失败: %v", err),
 		}, nil
@@ -189,6 +195,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	})
 	if err != nil {
 		return &models.SubnetResponse{
+			Code:    models.CodeSubnetWorkflowFail,
 			Success: false,
 			Message: fmt.Sprintf("提交工作流失败: %v", err),
 		}, nil
@@ -197,6 +204,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	logger.InfoContext(ctx, "子网创建流程启动成功", "az", o.az, "subnetName", req.SubnetName, "subnetID", subnetID, "workflowID", workflowID)
 
 	return &models.SubnetResponse{
+		Code:       models.CodeSuccess,
 		Success:    true,
 		Message:    "子网创建工作流已启动",
 		SubnetID:   subnetID,
@@ -653,15 +661,15 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 
 	vpc, err := o.vpcDAO.GetByName(ctx, req.VPC1.VPCName, o.az)
 	if err == sql.ErrNoRows {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("VPC不存在: %s", req.VPC1.VPCName)}, nil
+		return &models.PCCNResponse{Code: models.CodePCCNVPCNotFound, Success: false, Message: fmt.Sprintf("VPC不存在: %s", req.VPC1.VPCName)}, nil
 	}
 	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("查询VPC失败: %v", err)}, nil
+		return &models.PCCNResponse{Code: models.CodePCCNVPCNotFound, Success: false, Message: fmt.Sprintf("查询VPC失败: %v", err)}, nil
 	}
 
 	subnets, err := o.subnetDAO.ListByVPCID(ctx, vpc.ID)
 	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("获取子网列表失败: %v", err)}, nil
+		return &models.PCCNResponse{Code: models.CodePCCNCreateRecordFail, Success: false, Message: fmt.Sprintf("获取子网列表失败: %v", err)}, nil
 	}
 
 	var subnetCIDRs []string
@@ -683,12 +691,12 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 	}
 
 	if err := o.pccnDAO.Create(ctx, pccnResource); err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("创建PCCN资源记录失败: %v", err)}, nil
+		return &models.PCCNResponse{Code: models.CodePCCNCreateRecordFail, Success: false, Message: fmt.Sprintf("创建PCCN资源记录失败: %v", err)}, nil
 	}
 
 	params, err := o.buildPCCNTaskParams(pccnID, req, subnetCIDRs)
 	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("序列化PCCN任务参数失败: %v", err)}, nil
+		return &models.PCCNResponse{Code: models.CodePCCNSerializeFail, Success: false, Message: fmt.Sprintf("序列化PCCN任务参数失败: %v", err)}, nil
 	}
 
 	workflowID, err := o.workflowMgr.SubmitWorkflow(ctx, orchestration.WorkflowDef{
@@ -701,7 +709,7 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 		},
 	})
 	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("提交工作流失败: %v", err)}, nil
+		return &models.PCCNResponse{Code: models.CodePCCNWorkflowFail, Success: false, Message: fmt.Sprintf("提交工作流失败: %v", err)}, nil
 	}
 
 	logger.InfoContext(ctx, "PCCN创建流程启动成功",
@@ -712,6 +720,7 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 	)
 
 	return &models.PCCNResponse{
+		Code:    models.CodeSuccess,
 		Success: true,
 		Message: "PCCN创建工作流已启动",
 		PCCNID:  pccnID,

@@ -63,7 +63,7 @@ func TestCreateVPCWithTrace(t *testing.T) {
 				t.Errorf("Expected /api/v1/vpc, got %s", r.URL.Path)
 			}
 
-			resp := models.VPCResponse{Success: true, Message: "VPC created"}
+			resp := models.VPCResponse{Code: models.CodeSuccess, Success: true, Message: "VPC created"}
 			body, _ := json.Marshal(resp)
 			return jsonResponse(http.StatusOK, string(body)), nil
 		}),
@@ -170,7 +170,7 @@ func TestHealthCheckWithTrace(t *testing.T) {
 func TestAZNSPClientUsesInjectedHTTPClient(t *testing.T) {
 	injected := &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			resp := models.VPCResponse{Success: true, Message: "ok"}
+			resp := models.VPCResponse{Code: models.CodeSuccess, Success: true, Message: "ok"}
 			body, _ := json.Marshal(resp)
 			return jsonResponse(http.StatusOK, string(body)), nil
 		}),
@@ -196,7 +196,7 @@ func TestCreateVPCWithSigner(t *testing.T) {
 				t.Error("Expected signed nonce header in request")
 			}
 
-			resp := models.VPCResponse{Success: true, Message: "VPC created"}
+			resp := models.VPCResponse{Code: models.CodeSuccess, Success: true, Message: "VPC created"}
 			body, _ := json.Marshal(resp)
 			return jsonResponse(http.StatusOK, string(body)), nil
 		}),

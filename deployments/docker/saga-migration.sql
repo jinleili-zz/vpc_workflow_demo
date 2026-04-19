@@ -138,8 +138,7 @@ COMMENT ON COLUMN saga_poll_tasks.next_poll_at IS '下次轮询时间';
 COMMENT ON COLUMN saga_poll_tasks.locked_until IS '锁定截止时间（分布式锁）';
 COMMENT ON COLUMN saga_poll_tasks.locked_by IS '锁定者实例 ID';
 
-CREATE INDEX IF NOT EXISTS idx_poll_tasks_next ON saga_poll_tasks(next_poll_at)
-    WHERE locked_until IS NULL OR locked_until < NOW();
+CREATE INDEX IF NOT EXISTS idx_poll_tasks_next ON saga_poll_tasks(next_poll_at);
 
 -- ============================================================================
 -- 多副本并发安全：为 saga_transactions 添加分布式锁字段
