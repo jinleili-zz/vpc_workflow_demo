@@ -106,6 +106,7 @@ func (s *Server) createPolicy(c *gin.Context) {
 	var req models.AZFirewallPolicyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.AZFirewallPolicyResponse{
+			Code:    models.CodeVFWInvalidParam,
 			Success: false,
 			Message: fmt.Sprintf("请求参数错误: %v", err),
 		})
@@ -116,6 +117,7 @@ func (s *Server) createPolicy(c *gin.Context) {
 	resp, err := s.orchestrator.CreatePolicy(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.AZFirewallPolicyResponse{
+			Code:    models.CodeVFWWorkflowFail,
 			Success: false,
 			Message: fmt.Sprintf("创建策略失败: %v", err),
 		})
@@ -148,6 +150,7 @@ func (s *Server) deletePolicy(c *gin.Context) {
 	err := s.orchestrator.DeletePolicy(ctx, policyName)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    models.CodeVFWDeleteFail,
 			"success": false,
 			"message": err.Error(),
 		})
@@ -155,6 +158,7 @@ func (s *Server) deletePolicy(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"code":    models.CodeSuccess,
 		"success": true,
 		"message": "策略已成功删除",
 	})

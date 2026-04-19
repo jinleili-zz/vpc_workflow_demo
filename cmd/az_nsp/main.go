@@ -181,7 +181,8 @@ func main() {
 
 	// 创建 Consumer 消费 reply 队列
 	replyConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
-		Concurrency: 2,
+		Concurrency:      2,
+		TaskCheckInterval: 200 * time.Millisecond,
 		Queues: map[string]int{
 			server.ReplyQueueName(): 10,
 		},

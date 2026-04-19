@@ -129,6 +129,7 @@ func (s *Server) createVPC(c *gin.Context) {
 	var req models.VPCRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.VPCResponse{
+			Code:    models.CodeVPCInvalidParam,
 			Success: false,
 			Message: fmt.Sprintf("请求参数错误: %v", err),
 		})
@@ -139,6 +140,7 @@ func (s *Server) createVPC(c *gin.Context) {
 	resp, err := s.orchestrator.CreateVPC(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.VPCResponse{
+			Code:    models.CodeVPCInternalError,
 			Success: false,
 			Message: fmt.Sprintf("创建VPC失败: %v", err),
 		})
@@ -171,6 +173,7 @@ func (s *Server) deleteVPC(c *gin.Context) {
 	err := s.orchestrator.DeleteVPC(ctx, vpcName)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    models.CodeVPCDeleteFail,
 			"success": false,
 			"message": err.Error(),
 		})
@@ -178,6 +181,7 @@ func (s *Server) deleteVPC(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"code":     models.CodeSuccess,
 		"success":  true,
 		"message":  "VPC已成功删除",
 		"vpc_name": vpcName,
@@ -189,6 +193,7 @@ func (s *Server) createSubnet(c *gin.Context) {
 	var req models.SubnetRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.SubnetResponse{
+			Code:    models.CodeSubnetInvalidParam,
 			Success: false,
 			Message: fmt.Sprintf("请求参数错误: %v", err),
 		})
@@ -199,6 +204,7 @@ func (s *Server) createSubnet(c *gin.Context) {
 	resp, err := s.orchestrator.CreateSubnet(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
+			Code:    models.CodeSubnetWorkflowFail,
 			Success: false,
 			Message: fmt.Sprintf("创建子网失败: %v", err),
 		})
@@ -231,6 +237,7 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 	err := s.orchestrator.DeleteSubnet(ctx, subnetName)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    models.CodeSubnetDeleteFail,
 			"success": false,
 			"message": err.Error(),
 		})
@@ -238,6 +245,7 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"code":    models.CodeSuccess,
 		"success": true,
 		"message": "子网已成功删除",
 	})
@@ -289,6 +297,7 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 	err := s.orchestrator.DeleteVPCByID(ctx, vpcID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    models.CodeVPCDeleteFail,
 			"success": false,
 			"message": err.Error(),
 		})
@@ -296,6 +305,7 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 	}
 
 	resp := gin.H{
+		"code":    models.CodeSuccess,
 		"success": true,
 		"message": "VPC已成功删除",
 		"az":      s.orchestrator.GetAZ(),
@@ -351,6 +361,7 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 	err := s.orchestrator.DeleteSubnetByID(ctx, subnetID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    models.CodeSubnetDeleteFail,
 			"success": false,
 			"message": err.Error(),
 		})
@@ -358,6 +369,7 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"code":    models.CodeSuccess,
 		"success": true,
 		"message": "子网已成功删除",
 	})
@@ -445,6 +457,7 @@ func (s *Server) createPCCN(c *gin.Context) {
 	var req models.PCCNRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    models.CodePCCNInvalidParam,
 			"success": false,
 			"message": fmt.Sprintf("请求参数错误: %v", err),
 		})
@@ -456,6 +469,7 @@ func (s *Server) createPCCN(c *gin.Context) {
 	resp, err := s.orchestrator.CreatePCCN(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    models.CodePCCNWorkflowFail,
 			"success": false,
 			"message": fmt.Sprintf("创建PCCN失败: %v", err),
 		})
@@ -499,6 +513,7 @@ func (s *Server) deletePCCN(c *gin.Context) {
 
 	if pccnName == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    models.CodePCCNInvalidParam,
 			"success": false,
 			"message": "pccn_name参数缺失",
 		})
@@ -507,6 +522,7 @@ func (s *Server) deletePCCN(c *gin.Context) {
 
 	if err := s.orchestrator.DeletePCCN(ctx, pccnName); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    models.CodePCCNDeleteFail,
 			"success": false,
 			"message": err.Error(),
 		})
@@ -514,6 +530,7 @@ func (s *Server) deletePCCN(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"code":    models.CodeSuccess,
 		"success": true,
 		"message": "PCCN删除成功",
 	})

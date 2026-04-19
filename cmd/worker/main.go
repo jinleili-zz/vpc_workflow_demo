@@ -89,10 +89,11 @@ func main() {
 
 	// 创建 Consumer
 	consumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
-		Concurrency:    workerCount,
-		Queues:         queuesConfig,
-		StrictPriority: true,
-		Logger:         logging.GetAsynqAdapter().GetAsynqLogger(),
+		Concurrency:       workerCount,
+		Queues:            queuesConfig,
+		StrictPriority:    true,
+		TaskCheckInterval: 200 * time.Millisecond,
+		Logger:            logging.GetAsynqAdapter().GetAsynqLogger(),
 	})
 
 	// 注册 task handler

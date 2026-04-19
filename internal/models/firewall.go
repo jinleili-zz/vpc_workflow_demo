@@ -38,6 +38,7 @@ type AZFirewallPolicyRequest struct {
 }
 
 type AZFirewallPolicyResponse struct {
+	Code       string `json:"code"`
 	Success    bool   `json:"success"`
 	Message    string `json:"message"`
 	PolicyID   string `json:"policy_id,omitempty"`
