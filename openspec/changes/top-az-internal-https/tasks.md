@@ -34,8 +34,8 @@
 ## 6. AK/SK 到 mTLS 迁移
 
 - [x] 6.1 阶段二上线时：Top VPC 侧 mTLS client 保留 AK/SK 签名（`AZNSPClient` 继续签名、SAGA 步骤保留 `AuthAK`），AZ VPC 侧同时启用 mTLS 监听和 `AKSKAuthMiddleware`，确保 mTLS + AK/SK 共存
-- [ ] 6.2 阶段三清理时：修改 `internal/az/api/server.go`，当 `tls.enabled = true` 且 `tls.client_auth = true` 时跳过 `AKSKAuthMiddleware`（mTLS 已提供身份认证），或通过 `auth.enable_auth = false` 显式关闭
-- [ ] 6.3 阶段三清理时：Top VPC 侧移除 `AZNSPClient` 中的 AK/SK 签名逻辑，SAGA 步骤移除 `AuthAK` 字段
+- [x] 6.2 阶段三清理时：修改 `internal/az/api/server.go`，当 `tls.enabled = true` 且 `tls.client_auth = true` 时跳过 `AKSKAuthMiddleware`（mTLS 已提供身份认证），或通过 `auth.enable_auth = false` 显式关闭
+- [x] 6.3 阶段三清理时：Top VPC 侧移除 `AZNSPClient` 中的 AK/SK 签名逻辑，SAGA 步骤移除 `AuthAK` 字段
 
 ## 7. 测试
 
@@ -43,7 +43,7 @@
 - [x] 7.2 为 Top 侧 CA/证书热更新机制编写单元测试（模拟文件变更后验证 `reloadableTransport` 内部 Transport 更新）
 - [x] 7.3 为 AZ VPC mTLS 监听编写单元测试（验证 ClientAuth 配置、GetCertificate 动态加载、ClientCAs 热更新、客户端证书验证通过/拒绝）
 - [x] 7.4 为 AZ 侧 ClientCAs 热更新编写单元测试（模拟 CA 文件变更后验证 VerifyPeerCertificate 使用新 CA 池）
-- [ ] 7.5 更新 E2E 测试脚本（`deployments/docker/test-e2e.sh`），增加 mTLS 模式下的 VPC/Subnet/PCCN 端到端验证（包含证书生成和挂载流程）
+- [x] 7.5 更新 E2E 测试脚本（`deployments/docker/test-e2e.sh`），增加 mTLS 模式下的 VPC/Subnet/PCCN 端到端验证（包含证书生成和挂载流程）
 - [x] 7.6 验证 mTLS + AK/SK 共存阶段行为正确（阶段二回归测试）
 - [x] 7.7 验证 VFW 路径在 VPC mTLS 启用后行为完全不变（AK/SK + HTTP 回归测试）
 - [x] 7.8 验证 `tls.enabled = false` 时 VPC 服务行为完全不变（回归测试）

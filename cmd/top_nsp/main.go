@@ -153,8 +153,18 @@ func main() {
 	// Initialize registry
 	reg := registry.NewRegistry(redisClient)
 
+	// Determine if mTLS client auth is active
+	// mTLS is active when TLS is enabled in process mode with client auth
+	useMTLS := cfg.TLS.Enabled && cfg.TLS.Mode == "process" && cfg.TLS.ClientAuth
+
 	// Initialize orchestrator with SAGA engine
-	orch := orchestrator.NewOrchestrator(ctx, reg, topDB, components.SagaEngine, components.TracedHTTP, components.Signer)
+	// When useMTLS is true, signer is nil (mTLS provides auth)
+	// When useMTLS is false, signer is passed for AK/SK auth
+	var orchestratorSigner *auth.Signer
+	if !useMTLS {
+		orchestratorSigner = components.Signer
+	}
+	orch := orchestrator.NewOrchestrator(ctx, reg, topDB, components.SagaEngine, components.TracedHTTP, orchestratorSigner, useMTLS)
 
 	// Initialize API server
 	server := api.NewServer(reg, orch, components.TracedHTTP, components.Signer)

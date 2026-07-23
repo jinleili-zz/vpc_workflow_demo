@@ -22,6 +22,7 @@ type AZNSPClient struct {
 }
 
 // NewAZNSPClient 创建AZ NSP客户端
+// signer: 当mTLS未启用时用于AK/SK签名，mTLS启用时传nil
 func NewAZNSPClient(httpClient *http.Client, signer *auth.Signer) *AZNSPClient {
 	if httpClient == nil {
 		httpClient = &http.Client{
@@ -35,6 +36,7 @@ func NewAZNSPClient(httpClient *http.Client, signer *auth.Signer) *AZNSPClient {
 }
 
 // NewAZNSPClientWithTrace 创建带链路追踪的AZ NSP客户端
+// signer: 当mTLS未启用时用于AK/SK签名，mTLS启用时传nil
 func NewAZNSPClientWithTrace(tracedClient *trace.TracedClient, httpClient *http.Client, signer *auth.Signer) *AZNSPClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -303,6 +305,7 @@ func (c *AZNSPClient) DeletePCCN(ctx context.Context, azAddr string, pccnName st
 }
 
 func (c *AZNSPClient) do(req *http.Request) (*http.Response, error) {
+	// Only sign when AK/SK auth is needed (mTLS not active)
 	if c.signer != nil {
 		if err := c.signer.Sign(req); err != nil {
 			return nil, fmt.Errorf("签名请求失败: %w", err)

@@ -167,6 +167,21 @@ func TestHealthCheckWithTrace(t *testing.T) {
 	}
 }
 
+func TestAZNSPClientUsesInjectedHTTPClient(t *testing.T) {
+	injected := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			resp := models.VPCResponse{Success: true, Message: "ok"}
+			body, _ := json.Marshal(resp)
+			return jsonResponse(http.StatusOK, string(body)), nil
+		}),
+	}
+
+	client := NewAZNSPClient(injected, nil)
+	if client.httpClient != injected {
+		t.Fatalf("httpClient was not preserved")
+	}
+}
+
 func TestCreateVPCWithSigner(t *testing.T) {
 	client := NewAZNSPClient(nil, auth.NewSigner("top-nsp", "test-secret-key-12345"))
 	client.httpClient = &http.Client{
@@ -194,20 +209,5 @@ func TestCreateVPCWithSigner(t *testing.T) {
 	}
 	if !resp.Success {
 		t.Errorf("Expected success, got: %s", resp.Message)
-	}
-}
-
-func TestAZNSPClientUsesInjectedHTTPClient(t *testing.T) {
-	injected := &http.Client{
-		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			resp := models.VPCResponse{Success: true, Message: "ok"}
-			body, _ := json.Marshal(resp)
-			return jsonResponse(http.StatusOK, string(body)), nil
-		}),
-	}
-
-	client := NewAZNSPClient(injected, nil)
-	if client.httpClient != injected {
-		t.Fatalf("httpClient was not preserved")
 	}
 }
