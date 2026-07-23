@@ -31,30 +31,30 @@ const (
 )
 
 type Operation struct {
-	OperationID        string
-	RootOperationID    string
-	ParentOperationID  string
-	OwnerService       string
-	CallerScope        string
-	RouteScope         string
-	OperationType      string
-	TargetScope        string
-	IdempotencyKey     string
-	RequestHashVersion int16
-	RequestHash        string
-	RequestPayload     json.RawMessage
-	ResourceType       string
-	ResourceID         string
-	Generation         int64
-	Status             Status
-	ResponseCode       string
-	ResponsePayload    json.RawMessage
-	ErrorCode          string
-	ErrorMessage       string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	CompletedAt        *time.Time
-	Version            int64
+	OperationID        string          `json:"operation_id"`
+	RootOperationID    string          `json:"root_operation_id"`
+	ParentOperationID  string          `json:"parent_operation_id,omitempty"`
+	OwnerService       string          `json:"owner_service"`
+	CallerScope        string          `json:"-"`
+	RouteScope         string          `json:"route_scope"`
+	OperationType      string          `json:"operation_type"`
+	TargetScope        string          `json:"target_scope"`
+	IdempotencyKey     string          `json:"-"`
+	RequestHashVersion int16           `json:"-"`
+	RequestHash        string          `json:"-"`
+	RequestPayload     json.RawMessage `json:"-"`
+	ResourceType       string          `json:"resource_type"`
+	ResourceID         string          `json:"resource_id,omitempty"`
+	Generation         int64           `json:"generation"`
+	Status             Status          `json:"status"`
+	ResponseCode       string          `json:"response_code,omitempty"`
+	ResponsePayload    json.RawMessage `json:"response,omitempty"`
+	ErrorCode          string          `json:"error_code,omitempty"`
+	ErrorMessage       string          `json:"error_message,omitempty"`
+	CreatedAt          time.Time       `json:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
+	CompletedAt        *time.Time      `json:"completed_at,omitempty"`
+	Version            int64           `json:"version"`
 }
 
 type BeginCommand struct {

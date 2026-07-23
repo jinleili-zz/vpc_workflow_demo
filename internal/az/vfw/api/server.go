@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -99,9 +100,23 @@ func (s *Server) setupRoutes() {
 		api.GET("/firewall/policy/id/:policy_id", s.getPolicyByID)
 
 		api.GET("/firewall/zone/:zone/policy-count", s.countPoliciesByZone)
+		api.GET("/operations/:operation_id", s.getOperation)
 
 		api.GET("/health", s.health)
 	}
+}
+
+func (s *Server) getOperation(c *gin.Context) {
+	op, err := s.orchestrator.GetOperation(c.Request.Context(), c.Param("operation_id"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"code": "OPERATION_NOT_FOUND", "message": "operation not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, op)
 }
 
 func (s *Server) createPolicy(c *gin.Context) {
@@ -117,10 +132,19 @@ func (s *Server) createPolicy(c *gin.Context) {
 	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreatePolicy(ctx, &req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.AZFirewallPolicyResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建策略失败: %v", err),
-		})
+		status := http.StatusInternalServerError
+		code := "INTERNAL_ERROR"
+		if errors.Is(err, operation.ErrInvalidIdempotencyKey) {
+			status = http.StatusBadRequest
+			code = operation.ErrInvalidIdempotencyKey.Error()
+		} else if errors.Is(err, operation.ErrInvalidResourceGeneration) {
+			status = http.StatusBadRequest
+			code = operation.ErrInvalidResourceGeneration.Error()
+		} else if errors.Is(err, operation.ErrIdempotencyKeyReused) {
+			status = http.StatusConflict
+			code = operation.ErrIdempotencyKeyReused.Error()
+		}
+		c.JSON(status, models.AZFirewallPolicyResponse{Code: code, Success: false, Message: fmt.Sprintf("创建策略失败: %v", err)})
 		return
 	}
 
@@ -321,4 +345,8 @@ func (s *Server) StartHeartbeat(ctx context.Context) {
 // inconsistencies between workflow state and policy state.
 func (s *Server) StartCompensationTask(ctx context.Context, interval time.Duration) {
 	s.orchestrator.StartCompensationTask(ctx, interval)
+}
+
+func (s *Server) StartOutboxDispatcher(ctx context.Context, interval time.Duration) {
+	s.orchestrator.StartOutboxDispatcher(ctx, interval)
 }

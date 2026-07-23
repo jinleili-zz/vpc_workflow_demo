@@ -158,6 +158,19 @@ func TestPublishTaskMapsDatabaseMaxRetriesToBroker(t *testing.T) {
 	}
 }
 
+func TestHandleReplyRejectsUnknownExplicitProtocolVersion(t *testing.T) {
+	manager := NewManager(&captureBroker{}, publishTaskStore{}, func(string, int) string { return "tasks:test" }, "replies:test")
+	err := manager.HandleReply(context.Background(), &taskqueue.Task{
+		Payload: []byte(`{}`),
+		Metadata: map[string]string{
+			MetadataKeyProtocolVersion: "99",
+		},
+	})
+	if err == nil {
+		t.Fatal("unknown explicit protocol version downgraded to v1")
+	}
+}
+
 func TestConcurrentDuplicateIntermediateRepliesPublishNextStepOnce(t *testing.T) {
 	const duplicates = 20
 	taskStore := newConcurrentReplyTaskStore(duplicates)

@@ -18,6 +18,7 @@ SAGA_FILE="/migrations/saga.sql"
 MIGRATION_FILE="/migrations/001_init_postgresql.sql"
 PCCN_FILE="/migrations/004_create_pccn_tables.sql"
 OPERATION_FILE="/migrations/005_create_operations.sql"
+OUTBOX_INBOX_FILE="/migrations/006_create_outbox_inbox.sql"
 
 for DB in top_nsp_vpc top_nsp_vfw nsp_cn_beijing_1a_vpc nsp_cn_beijing_1a_vfw nsp_cn_beijing_1b_vpc nsp_cn_beijing_1b_vfw nsp_cn_shanghai_1a_vpc nsp_cn_shanghai_1a_vfw; do
     echo "Running migrations on database: $DB"
@@ -32,6 +33,9 @@ for DB in top_nsp_vpc top_nsp_vfw nsp_cn_beijing_1a_vpc nsp_cn_beijing_1a_vfw ns
     fi
     if [ -f "$OPERATION_FILE" ]; then
         psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$DB" -f "$OPERATION_FILE"
+    fi
+    if [ -f "$OUTBOX_INBOX_FILE" ]; then
+        psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$DB" -f "$OUTBOX_INBOX_FILE"
     fi
 done
 

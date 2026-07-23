@@ -27,6 +27,21 @@ func NewRepository(db *sql.DB) *Repository {
 }
 
 func (r *Repository) Begin(ctx context.Context, cmd BeginCommand) (*Operation, Decision, error) {
+	return r.begin(ctx, r.db, cmd)
+}
+
+func (r *Repository) BeginTx(ctx context.Context, tx *sql.Tx, cmd BeginCommand) (*Operation, Decision, error) {
+	if tx == nil {
+		return nil, "", fmt.Errorf("operation transaction is required")
+	}
+	return r.begin(ctx, tx, cmd)
+}
+
+type operationQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (r *Repository) begin(ctx context.Context, queryer operationQueryer, cmd BeginCommand) (*Operation, Decision, error) {
 	if err := validateBeginCommand(cmd); err != nil {
 		return nil, "", err
 	}
@@ -59,7 +74,7 @@ func (r *Repository) Begin(ctx context.Context, cmd BeginCommand) (*Operation, D
 		DO NOTHING
 		RETURNING ` + operationColumns
 
-	op, err := scanOperation(r.db.QueryRowContext(ctx, query,
+	op, err := scanOperation(queryer.QueryRowContext(ctx, query,
 		operationID, rootOperationID, nullString(cmd.ParentOperationID),
 		cmd.OwnerService, cmd.CallerScope, cmd.RouteScope, cmd.OperationType, cmd.TargetScope,
 		cmd.IdempotencyKey, cmd.RequestHashVersion, cmd.RequestHash, cmd.RequestPayload,
@@ -72,7 +87,7 @@ func (r *Repository) Begin(ctx context.Context, cmd BeginCommand) (*Operation, D
 		return nil, "", fmt.Errorf("insert operation: %w", err)
 	}
 
-	op, err = r.getByIdempotency(ctx, cmd.OwnerService, cmd.CallerScope, cmd.RouteScope, cmd.IdempotencyKey)
+	op, err = getByIdempotency(ctx, queryer, cmd.OwnerService, cmd.CallerScope, cmd.RouteScope, cmd.IdempotencyKey)
 	if err != nil {
 		return nil, "", fmt.Errorf("load existing operation: %w", err)
 	}
@@ -147,10 +162,14 @@ func (r *Repository) StoreResponseCAS(ctx context.Context, operationID string, e
 }
 
 func (r *Repository) getByIdempotency(ctx context.Context, owner, caller, route, key string) (*Operation, error) {
+	return getByIdempotency(ctx, r.db, owner, caller, route, key)
+}
+
+func getByIdempotency(ctx context.Context, queryer operationQueryer, owner, caller, route, key string) (*Operation, error) {
 	query := `SELECT ` + operationColumns + `
 		FROM orchestration_operations
 		WHERE owner_service = $1 AND caller_scope = $2 AND route_scope = $3 AND idempotency_key = $4`
-	return scanOperation(r.db.QueryRowContext(ctx, query, owner, caller, route, key))
+	return scanOperation(queryer.QueryRowContext(ctx, query, owner, caller, route, key))
 }
 
 type rowScanner interface {
@@ -217,6 +236,8 @@ func validateBeginCommand(cmd BeginCommand) error {
 		return fmt.Errorf("request payload is required")
 	case cmd.ResourceType == "":
 		return fmt.Errorf("resource type is required")
+	case cmd.Generation < 0:
+		return fmt.Errorf("generation must be positive")
 	}
 	return nil
 }

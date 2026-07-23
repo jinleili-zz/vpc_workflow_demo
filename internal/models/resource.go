@@ -14,36 +14,42 @@ const (
 )
 
 type VPCResource struct {
-	ID           string         `json:"id"`
-	VPCName      string         `json:"vpc_name"`
-	Region       string         `json:"region"`
-	AZ           string         `json:"az"`
-	VRFName      string         `json:"vrf_name"`
-	VLANId       int            `json:"vlan_id"`
-	FirewallZone string         `json:"firewall_zone"`
-	Status       ResourceStatus `json:"status"`
-	ErrorMessage string         `json:"error_message,omitempty"`
-	TotalTasks   int            `json:"total_tasks"`
-	CompletedTasks int          `json:"completed_tasks"`
-	FailedTasks  int            `json:"failed_tasks"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
+	ID                 string         `json:"id"`
+	VPCName            string         `json:"vpc_name"`
+	Region             string         `json:"region"`
+	AZ                 string         `json:"az"`
+	VRFName            string         `json:"vrf_name"`
+	VLANId             int            `json:"vlan_id"`
+	FirewallZone       string         `json:"firewall_zone"`
+	Status             ResourceStatus `json:"status"`
+	ErrorMessage       string         `json:"error_message,omitempty"`
+	TotalTasks         int            `json:"total_tasks"`
+	CompletedTasks     int            `json:"completed_tasks"`
+	FailedTasks        int            `json:"failed_tasks"`
+	Generation         int64          `json:"generation"`
+	CurrentOperationID string         `json:"current_operation_id,omitempty"`
+	Version            int64          `json:"version"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
 }
 
 type SubnetResource struct {
-	ID             string         `json:"id"`
-	SubnetName     string         `json:"subnet_name"`
-	VPCName        string         `json:"vpc_name"`
-	Region         string         `json:"region"`
-	AZ             string         `json:"az"`
-	CIDR           string         `json:"cidr"`
-	Status         ResourceStatus `json:"status"`
-	ErrorMessage   string         `json:"error_message,omitempty"`
-	TotalTasks     int            `json:"total_tasks"`
-	CompletedTasks int            `json:"completed_tasks"`
-	FailedTasks    int            `json:"failed_tasks"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID                 string         `json:"id"`
+	SubnetName         string         `json:"subnet_name"`
+	VPCName            string         `json:"vpc_name"`
+	Region             string         `json:"region"`
+	AZ                 string         `json:"az"`
+	CIDR               string         `json:"cidr"`
+	Status             ResourceStatus `json:"status"`
+	ErrorMessage       string         `json:"error_message,omitempty"`
+	TotalTasks         int            `json:"total_tasks"`
+	CompletedTasks     int            `json:"completed_tasks"`
+	FailedTasks        int            `json:"failed_tasks"`
+	Generation         int64          `json:"generation"`
+	CurrentOperationID string         `json:"current_operation_id,omitempty"`
+	Version            int64          `json:"version"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
 }
 
 type TaskStatus string
@@ -66,27 +72,39 @@ const (
 )
 
 type Task struct {
-	ID           string       `json:"id"`
-	ResourceType ResourceType `json:"resource_type"`
-	ResourceID   string       `json:"resource_id"`
-	TaskType     string       `json:"task_type"`
-	TaskName     string       `json:"task_name"`
-	TaskOrder    int          `json:"task_order"`
-	TaskParams   string       `json:"task_params"`
-	Status       TaskStatus   `json:"status"`
-	Priority     int          `json:"priority"`
-	DeviceType   string       `json:"device_type"`
-	AsynqTaskID  string       `json:"asynq_task_id,omitempty"`
-	Result       string       `json:"result,omitempty"`
-	ErrorMessage string       `json:"error_message,omitempty"`
-	RetryCount   int          `json:"retry_count"`
-	MaxRetries   int          `json:"max_retries"`
-	AZ           string       `json:"az"`
-	CreatedAt    time.Time    `json:"created_at"`
-	QueuedAt     *time.Time   `json:"queued_at,omitempty"`
-	StartedAt    *time.Time   `json:"started_at,omitempty"`
-	CompletedAt  *time.Time   `json:"completed_at,omitempty"`
-	UpdatedAt    time.Time    `json:"updated_at"`
+	ID                string       `json:"id"`
+	OperationID       string       `json:"operation_id"`
+	RootOperationID   string       `json:"root_operation_id"`
+	WorkflowID        string       `json:"workflow_id"`
+	Generation        int64        `json:"generation"`
+	StepName          string       `json:"step_name"`
+	Attempt           int          `json:"attempt"`
+	Version           int64        `json:"version"`
+	LastEventID       string       `json:"last_event_id,omitempty"`
+	ProtocolVersion   int16        `json:"protocol_version"`
+	OperationRequired bool         `json:"operation_required"`
+	Destination       string       `json:"destination,omitempty"`
+	ReplyQueue        string       `json:"reply_queue,omitempty"`
+	ResourceType      ResourceType `json:"resource_type"`
+	ResourceID        string       `json:"resource_id"`
+	TaskType          string       `json:"task_type"`
+	TaskName          string       `json:"task_name"`
+	TaskOrder         int          `json:"task_order"`
+	TaskParams        string       `json:"task_params"`
+	Status            TaskStatus   `json:"status"`
+	Priority          int          `json:"priority"`
+	DeviceType        string       `json:"device_type"`
+	AsynqTaskID       string       `json:"asynq_task_id,omitempty"`
+	Result            string       `json:"result,omitempty"`
+	ErrorMessage      string       `json:"error_message,omitempty"`
+	RetryCount        int          `json:"retry_count"`
+	MaxRetries        int          `json:"max_retries"`
+	AZ                string       `json:"az"`
+	CreatedAt         time.Time    `json:"created_at"`
+	QueuedAt          *time.Time   `json:"queued_at,omitempty"`
+	StartedAt         *time.Time   `json:"started_at,omitempty"`
+	CompletedAt       *time.Time   `json:"completed_at,omitempty"`
+	UpdatedAt         time.Time    `json:"updated_at"`
 }
 
 type ResourceProgress struct {
@@ -126,21 +144,24 @@ type SubnetStatusResponse struct {
 
 // PCCNResource PCCN资源表 (AZ层) - 每个AZ一条记录
 type PCCNResource struct {
-	ID             string         `json:"id"`
-	PCCNName       string         `json:"pccn_name"`
-	VPCName        string         `json:"vpc_name"`
-	VPCRegion      string         `json:"vpc_region"`
-	PeerVPCName    string         `json:"peer_vpc_name"`
-	PeerVPCRegion  string         `json:"peer_vpc_region"`
-	AZ             string         `json:"az"`
-	Status         ResourceStatus `json:"status"`
-	Subnets        []string       `json:"subnets,omitempty"`
-	ErrorMessage   string         `json:"error_message,omitempty"`
-	TotalTasks     int            `json:"total_tasks"`
-	CompletedTasks int            `json:"completed_tasks"`
-	FailedTasks    int            `json:"failed_tasks"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID                 string         `json:"id"`
+	PCCNName           string         `json:"pccn_name"`
+	VPCName            string         `json:"vpc_name"`
+	VPCRegion          string         `json:"vpc_region"`
+	PeerVPCName        string         `json:"peer_vpc_name"`
+	PeerVPCRegion      string         `json:"peer_vpc_region"`
+	AZ                 string         `json:"az"`
+	Status             ResourceStatus `json:"status"`
+	Subnets            []string       `json:"subnets,omitempty"`
+	ErrorMessage       string         `json:"error_message,omitempty"`
+	TotalTasks         int            `json:"total_tasks"`
+	CompletedTasks     int            `json:"completed_tasks"`
+	FailedTasks        int            `json:"failed_tasks"`
+	Generation         int64          `json:"generation"`
+	CurrentOperationID string         `json:"current_operation_id,omitempty"`
+	Version            int64          `json:"version"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
 }
 
 // PCCNStatusResponse PCCN状态查询响应
@@ -163,25 +184,24 @@ type PCCNStatusResponse struct {
 
 // PCCNRegistry PCCN注册表 (Top层) - 一个PCCN一条记录，per-VPC详情存于VPCDetails JSONB
 type PCCNRegistry struct {
-	ID          string                  `json:"id"`
-	PCCNName    string                  `json:"pccn_name"`
-	VPC1Name    string                  `json:"vpc1_name"`
-	VPC1Region  string                  `json:"vpc1_region"`
-	VPC2Name    string                  `json:"vpc2_name"`
-	VPC2Region  string                  `json:"vpc2_region"`
-	Status      string                  `json:"status"`
-	TxID        string                  `json:"tx_id,omitempty"`
-	VPCDetails  map[string]VPCDetail    `json:"vpc_details"`
-	CreatedAt   time.Time               `json:"created_at"`
-	UpdatedAt   time.Time               `json:"updated_at"`
+	ID         string               `json:"id"`
+	PCCNName   string               `json:"pccn_name"`
+	VPC1Name   string               `json:"vpc1_name"`
+	VPC1Region string               `json:"vpc1_region"`
+	VPC2Name   string               `json:"vpc2_name"`
+	VPC2Region string               `json:"vpc2_region"`
+	Status     string               `json:"status"`
+	TxID       string               `json:"tx_id,omitempty"`
+	VPCDetails map[string]VPCDetail `json:"vpc_details"`
+	CreatedAt  time.Time            `json:"created_at"`
+	UpdatedAt  time.Time            `json:"updated_at"`
 }
 
 // VPCDetail VPC在PCCN中的详情
 type VPCDetail struct {
-	Region   string   `json:"region"`
-	AZs      []string `json:"azs,omitempty"`
-	Status   string   `json:"status"`
-	Subnets  []string `json:"subnets,omitempty"`
-	Error    string   `json:"error,omitempty"`
+	Region  string   `json:"region"`
+	AZs     []string `json:"azs,omitempty"`
+	Status  string   `json:"status"`
+	Subnets []string `json:"subnets,omitempty"`
+	Error   string   `json:"error,omitempty"`
 }
-

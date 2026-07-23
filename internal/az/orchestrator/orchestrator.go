@@ -17,6 +17,7 @@ import (
 
 	"workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 	"workflow_qoder/internal/orchestration"
 	"workflow_qoder/internal/queue"
 )
@@ -24,21 +25,24 @@ import (
 const staleWorkflowTimeout = 5 * time.Minute
 
 type AZOrchestrator struct {
-	vpcDAO      *dao.VPCDAO
-	subnetDAO   *dao.SubnetDAO
-	pccnDAO     *dao.PCCNDAO
-	taskDAO     *dao.TaskDAO
-	workflowMgr *orchestration.Manager
-	broker      taskqueue.Broker
-	inspector   taskqueue.Inspector
-	tracedHTTP  *trace.TracedClient
-	region      string
-	az          string
+	vpcDAO       *dao.VPCDAO
+	subnetDAO    *dao.SubnetDAO
+	pccnDAO      *dao.PCCNDAO
+	taskDAO      *dao.TaskDAO
+	workflowMgr  *orchestration.Manager
+	broker       taskqueue.Broker
+	inspector    taskqueue.Inspector
+	tracedHTTP   *trace.TracedClient
+	region       string
+	az           string
+	operationSvc *operation.Service
 }
 
 func NewAZOrchestrator(db *sql.DB, broker taskqueue.Broker, inspector taskqueue.Inspector, tracedHTTP *trace.TracedClient, region, az string) *AZOrchestrator {
 	taskDAO := dao.NewTaskDAO(db)
-	workflowMgr := orchestration.NewManager(
+	workflowMgr := orchestration.NewDurableManager(
+		db,
+		fmt.Sprintf("az-nsp-vpc-%s", az),
 		broker,
 		taskDAO,
 		func(deviceType string, priority int) string {
@@ -51,16 +55,17 @@ func NewAZOrchestrator(db *sql.DB, broker taskqueue.Broker, inspector taskqueue.
 	workflowMgr.RegisterResourceStore(models.ResourceTypePCCN, dao.NewPCCNDAO(db))
 
 	return &AZOrchestrator{
-		vpcDAO:      dao.NewVPCDAO(db),
-		subnetDAO:   dao.NewSubnetDAO(db),
-		pccnDAO:     dao.NewPCCNDAO(db),
-		taskDAO:     taskDAO,
-		workflowMgr: workflowMgr,
-		broker:      broker,
-		inspector:   inspector,
-		tracedHTTP:  tracedHTTP,
-		region:      region,
-		az:          az,
+		vpcDAO:       dao.NewVPCDAO(db),
+		subnetDAO:    dao.NewSubnetDAO(db),
+		pccnDAO:      dao.NewPCCNDAO(db),
+		taskDAO:      taskDAO,
+		workflowMgr:  workflowMgr,
+		broker:       broker,
+		inspector:    inspector,
+		tracedHTTP:   tracedHTTP,
+		region:       region,
+		az:           az,
+		operationSvc: operation.NewService(operation.NewRepository(db)),
 	}
 }
 
@@ -70,6 +75,14 @@ func (o *AZOrchestrator) HandleReplyTask(ctx context.Context, task *taskqueue.Ta
 
 func (o *AZOrchestrator) ReplyQueueName() string {
 	return o.workflowMgr.ReplyQueueName()
+}
+
+func (o *AZOrchestrator) StartOutboxDispatcher(ctx context.Context, interval time.Duration) {
+	o.workflowMgr.StartOutboxDispatcher(ctx, interval)
+}
+
+func (o *AZOrchestrator) GetOperation(ctx context.Context, operationID string) (*operation.Operation, error) {
+	return o.operationSvc.Get(ctx, operationID)
 }
 
 func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) (*models.VPCResponse, error) {
@@ -94,13 +107,6 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 		FailedTasks:    0,
 	}
 
-	if err := o.vpcDAO.Create(ctx, vpcResource); err != nil {
-		return &models.VPCResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建VPC资源记录失败: %v", err),
-		}, nil
-	}
-
 	params, err := o.buildVPCTaskParams(req)
 	if err != nil {
 		return &models.VPCResponse{
@@ -109,32 +115,50 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 		}, nil
 	}
 
-	workflowID, err := o.workflowMgr.SubmitWorkflow(ctx, orchestration.WorkflowDef{
-		ResourceType: models.ResourceTypeVPC,
-		ResourceID:   vpcID,
-		AZ:           o.az,
-		Steps: []orchestration.WorkflowStep{
-			{TaskType: "create_vrf_on_switch", TaskName: "创建VRF", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
-			{TaskType: "create_vlan_subinterface", TaskName: "创建VLAN子接口", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
-			{TaskType: "create_firewall_zone", TaskName: "创建防火墙安全区域", DeviceType: string(queue.DeviceTypeFirewall), Priority: int(taskqueue.PriorityNormal), Payload: params},
-		},
+	workflowID, persistedVPCID, err := o.workflowMgr.SubmitPreparedWorkflow(ctx, func(ctx context.Context, tx *sql.Tx) (orchestration.WorkflowDef, error) {
+		op, decision, err := o.beginCreateOperationTx(ctx, tx, "POST /api/v1/vpc", "create_vpc", fmt.Sprintf("%s/%s/%s", req.Region, o.az, req.VPCName), req, "vpc", vpcID)
+		if err != nil {
+			return orchestration.WorkflowDef{}, err
+		}
+		vpcID = op.ResourceID
+		vpcResource.ID = vpcID
+		if decision == operation.DecisionNew {
+			if err := o.vpcDAO.CreateTx(ctx, tx, vpcResource); err != nil {
+				return orchestration.WorkflowDef{}, err
+			}
+		}
+		return orchestration.WorkflowDef{
+			OperationID:       op.OperationID,
+			RootOperationID:   op.RootOperationID,
+			WorkflowID:        op.OperationID,
+			Generation:        op.Generation,
+			OperationRequired: true,
+			ReplayExisting:    decision == operation.DecisionReplay,
+			ResourceType:      models.ResourceTypeVPC,
+			ResourceID:        vpcID,
+			AZ:                o.az,
+			Steps: []orchestration.WorkflowStep{
+				{TaskType: "create_vrf_on_switch", TaskName: "创建VRF", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
+				{TaskType: "create_vlan_subinterface", TaskName: "创建VLAN子接口", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
+				{TaskType: "create_firewall_zone", TaskName: "创建防火墙安全区域", DeviceType: string(queue.DeviceTypeFirewall), Priority: int(taskqueue.PriorityNormal), Payload: params},
+			},
+		}, nil
 	})
 	if err != nil {
-		return &models.VPCResponse{
-			Success: false,
-			Message: fmt.Sprintf("提交工作流失败: %v", err),
-		}, nil
+		return nil, fmt.Errorf("提交VPC工作流: %w", err)
 	}
+	vpcID = persistedVPCID
 
 	logger.InfoContext(ctx, "VPC创建流程启动成功", "az", o.az, "vpcName", req.VPCName, "vpcID", vpcID, "workflowID", workflowID)
 
 	return &models.VPCResponse{
-		Success:    true,
-		Message:    "VPC创建工作流已启动",
-		ResourceID: vpcID,
-		Status:     "accepted",
-		VPCID:      vpcID,
-		WorkflowID: workflowID,
+		Success:     true,
+		Message:     "VPC创建工作流已启动",
+		ResourceID:  vpcID,
+		Status:      "accepted",
+		VPCID:       vpcID,
+		WorkflowID:  workflowID,
+		OperationID: workflowID,
 	}, nil
 }
 
@@ -165,13 +189,6 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 		FailedTasks:    0,
 	}
 
-	if err := o.subnetDAO.Create(ctx, subnetResource); err != nil {
-		return &models.SubnetResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建子网资源记录失败: %v", err),
-		}, nil
-	}
-
 	params, err := o.buildSubnetTaskParams(req)
 	if err != nil {
 		return &models.SubnetResponse{
@@ -180,32 +197,86 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 		}, nil
 	}
 
-	workflowID, err := o.workflowMgr.SubmitWorkflow(ctx, orchestration.WorkflowDef{
-		ResourceType: models.ResourceTypeSubnet,
-		ResourceID:   subnetID,
-		AZ:           o.az,
-		Steps: []orchestration.WorkflowStep{
-			{TaskType: "create_subnet_on_switch", TaskName: "创建子网", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
-			{TaskType: "configure_subnet_routing", TaskName: "配置子网路由", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
-		},
+	workflowID, persistedSubnetID, err := o.workflowMgr.SubmitPreparedWorkflow(ctx, func(ctx context.Context, tx *sql.Tx) (orchestration.WorkflowDef, error) {
+		op, decision, err := o.beginCreateOperationTx(ctx, tx, "POST /api/v1/subnet", "create_subnet", fmt.Sprintf("%s/%s/%s", req.Region, o.az, req.SubnetName), req, "subnet", subnetID)
+		if err != nil {
+			return orchestration.WorkflowDef{}, err
+		}
+		subnetID = op.ResourceID
+		subnetResource.ID = subnetID
+		if decision == operation.DecisionNew {
+			if err := o.subnetDAO.CreateTx(ctx, tx, subnetResource); err != nil {
+				return orchestration.WorkflowDef{}, err
+			}
+		}
+		return orchestration.WorkflowDef{
+			OperationID:       op.OperationID,
+			RootOperationID:   op.RootOperationID,
+			WorkflowID:        op.OperationID,
+			Generation:        op.Generation,
+			OperationRequired: true,
+			ReplayExisting:    decision == operation.DecisionReplay,
+			ResourceType:      models.ResourceTypeSubnet,
+			ResourceID:        subnetID,
+			AZ:                o.az,
+			Steps: []orchestration.WorkflowStep{
+				{TaskType: "create_subnet_on_switch", TaskName: "创建子网", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
+				{TaskType: "configure_subnet_routing", TaskName: "配置子网路由", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
+			},
+		}, nil
 	})
 	if err != nil {
-		return &models.SubnetResponse{
-			Success: false,
-			Message: fmt.Sprintf("提交工作流失败: %v", err),
-		}, nil
+		return nil, fmt.Errorf("提交子网工作流: %w", err)
 	}
+	subnetID = persistedSubnetID
 
 	logger.InfoContext(ctx, "子网创建流程启动成功", "az", o.az, "subnetName", req.SubnetName, "subnetID", subnetID, "workflowID", workflowID)
 
 	return &models.SubnetResponse{
-		Success:    true,
-		Message:    "子网创建工作流已启动",
-		ResourceID: subnetID,
-		Status:     "accepted",
-		SubnetID:   subnetID,
-		WorkflowID: workflowID,
+		Success:     true,
+		Message:     "子网创建工作流已启动",
+		ResourceID:  subnetID,
+		Status:      "accepted",
+		SubnetID:    subnetID,
+		WorkflowID:  workflowID,
+		OperationID: workflowID,
 	}, nil
+}
+
+func (o *AZOrchestrator) beginCreateOperationTx(ctx context.Context, tx *sql.Tx, route, operationType, target string, payload any, resourceType, candidateResourceID string) (*operation.Operation, operation.Decision, error) {
+	identity, _ := operation.IdentityFromContext(ctx)
+	if identity.IdempotencyKey == "" {
+		return nil, "", fmt.Errorf("%w: X-Idempotency-Key is required", operation.ErrInvalidIdempotencyKey)
+	}
+	rootOperationID := identity.RootOperationID
+	if rootOperationID == "" {
+		rootOperationID = identity.SagaTransactionID
+	}
+	generation := identity.ResourceGeneration
+	if generation == 0 {
+		generation = 1
+	}
+	op, decision, err := o.operationSvc.BeginTx(ctx, tx, operation.BeginRequest{
+		RootOperationID:   rootOperationID,
+		ParentOperationID: identity.ParentOperationID,
+		OwnerService:      fmt.Sprintf("az-nsp-vpc-%s", o.az),
+		CallerScope:       "top-nsp-vpc",
+		RouteScope:        route,
+		OperationType:     operationType,
+		TargetScope:       target,
+		IdempotencyKey:    identity.IdempotencyKey,
+		Payload:           payload,
+		ResourceType:      resourceType,
+		ResourceID:        candidateResourceID,
+		Generation:        generation,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if decision == operation.DecisionConflict {
+		return nil, decision, operation.ErrIdempotencyKeyReused
+	}
+	return op, decision, nil
 }
 
 func (o *AZOrchestrator) buildSubnetTaskParams(req *models.SubnetRequest) ([]byte, error) {
@@ -504,7 +575,7 @@ func (o *AZOrchestrator) compensateVPCs(ctx context.Context) {
 	}
 
 	for _, vpc := range vpcs {
-		o.compensateResource(ctx, vpc.ID, vpc.Status, vpc.UpdatedAt, vpc.TotalTasks, o.vpcDAO.UpdateStatus)
+		o.compensateResource(ctx, vpc.ID, vpc.CurrentOperationID, vpc.Generation, vpc.Status, vpc.UpdatedAt, vpc.TotalTasks, o.vpcDAO.UpdateStatus)
 	}
 }
 
@@ -520,7 +591,7 @@ func (o *AZOrchestrator) compensateSubnets(ctx context.Context) {
 			continue
 		}
 		for _, subnet := range subnets {
-			o.compensateResource(ctx, subnet.ID, subnet.Status, subnet.UpdatedAt, subnet.TotalTasks, o.subnetDAO.UpdateStatus)
+			o.compensateResource(ctx, subnet.ID, subnet.CurrentOperationID, subnet.Generation, subnet.Status, subnet.UpdatedAt, subnet.TotalTasks, o.subnetDAO.UpdateStatus)
 		}
 	}
 }
@@ -533,13 +604,15 @@ func (o *AZOrchestrator) compensatePCCNs(ctx context.Context) {
 	}
 
 	for _, pccn := range pccns {
-		o.compensateResource(ctx, pccn.ID, pccn.Status, pccn.UpdatedAt, pccn.TotalTasks, o.pccnDAO.UpdateStatus)
+		o.compensateResource(ctx, pccn.ID, pccn.CurrentOperationID, pccn.Generation, pccn.Status, pccn.UpdatedAt, pccn.TotalTasks, o.pccnDAO.UpdateStatus)
 	}
 }
 
 func (o *AZOrchestrator) compensateResource(
 	ctx context.Context,
 	resourceID string,
+	operationID string,
+	generation int64,
 	currentStatus models.ResourceStatus,
 	updatedAt time.Time,
 	totalTasks int,
@@ -549,7 +622,10 @@ func (o *AZOrchestrator) compensateResource(
 		return
 	}
 
-	total, completed, failed, err := o.taskDAO.GetTaskStats(ctx, resourceID)
+	if operationID == "" || generation <= 0 {
+		return
+	}
+	total, completed, failed, err := o.taskDAO.GetTaskStatsForOperationGeneration(ctx, resourceID, operationID, generation)
 	if err != nil {
 		logger.Platform().Error("[补偿任务] 查询任务统计失败", "az", o.az, "resourceID", resourceID, "error", err)
 		return
@@ -566,7 +642,7 @@ func (o *AZOrchestrator) compensateResource(
 		_ = updateStatus(ctx, resourceID, models.ResourceStatusFailed, "workflow step failed")
 		return
 	}
-	if o.resourceHasInFlightBrokerTask(ctx, resourceID) {
+	if o.resourceHasInFlightBrokerTask(ctx, resourceID, operationID, generation) {
 		return
 	}
 	if time.Since(updatedAt) > staleWorkflowTimeout {
@@ -574,8 +650,11 @@ func (o *AZOrchestrator) compensateResource(
 	}
 }
 
-func (o *AZOrchestrator) resourceHasInFlightBrokerTask(ctx context.Context, resourceID string) bool {
-	tasks, err := o.taskDAO.GetByResourceID(ctx, resourceID)
+func (o *AZOrchestrator) resourceHasInFlightBrokerTask(ctx context.Context, resourceID, operationID string, generation int64) bool {
+	if o.workflowMgr.ResourceOperationHasActiveOutbox(ctx, resourceID, operationID, generation) {
+		return true
+	}
+	tasks, err := o.taskDAO.GetByResourceOperationGeneration(ctx, resourceID, operationID, generation)
 	if err != nil {
 		logger.Platform().Error("[补偿任务] 查询任务列表失败", "az", o.az, "resourceID", resourceID, "error", err)
 		return false
@@ -686,29 +765,65 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 		TotalTasks:    0,
 	}
 
-	persistedPCCN, err := o.pccnDAO.Create(ctx, pccnResource)
-	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("创建PCCN资源记录失败: %v", err)}, nil
-	}
-	pccnID = persistedPCCN.ID
-
-	params, err := o.buildPCCNTaskParams(pccnID, req, subnetCIDRs)
-	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("序列化PCCN任务参数失败: %v", err)}, nil
-	}
-
-	workflowID, err := o.workflowMgr.SubmitWorkflow(ctx, orchestration.WorkflowDef{
-		ResourceType: models.ResourceTypePCCN,
-		ResourceID:   pccnID,
-		AZ:           o.az,
-		Steps: []orchestration.WorkflowStep{
-			{TaskType: "create_pccn_connection", TaskName: "创建PCCN连接", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
-			{TaskType: "configure_pccn_routing", TaskName: "配置PCCN路由", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
-		},
+	workflowID, persistedPCCNID, err := o.workflowMgr.SubmitPreparedWorkflow(ctx, func(ctx context.Context, tx *sql.Tx) (orchestration.WorkflowDef, error) {
+		operationPayload := struct {
+			PCCNName string        `json:"pccn_name"`
+			VPC1     models.VPCRef `json:"vpc1"`
+			VPC2     models.VPCRef `json:"vpc2"`
+		}{
+			PCCNName: req.PCCNName,
+			VPC1:     req.VPC1,
+			VPC2:     req.VPC2,
+		}
+		op, decision, err := o.beginCreateOperationTx(ctx, tx, "POST /api/v1/pccn", "create_pccn", fmt.Sprintf("%s/%s", o.az, req.PCCNName), operationPayload, "pccn", pccnID)
+		if err != nil {
+			return orchestration.WorkflowDef{}, err
+		}
+		pccnID = op.ResourceID
+		pccnResource.ID = pccnID
+		if decision == operation.DecisionReplay {
+			return orchestration.WorkflowDef{
+				OperationID: op.OperationID, RootOperationID: op.RootOperationID,
+				WorkflowID: op.OperationID, Generation: op.Generation,
+				OperationRequired: true, ReplayExisting: true,
+				ResourceType: models.ResourceTypePCCN, ResourceID: pccnID, AZ: o.az,
+			}, nil
+		}
+		if decision == operation.DecisionNew {
+			persistedPCCN, err := o.pccnDAO.CreateTx(ctx, tx, pccnResource)
+			if err != nil {
+				return orchestration.WorkflowDef{}, err
+			}
+			pccnID = persistedPCCN.ID
+			if pccnID != op.ResourceID {
+				if _, err := tx.ExecContext(ctx, `UPDATE orchestration_operations SET resource_id = $1, updated_at = NOW() WHERE operation_id = $2 AND status = 'accepted'`, pccnID, op.OperationID); err != nil {
+					return orchestration.WorkflowDef{}, err
+				}
+			}
+		}
+		params, err := o.buildPCCNTaskParams(pccnID, req, subnetCIDRs)
+		if err != nil {
+			return orchestration.WorkflowDef{}, err
+		}
+		return orchestration.WorkflowDef{
+			OperationID:       op.OperationID,
+			RootOperationID:   op.RootOperationID,
+			WorkflowID:        op.OperationID,
+			Generation:        op.Generation,
+			OperationRequired: true,
+			ResourceType:      models.ResourceTypePCCN,
+			ResourceID:        pccnID,
+			AZ:                o.az,
+			Steps: []orchestration.WorkflowStep{
+				{TaskType: "create_pccn_connection", TaskName: "创建PCCN连接", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
+				{TaskType: "configure_pccn_routing", TaskName: "配置PCCN路由", DeviceType: string(queue.DeviceTypeSwitch), Priority: int(taskqueue.PriorityNormal), Payload: params},
+			},
+		}, nil
 	})
 	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("提交工作流失败: %v", err)}, nil
+		return nil, fmt.Errorf("提交PCCN工作流: %w", err)
 	}
+	pccnID = persistedPCCNID
 
 	logger.InfoContext(ctx, "PCCN创建流程启动成功",
 		"az", o.az,
@@ -718,12 +833,13 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 	)
 
 	return &models.PCCNResponse{
-		Success:    true,
-		Message:    "PCCN创建工作流已启动",
-		ResourceID: pccnID,
-		Status:     "accepted",
-		PCCNID:     pccnID,
-		TxID:       workflowID,
+		Success:     true,
+		Message:     "PCCN创建工作流已启动",
+		ResourceID:  pccnID,
+		Status:      "accepted",
+		PCCNID:      pccnID,
+		TxID:        workflowID,
+		OperationID: workflowID,
 	}, nil
 }
 

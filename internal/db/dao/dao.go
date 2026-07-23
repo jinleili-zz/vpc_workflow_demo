@@ -17,13 +17,23 @@ func NewVPCDAO(db *sql.DB) *VPCDAO {
 }
 
 func (d *VPCDAO) Create(ctx context.Context, vpc *models.VPCResource) error {
+	return createVPC(ctx, d.db, vpc)
+}
+
+func (d *VPCDAO) CreateTx(ctx context.Context, tx *sql.Tx, vpc *models.VPCResource) error {
+	return createVPC(ctx, tx, vpc)
+}
+
+func createVPC(ctx context.Context, executor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, vpc *models.VPCResource) error {
 	query := `
 		INSERT INTO vpc_resources (
 			id, vpc_name, region, az, vrf_name, vlan_id, firewall_zone,
 			status, total_tasks, completed_tasks, failed_tasks
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
-	_, err := d.db.ExecContext(ctx, query,
+	_, err := executor.ExecContext(ctx, query,
 		vpc.ID, vpc.VPCName, vpc.Region, vpc.AZ, vpc.VRFName, vpc.VLANId, vpc.FirewallZone,
 		vpc.Status, vpc.TotalTasks, vpc.CompletedTasks, vpc.FailedTasks,
 	)
@@ -34,7 +44,7 @@ func (d *VPCDAO) GetByName(ctx context.Context, vpcName, az string) (*models.VPC
 	query := `
 		SELECT id, vpc_name, region, az, vrf_name, vlan_id, firewall_zone,
 		       status, error_message, total_tasks, completed_tasks, failed_tasks,
-		       created_at, updated_at
+		       generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM vpc_resources
 		WHERE vpc_name = $1 AND az = $2
 	`
@@ -44,7 +54,7 @@ func (d *VPCDAO) GetByName(ctx context.Context, vpcName, az string) (*models.VPC
 	err := d.db.QueryRowContext(ctx, query, vpcName, az).Scan(
 		&vpc.ID, &vpc.VPCName, &vpc.Region, &vpc.AZ, &vpc.VRFName, &vpc.VLANId, &vpc.FirewallZone,
 		&vpc.Status, &errorMessage, &vpc.TotalTasks, &vpc.CompletedTasks, &vpc.FailedTasks,
-		&vpc.CreatedAt, &vpc.UpdatedAt,
+		&vpc.Generation, &vpc.CurrentOperationID, &vpc.Version, &vpc.CreatedAt, &vpc.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -61,7 +71,7 @@ func (d *VPCDAO) GetByID(ctx context.Context, id string) (*models.VPCResource, e
 	query := `
 		SELECT id, vpc_name, region, az, vrf_name, vlan_id, firewall_zone,
 		       status, error_message, total_tasks, completed_tasks, failed_tasks,
-		       created_at, updated_at
+		       generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM vpc_resources
 		WHERE id = $1
 	`
@@ -71,7 +81,7 @@ func (d *VPCDAO) GetByID(ctx context.Context, id string) (*models.VPCResource, e
 	err := d.db.QueryRowContext(ctx, query, id).Scan(
 		&vpc.ID, &vpc.VPCName, &vpc.Region, &vpc.AZ, &vpc.VRFName, &vpc.VLANId, &vpc.FirewallZone,
 		&vpc.Status, &errorMessage, &vpc.TotalTasks, &vpc.CompletedTasks, &vpc.FailedTasks,
-		&vpc.CreatedAt, &vpc.UpdatedAt,
+		&vpc.Generation, &vpc.CurrentOperationID, &vpc.Version, &vpc.CreatedAt, &vpc.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -125,7 +135,7 @@ func (d *VPCDAO) ListAll(ctx context.Context) ([]*models.VPCResource, error) {
 	query := `
 		SELECT id, vpc_name, region, az, vrf_name, vlan_id, firewall_zone,
 		       status, error_message, total_tasks, completed_tasks, failed_tasks,
-		       created_at, updated_at
+		       generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM vpc_resources
 		WHERE status != 'deleted'
 		ORDER BY created_at DESC
@@ -143,7 +153,7 @@ func (d *VPCDAO) ListAll(ctx context.Context) ([]*models.VPCResource, error) {
 		err := rows.Scan(
 			&vpc.ID, &vpc.VPCName, &vpc.Region, &vpc.AZ, &vpc.VRFName, &vpc.VLANId, &vpc.FirewallZone,
 			&vpc.Status, &errorMessage, &vpc.TotalTasks, &vpc.CompletedTasks, &vpc.FailedTasks,
-			&vpc.CreatedAt, &vpc.UpdatedAt,
+			&vpc.Generation, &vpc.CurrentOperationID, &vpc.Version, &vpc.CreatedAt, &vpc.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -175,13 +185,23 @@ func NewSubnetDAO(db *sql.DB) *SubnetDAO {
 }
 
 func (d *SubnetDAO) Create(ctx context.Context, subnet *models.SubnetResource) error {
+	return createSubnet(ctx, d.db, subnet)
+}
+
+func (d *SubnetDAO) CreateTx(ctx context.Context, tx *sql.Tx, subnet *models.SubnetResource) error {
+	return createSubnet(ctx, tx, subnet)
+}
+
+func createSubnet(ctx context.Context, executor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, subnet *models.SubnetResource) error {
 	query := `
 		INSERT INTO subnet_resources (
 			id, subnet_name, vpc_name, region, az, cidr,
 			status, total_tasks, completed_tasks, failed_tasks
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`
-	_, err := d.db.ExecContext(ctx, query,
+	_, err := executor.ExecContext(ctx, query,
 		subnet.ID, subnet.SubnetName, subnet.VPCName, subnet.Region, subnet.AZ, subnet.CIDR,
 		subnet.Status, subnet.TotalTasks, subnet.CompletedTasks, subnet.FailedTasks,
 	)
@@ -192,7 +212,7 @@ func (d *SubnetDAO) GetByName(ctx context.Context, subnetName, az string) (*mode
 	query := `
 		SELECT id, subnet_name, vpc_name, region, az, cidr,
 		       status, error_message, total_tasks, completed_tasks, failed_tasks,
-		       created_at, updated_at
+		       generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM subnet_resources
 		WHERE subnet_name = $1 AND az = $2
 	`
@@ -202,7 +222,7 @@ func (d *SubnetDAO) GetByName(ctx context.Context, subnetName, az string) (*mode
 	err := d.db.QueryRowContext(ctx, query, subnetName, az).Scan(
 		&subnet.ID, &subnet.SubnetName, &subnet.VPCName, &subnet.Region, &subnet.AZ, &subnet.CIDR,
 		&subnet.Status, &errorMessage, &subnet.TotalTasks, &subnet.CompletedTasks, &subnet.FailedTasks,
-		&subnet.CreatedAt, &subnet.UpdatedAt,
+		&subnet.Generation, &subnet.CurrentOperationID, &subnet.Version, &subnet.CreatedAt, &subnet.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -219,7 +239,7 @@ func (d *SubnetDAO) GetByID(ctx context.Context, id string) (*models.SubnetResou
 	query := `
 		SELECT id, subnet_name, vpc_name, region, az, cidr,
 		       status, error_message, total_tasks, completed_tasks, failed_tasks,
-		       created_at, updated_at
+		       generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM subnet_resources
 		WHERE id = $1
 	`
@@ -229,7 +249,7 @@ func (d *SubnetDAO) GetByID(ctx context.Context, id string) (*models.SubnetResou
 	err := d.db.QueryRowContext(ctx, query, id).Scan(
 		&subnet.ID, &subnet.SubnetName, &subnet.VPCName, &subnet.Region, &subnet.AZ, &subnet.CIDR,
 		&subnet.Status, &errorMessage, &subnet.TotalTasks, &subnet.CompletedTasks, &subnet.FailedTasks,
-		&subnet.CreatedAt, &subnet.UpdatedAt,
+		&subnet.Generation, &subnet.CurrentOperationID, &subnet.Version, &subnet.CreatedAt, &subnet.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -276,7 +296,7 @@ func (d *SubnetDAO) ListByVPCName(ctx context.Context, vpcName, az string) ([]*m
 	query := `
 		SELECT id, subnet_name, vpc_name, region, az, cidr,
 		       status, error_message, total_tasks, completed_tasks, failed_tasks,
-		       created_at, updated_at
+		       generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM subnet_resources
 		WHERE vpc_name = $1 AND az = $2 AND status != 'deleted'
 		ORDER BY created_at DESC
@@ -294,7 +314,7 @@ func (d *SubnetDAO) ListByVPCName(ctx context.Context, vpcName, az string) ([]*m
 		err := rows.Scan(
 			&subnet.ID, &subnet.SubnetName, &subnet.VPCName, &subnet.Region, &subnet.AZ, &subnet.CIDR,
 			&subnet.Status, &errorMessage, &subnet.TotalTasks, &subnet.CompletedTasks, &subnet.FailedTasks,
-			&subnet.CreatedAt, &subnet.UpdatedAt,
+			&subnet.Generation, &subnet.CurrentOperationID, &subnet.Version, &subnet.CreatedAt, &subnet.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -311,7 +331,7 @@ func (d *SubnetDAO) ListByVPCID(ctx context.Context, vpcID string) ([]*models.Su
 	query := `
 		SELECT s.id, s.subnet_name, s.vpc_name, s.region, s.az, s.cidr,
 		       s.status, s.error_message, s.total_tasks, s.completed_tasks, s.failed_tasks,
-		       s.created_at, s.updated_at
+		       s.generation, COALESCE(s.current_operation_id, ''), s.version, s.created_at, s.updated_at
 		FROM subnet_resources s
 		INNER JOIN vpc_resources v ON s.vpc_name = v.vpc_name AND s.az = v.az
 		WHERE v.id = $1 AND s.status != 'deleted'
@@ -330,7 +350,7 @@ func (d *SubnetDAO) ListByVPCID(ctx context.Context, vpcID string) ([]*models.Su
 		err := rows.Scan(
 			&subnet.ID, &subnet.SubnetName, &subnet.VPCName, &subnet.Region, &subnet.AZ, &subnet.CIDR,
 			&subnet.Status, &errorMessage, &subnet.TotalTasks, &subnet.CompletedTasks, &subnet.FailedTasks,
-			&subnet.CreatedAt, &subnet.UpdatedAt,
+			&subnet.Generation, &subnet.CurrentOperationID, &subnet.Version, &subnet.CreatedAt, &subnet.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err

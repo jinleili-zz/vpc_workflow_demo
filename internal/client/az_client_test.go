@@ -11,12 +11,39 @@ import (
 	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/trace"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestCreateSubnetPropagatesOperationIdentity(t *testing.T) {
+	client := NewAZNSPClient(nil, nil)
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		for header, want := range map[string]string{
+			operation.HeaderSagaTransactionID:  "saga-1",
+			operation.HeaderIdempotencyKey:     "child-key-1",
+			operation.HeaderRootOperationID:    "root-1",
+			operation.HeaderParentOperationID:  "parent-1",
+			operation.HeaderResourceGeneration: "3",
+		} {
+			if got := r.Header.Get(header); got != want {
+				t.Errorf("%s=%q, want %q", header, got, want)
+			}
+		}
+		body, _ := json.Marshal(models.SubnetResponse{Success: true})
+		return jsonResponse(http.StatusOK, string(body)), nil
+	})}
+	ctx := operation.ContextWithIdentity(context.Background(), operation.RequestIdentity{
+		SagaTransactionID: "saga-1", IdempotencyKey: "child-key-1",
+		RootOperationID: "root-1", ParentOperationID: "parent-1", ResourceGeneration: 3,
+	})
+	if _, err := client.CreateSubnet(ctx, "http://example.com", &models.SubnetRequest{SubnetName: "subnet-a", VPCName: "vpc-a", Region: "region-a", AZ: "az-a", CIDR: "10.0.0.0/24"}); err != nil {
+		t.Fatalf("CreateSubnet: %v", err)
+	}
 }
 
 func jsonResponse(status int, body string) *http.Response {

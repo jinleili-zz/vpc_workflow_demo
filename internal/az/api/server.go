@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -115,9 +116,23 @@ func (s *Server) setupRoutes() {
 
 		api.POST("/task/replay/:task_id", s.replayTask)
 		api.GET("/task/:task_id", s.getTaskByID)
+		api.GET("/operations/:operation_id", s.getOperation)
 
 		api.GET("/health", s.health)
 	}
+}
+
+func (s *Server) getOperation(c *gin.Context) {
+	op, err := s.orchestrator.GetOperation(c.Request.Context(), c.Param("operation_id"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"code": "OPERATION_NOT_FOUND", "message": "operation not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, op)
 }
 
 func (s *Server) createVPC(c *gin.Context) {
@@ -133,10 +148,7 @@ func (s *Server) createVPC(c *gin.Context) {
 	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateVPC(ctx, &req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.VPCResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建VPC失败: %v", err),
-		})
+		writeCreateError(c, "创建VPC失败", err)
 		return
 	}
 
@@ -193,10 +205,7 @@ func (s *Server) createSubnet(c *gin.Context) {
 	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateSubnet(ctx, &req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建子网失败: %v", err),
-		})
+		writeCreateError(c, "创建子网失败", err)
 		return
 	}
 
@@ -450,10 +459,7 @@ func (s *Server) createPCCN(c *gin.Context) {
 
 	resp, err := s.orchestrator.CreatePCCN(ctx, &req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("创建PCCN失败: %v", err),
-		})
+		writeCreateError(c, "创建PCCN失败", err)
 		return
 	}
 
@@ -462,6 +468,22 @@ func (s *Server) createPCCN(c *gin.Context) {
 	} else {
 		c.JSON(http.StatusBadRequest, resp)
 	}
+}
+
+func writeCreateError(c *gin.Context, prefix string, err error) {
+	status := http.StatusInternalServerError
+	code := "INTERNAL_ERROR"
+	if errors.Is(err, operation.ErrInvalidIdempotencyKey) {
+		status = http.StatusBadRequest
+		code = operation.ErrInvalidIdempotencyKey.Error()
+	} else if errors.Is(err, operation.ErrInvalidResourceGeneration) {
+		status = http.StatusBadRequest
+		code = operation.ErrInvalidResourceGeneration.Error()
+	} else if errors.Is(err, operation.ErrIdempotencyKeyReused) {
+		status = http.StatusConflict
+		code = operation.ErrIdempotencyKeyReused.Error()
+	}
+	c.JSON(status, gin.H{"code": code, "success": false, "message": fmt.Sprintf("%s: %v", prefix, err)})
 }
 
 func (s *Server) getPccnStatus(c *gin.Context) {
@@ -656,4 +678,8 @@ func (s *Server) StartHeartbeat(ctx context.Context) {
 // inconsistencies between workflow state and resource state.
 func (s *Server) StartCompensationTask(ctx context.Context, interval time.Duration) {
 	s.orchestrator.StartCompensationTask(ctx, interval)
+}
+
+func (s *Server) StartOutboxDispatcher(ctx context.Context, interval time.Duration) {
+	s.orchestrator.StartOutboxDispatcher(ctx, interval)
 }

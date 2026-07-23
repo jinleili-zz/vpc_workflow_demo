@@ -2,9 +2,12 @@ package orchestration
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jinleili-zz/nsp-platform/logger"
@@ -23,10 +26,16 @@ type WorkflowStep struct {
 }
 
 type WorkflowDef struct {
-	ResourceType models.ResourceType
-	ResourceID   string
-	AZ           string
-	Steps        []WorkflowStep
+	OperationID       string
+	RootOperationID   string
+	WorkflowID        string
+	Generation        int64
+	OperationRequired bool
+	ReplayExisting    bool
+	ResourceType      models.ResourceType
+	ResourceID        string
+	AZ                string
+	Steps             []WorkflowStep
 }
 
 type ResourceStore interface {
@@ -49,20 +58,38 @@ type TaskStore interface {
 type QueueResolver func(deviceType string, priority int) string
 
 type Manager struct {
-	broker         taskqueue.Broker
-	taskStore      TaskStore
-	queueResolver  QueueResolver
-	replyQueueName string
-	resourceStores map[models.ResourceType]ResourceStore
+	broker             taskqueue.Broker
+	taskStore          TaskStore
+	queueResolver      QueueResolver
+	replyQueueName     string
+	resourceStores     map[models.ResourceType]ResourceStore
+	durableRepo        *WorkflowRepository
+	dispatcher         *OutboxDispatcher
+	replyConsumer      string
+	legacyReplyEnabled bool
+}
+
+func NewDurableManager(db *sql.DB, ownerService string, broker taskqueue.Broker, taskStore TaskStore, queueResolver QueueResolver, replyQueueName string) *Manager {
+	manager := NewManager(broker, taskStore, queueResolver, replyQueueName)
+	manager.durableRepo = NewWorkflowRepository(db, ownerService)
+	manager.dispatcher = NewOutboxDispatcher(manager.durableRepo, broker, ownerService+"-"+uuid.NewString(), 32)
+	manager.replyConsumer = ownerService + ":reply"
+	manager.legacyReplyEnabled = false
+	if value := os.Getenv("NSP_WORKFLOW_V1_REPLY_ENABLED"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		manager.legacyReplyEnabled = err == nil && enabled
+	}
+	return manager
 }
 
 func NewManager(broker taskqueue.Broker, taskStore TaskStore, queueResolver QueueResolver, replyQueueName string) *Manager {
 	return &Manager{
-		broker:         broker,
-		taskStore:      taskStore,
-		queueResolver:  queueResolver,
-		replyQueueName: replyQueueName,
-		resourceStores: make(map[models.ResourceType]ResourceStore),
+		broker:             broker,
+		taskStore:          taskStore,
+		queueResolver:      queueResolver,
+		replyQueueName:     replyQueueName,
+		resourceStores:     make(map[models.ResourceType]ResourceStore),
+		legacyReplyEnabled: true,
 	}
 }
 
@@ -75,6 +102,9 @@ func (m *Manager) ReplyQueueName() string {
 }
 
 func (m *Manager) SubmitWorkflow(ctx context.Context, def WorkflowDef) (string, error) {
+	if m.durableRepo != nil {
+		return m.durableRepo.SubmitWorkflowTx(ctx, def, m.queueResolver, m.replyQueueName)
+	}
 	if len(def.Steps) == 0 {
 		return "", fmt.Errorf("workflow steps不能为空")
 	}
@@ -127,9 +157,30 @@ func (m *Manager) SubmitWorkflow(ctx context.Context, def WorkflowDef) (string, 
 	return def.ResourceID, nil
 }
 
+func (m *Manager) SubmitPreparedWorkflow(ctx context.Context, prepare WorkflowPreparation) (string, string, error) {
+	if m.durableRepo == nil {
+		return "", "", fmt.Errorf("prepared workflow requires durable repository")
+	}
+	return m.durableRepo.SubmitPreparedWorkflowTx(ctx, prepare, m.queueResolver, m.replyQueueName)
+}
+
 func (m *Manager) HandleReply(ctx context.Context, task *taskqueue.Task) error {
 	if task == nil {
 		return fmt.Errorf("reply task不能为空")
+	}
+	protocolVersion := task.Metadata[MetadataKeyProtocolVersion]
+	if protocolVersion != "" && protocolVersion != strconv.Itoa(int(TaskProtocolVersion)) {
+		return fmt.Errorf("unsupported reply protocol version: %s", protocolVersion)
+	}
+	if protocolVersion == strconv.Itoa(int(TaskProtocolVersion)) {
+		if m.durableRepo == nil {
+			return fmt.Errorf("reply v2 requires durable repository")
+		}
+		_, err := m.durableRepo.HandleReplyTx(ctx, m.replyConsumer, task)
+		return err
+	}
+	if !m.legacyReplyEnabled {
+		return fmt.Errorf("legacy reply protocol v1 is disabled")
 	}
 
 	var reply ReplyPayload
@@ -221,7 +272,36 @@ func (m *Manager) HandleReply(ctx context.Context, task *taskqueue.Task) error {
 	}
 }
 
+func (m *Manager) StartOutboxDispatcher(ctx context.Context, interval time.Duration) {
+	if m.dispatcher == nil {
+		return
+	}
+	go m.dispatcher.Run(ctx, interval)
+}
+
+func (m *Manager) ResourceHasActiveOutbox(ctx context.Context, resourceID string) bool {
+	if m.durableRepo == nil {
+		return false
+	}
+	active, err := m.durableRepo.ResourceHasActiveOutbox(ctx, resourceID)
+	return err == nil && active
+}
+
+func (m *Manager) ResourceOperationHasActiveOutbox(ctx context.Context, resourceID, operationID string, generation int64) bool {
+	if m.durableRepo == nil {
+		return false
+	}
+	active, err := m.durableRepo.ResourceOperationHasActiveOutbox(ctx, resourceID, operationID, generation)
+	return err == nil && active
+}
+
 func (m *Manager) RequeueTask(ctx context.Context, task *models.Task) error {
+	if m.durableRepo != nil {
+		if task.ProtocolVersion != TaskProtocolVersion {
+			return fmt.Errorf("legacy task replay requires a new audited operation")
+		}
+		return m.durableRepo.RequeueTaskTx(ctx, task.ID)
+	}
 	tasks, err := m.taskStore.GetByResourceID(ctx, task.ResourceID)
 	if err != nil {
 		return fmt.Errorf("查询任务列表失败: %w", err)

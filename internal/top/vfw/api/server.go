@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 	"workflow_qoder/internal/top/vfw/service"
 
 	"github.com/gin-gonic/gin"
@@ -19,6 +20,7 @@ type Server struct {
 
 func NewServer(policyService *service.PolicyService) *Server {
 	router := gin.Default()
+	router.Use(operation.HTTPMiddleware())
 
 	server := &Server{
 		policyService: policyService,
@@ -95,7 +97,7 @@ func (s *Server) createPolicy(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	resp, err := s.policyService.CreatePolicy(ctx, &req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.FirewallPolicyResponse{

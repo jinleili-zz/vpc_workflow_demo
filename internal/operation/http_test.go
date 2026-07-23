@@ -43,6 +43,24 @@ func TestHTTPMiddlewareCapturesSagaIdentity(t *testing.T) {
 	}
 }
 
+func TestHTTPMiddlewareRejectsInvalidExplicitResourceGeneration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, value := range []string{"not-a-number", "0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			router := gin.New()
+			router.Use(HTTPMiddleware())
+			router.POST("/work", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+			req := httptest.NewRequest(http.MethodPost, "/work", nil)
+			req.Header.Set(HeaderResourceGeneration, value)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "INVALID_RESOURCE_GENERATION") {
+				t.Fatalf("generation %q status/body=%d/%s", value, recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestHTTPMiddlewareLogsSagaIdentityWithoutRawKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

@@ -95,26 +95,29 @@ type PolicyAZRecord struct {
 }
 
 type FirewallPolicy struct {
-	ID             string         `json:"id"`
-	PolicyName     string         `json:"policy_name"`
-	SourceZone     string         `json:"source_zone"`
-	DestZone       string         `json:"dest_zone"`
-	SourceIP       string         `json:"source_ip"`
-	DestIP         string         `json:"dest_ip"`
-	SourcePort     string         `json:"source_port"`
-	DestPort       string         `json:"dest_port"`
-	Protocol       string         `json:"protocol"`
-	Action         string         `json:"action"`
-	Description    string         `json:"description"`
-	Status         ResourceStatus `json:"status"`
-	ErrorMessage   string         `json:"error_message,omitempty"`
-	TotalTasks     int            `json:"total_tasks"`
-	CompletedTasks int            `json:"completed_tasks"`
-	FailedTasks    int            `json:"failed_tasks"`
-	Region         string         `json:"region"`
-	AZ             string         `json:"az"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID                 string         `json:"id"`
+	PolicyName         string         `json:"policy_name"`
+	SourceZone         string         `json:"source_zone"`
+	DestZone           string         `json:"dest_zone"`
+	SourceIP           string         `json:"source_ip"`
+	DestIP             string         `json:"dest_ip"`
+	SourcePort         string         `json:"source_port"`
+	DestPort           string         `json:"dest_port"`
+	Protocol           string         `json:"protocol"`
+	Action             string         `json:"action"`
+	Description        string         `json:"description"`
+	Status             ResourceStatus `json:"status"`
+	ErrorMessage       string         `json:"error_message,omitempty"`
+	TotalTasks         int            `json:"total_tasks"`
+	CompletedTasks     int            `json:"completed_tasks"`
+	FailedTasks        int            `json:"failed_tasks"`
+	Generation         int64          `json:"generation"`
+	CurrentOperationID string         `json:"current_operation_id,omitempty"`
+	Version            int64          `json:"version"`
+	Region             string         `json:"region"`
+	AZ                 string         `json:"az"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
 }
 
 type FirewallPolicyStatusResponse struct {

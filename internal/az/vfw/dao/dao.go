@@ -17,6 +17,16 @@ func NewFirewallPolicyDAO(db *sql.DB) *FirewallPolicyDAO {
 }
 
 func (d *FirewallPolicyDAO) Create(ctx context.Context, policy *models.FirewallPolicy) error {
+	return createFirewallPolicy(ctx, d.db, policy)
+}
+
+func (d *FirewallPolicyDAO) CreateTx(ctx context.Context, tx *sql.Tx, policy *models.FirewallPolicy) error {
+	return createFirewallPolicy(ctx, tx, policy)
+}
+
+func createFirewallPolicy(ctx context.Context, executor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, policy *models.FirewallPolicy) error {
 	query := `
 		INSERT INTO firewall_policies (
 			id, policy_name, source_zone, dest_zone, source_ip, dest_ip,
@@ -24,7 +34,7 @@ func (d *FirewallPolicyDAO) Create(ctx context.Context, policy *models.FirewallP
 			status, total_tasks, completed_tasks, failed_tasks, region, az
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 	`
-	_, err := d.db.ExecContext(ctx, query,
+	_, err := executor.ExecContext(ctx, query,
 		policy.ID, policy.PolicyName, policy.SourceZone, policy.DestZone,
 		policy.SourceIP, policy.DestIP, policy.SourcePort, policy.DestPort,
 		policy.Protocol, policy.Action, policy.Description,
@@ -39,7 +49,7 @@ func (d *FirewallPolicyDAO) GetByID(ctx context.Context, id string) (*models.Fir
 		SELECT id, policy_name, source_zone, dest_zone, source_ip, dest_ip,
 			   source_port, dest_port, protocol, action, description,
 			   status, error_message, total_tasks, completed_tasks, failed_tasks,
-			   region, az, created_at, updated_at
+			   region, az, generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM firewall_policies WHERE id = $1
 	`
 	policy := &models.FirewallPolicy{}
@@ -50,7 +60,7 @@ func (d *FirewallPolicyDAO) GetByID(ctx context.Context, id string) (*models.Fir
 		&policy.SourceIP, &policy.DestIP, &policy.SourcePort, &policy.DestPort,
 		&policy.Protocol, &policy.Action, &desc,
 		&policy.Status, &errMsg, &policy.TotalTasks, &policy.CompletedTasks, &policy.FailedTasks,
-		&policy.Region, &policy.AZ, &policy.CreatedAt, &policy.UpdatedAt,
+		&policy.Region, &policy.AZ, &policy.Generation, &policy.CurrentOperationID, &policy.Version, &policy.CreatedAt, &policy.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -71,7 +81,7 @@ func (d *FirewallPolicyDAO) GetByName(ctx context.Context, name, az string) (*mo
 		SELECT id, policy_name, source_zone, dest_zone, source_ip, dest_ip,
 			   source_port, dest_port, protocol, action, description,
 			   status, error_message, total_tasks, completed_tasks, failed_tasks,
-			   region, az, created_at, updated_at
+			   region, az, generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM firewall_policies WHERE policy_name = $1 AND az = $2
 	`
 	policy := &models.FirewallPolicy{}
@@ -82,7 +92,7 @@ func (d *FirewallPolicyDAO) GetByName(ctx context.Context, name, az string) (*mo
 		&policy.SourceIP, &policy.DestIP, &policy.SourcePort, &policy.DestPort,
 		&policy.Protocol, &policy.Action, &desc,
 		&policy.Status, &errMsg, &policy.TotalTasks, &policy.CompletedTasks, &policy.FailedTasks,
-		&policy.Region, &policy.AZ, &policy.CreatedAt, &policy.UpdatedAt,
+		&policy.Region, &policy.AZ, &policy.Generation, &policy.CurrentOperationID, &policy.Version, &policy.CreatedAt, &policy.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -133,7 +143,7 @@ func (d *FirewallPolicyDAO) ListAll(ctx context.Context) ([]*models.FirewallPoli
 		SELECT id, policy_name, source_zone, dest_zone, source_ip, dest_ip,
 			   source_port, dest_port, protocol, action, description,
 			   status, error_message, total_tasks, completed_tasks, failed_tasks,
-			   region, az, created_at, updated_at
+			   region, az, generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM firewall_policies
 		WHERE status != 'deleted'
 		ORDER BY created_at DESC
@@ -154,7 +164,7 @@ func (d *FirewallPolicyDAO) ListAll(ctx context.Context) ([]*models.FirewallPoli
 			&policy.SourceIP, &policy.DestIP, &policy.SourcePort, &policy.DestPort,
 			&policy.Protocol, &policy.Action, &desc,
 			&policy.Status, &errMsg, &policy.TotalTasks, &policy.CompletedTasks, &policy.FailedTasks,
-			&policy.Region, &policy.AZ, &policy.CreatedAt, &policy.UpdatedAt,
+			&policy.Region, &policy.AZ, &policy.Generation, &policy.CurrentOperationID, &policy.Version, &policy.CreatedAt, &policy.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err

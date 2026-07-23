@@ -31,6 +31,7 @@ func TestAZVFWWriteRouteExposesSagaCompatibleResponseContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open PostgreSQL: %v", err)
 	}
+	db.SetMaxOpenConns(32)
 	t.Cleanup(func() { _ = db.Close() })
 	if err := db.Ping(); err != nil {
 		t.Fatalf("ping PostgreSQL: %v", err)
@@ -48,12 +49,16 @@ func TestAZVFWWriteRouteExposesSagaCompatibleResponseContract(t *testing.T) {
 	broker := asynqbroker.NewBroker(redisOpt)
 	t.Cleanup(func() { _ = broker.Close() })
 
-	policyName := "contract-policy-" + uuid.NewString()
+	unique := uuid.NewString()
+	policyName := "contract-policy-" + unique
+	idempotencyKey := "contract-policy-key-" + unique
 	var policyID string
 	t.Cleanup(func() {
 		if policyID != "" {
+			_, _ = db.ExecContext(context.Background(), `DELETE FROM outbox_events WHERE aggregate_id IN (SELECT id FROM tasks WHERE resource_id = $1)`, policyID)
 			_, _ = db.ExecContext(context.Background(), `DELETE FROM tasks WHERE resource_id = $1`, policyID)
 		}
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM orchestration_operations WHERE idempotency_key = $1`, idempotencyKey)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM firewall_policies WHERE policy_name = $1`, policyName)
 	})
 
@@ -71,7 +76,7 @@ func TestAZVFWWriteRouteExposesSagaCompatibleResponseContract(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/firewall/policy", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(operation.HeaderSagaTransactionID, "saga-vfw-contract")
-	req.Header.Set(operation.HeaderIdempotencyKey, "step-vfw-contract")
+	req.Header.Set(operation.HeaderIdempotencyKey, idempotencyKey)
 	recorder := httptest.NewRecorder()
 	server.router.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK {
@@ -90,5 +95,36 @@ func TestAZVFWWriteRouteExposesSagaCompatibleResponseContract(t *testing.T) {
 	}
 	if response["resource_id"] != policyID || response["status"] != "accepted" {
 		t.Fatalf("common resource/status fields invalid; response=%#v", response)
+	}
+	replayReq := httptest.NewRequest(http.MethodPost, "/api/v1/firewall/policy", bytes.NewReader(body))
+	replayReq.Header.Set("Content-Type", "application/json")
+	replayReq.Header.Set(operation.HeaderSagaTransactionID, "saga-vfw-contract")
+	replayReq.Header.Set(operation.HeaderIdempotencyKey, idempotencyKey)
+	replayRecorder := httptest.NewRecorder()
+	server.router.ServeHTTP(replayRecorder, replayReq)
+	if replayRecorder.Code != http.StatusOK {
+		t.Fatalf("replay status=%d body=%s", replayRecorder.Code, replayRecorder.Body.String())
+	}
+	var replayResponse map[string]any
+	if err := json.Unmarshal(replayRecorder.Body.Bytes(), &replayResponse); err != nil {
+		t.Fatalf("decode replay: %v", err)
+	}
+	if replayResponse["operation_id"] != response["operation_id"] || replayResponse["resource_id"] != policyID {
+		t.Fatalf("replay identity changed: first=%#v replay=%#v", response, replayResponse)
+	}
+	var conflictingBody map[string]any
+	if err := json.Unmarshal(body, &conflictingBody); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	conflictingBody["action"] = "deny"
+	conflictingJSON, _ := json.Marshal(conflictingBody)
+	conflictReq := httptest.NewRequest(http.MethodPost, "/api/v1/firewall/policy", bytes.NewReader(conflictingJSON))
+	conflictReq.Header.Set("Content-Type", "application/json")
+	conflictReq.Header.Set(operation.HeaderSagaTransactionID, "saga-vfw-contract")
+	conflictReq.Header.Set(operation.HeaderIdempotencyKey, idempotencyKey)
+	conflictRecorder := httptest.NewRecorder()
+	server.router.ServeHTTP(conflictRecorder, conflictReq)
+	if conflictRecorder.Code != http.StatusConflict {
+		t.Fatalf("conflict status=%d, want 409; body=%s", conflictRecorder.Code, conflictRecorder.Body.String())
 	}
 }

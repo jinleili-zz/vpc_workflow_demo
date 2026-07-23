@@ -12,6 +12,7 @@ import (
 	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/trace"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 )
 
 // AZNSPClient AZ NSP HTTP客户端
@@ -60,6 +61,7 @@ func (c *AZNSPClient) CreateVPC(ctx context.Context, azAddr string, req *models.
 		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	applyOperationIdentity(ctx, httpReq)
 
 	resp, err := c.do(httpReq)
 
@@ -100,6 +102,7 @@ func (c *AZNSPClient) CreateSubnet(ctx context.Context, azAddr string, req *mode
 		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	applyOperationIdentity(ctx, httpReq)
 
 	resp, err := c.do(httpReq)
 
@@ -221,6 +224,7 @@ func (c *AZNSPClient) CreatePCCN(ctx context.Context, azAddr string, req *models
 		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	applyOperationIdentity(ctx, httpReq)
 
 	resp, err := c.do(httpReq)
 
@@ -245,6 +249,12 @@ func (c *AZNSPClient) CreatePCCN(ctx context.Context, azAddr string, req *models
 	}
 
 	return &pccnResp, nil
+}
+
+func applyOperationIdentity(ctx context.Context, req *http.Request) {
+	if identity, ok := operation.IdentityFromContext(ctx); ok {
+		operation.ApplyIdentityHeaders(req.Header, identity)
+	}
 }
 
 // GetPCCNStatus queries the PCCN status in the specified AZ

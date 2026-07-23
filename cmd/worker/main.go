@@ -98,18 +98,18 @@ func main() {
 	// 注册 task handler
 	switch deviceType {
 	case queue.DeviceTypeSwitch:
-		consumer.Handle("create_vrf_on_switch", tasks.CreateVRFOnSwitchHandler(broker))
-		consumer.Handle("create_vlan_subinterface", tasks.CreateVLANSubInterfaceHandler(broker))
-		consumer.Handle("create_subnet_on_switch", tasks.CreateSubnetOnSwitchHandler(broker))
-		consumer.Handle("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(broker))
-		consumer.Handle("create_pccn_connection", tasks.CreatePCCNConnectionHandler(broker))
-		consumer.Handle("configure_pccn_routing", tasks.ConfigurePCCNRoutingHandler(broker))
+		consumer.Handle("create_vrf_on_switch", tasks.ValidateTaskProtocol(tasks.CreateVRFOnSwitchHandler(broker)))
+		consumer.Handle("create_vlan_subinterface", tasks.ValidateTaskProtocol(tasks.CreateVLANSubInterfaceHandler(broker)))
+		consumer.Handle("create_subnet_on_switch", tasks.ValidateTaskProtocol(tasks.CreateSubnetOnSwitchHandler(broker)))
+		consumer.Handle("configure_subnet_routing", tasks.ValidateTaskProtocol(tasks.ConfigureSubnetRoutingHandler(broker)))
+		consumer.Handle("create_pccn_connection", tasks.ValidateTaskProtocol(tasks.CreatePCCNConnectionHandler(broker)))
+		consumer.Handle("configure_pccn_routing", tasks.ValidateTaskProtocol(tasks.ConfigurePCCNRoutingHandler(broker)))
 	case queue.DeviceTypeFirewall:
-		consumer.Handle("create_firewall_zone", tasks.CreateFirewallZoneHandler(broker))
-		consumer.Handle("create_firewall_policy", tasks.CreateFirewallPolicyHandler(broker))
+		consumer.Handle("create_firewall_zone", tasks.ValidateTaskProtocol(tasks.CreateFirewallZoneHandler(broker)))
+		consumer.Handle("create_firewall_policy", tasks.ValidateTaskProtocol(tasks.CreateFirewallPolicyHandler(broker)))
 	case queue.DeviceTypeLoadBalancer:
-		consumer.Handle("create_lb_pool", tasks.CreateLBPoolHandler(broker))
-		consumer.Handle("configure_lb_listener", tasks.ConfigureLBListenerHandler(broker))
+		consumer.Handle("create_lb_pool", tasks.ValidateTaskProtocol(tasks.CreateLBPoolHandler(broker)))
+		consumer.Handle("configure_lb_listener", tasks.ValidateTaskProtocol(tasks.ConfigureLBListenerHandler(broker)))
 	}
 
 	taskQueueName := queue.GetQueueName(region, az, deviceType)

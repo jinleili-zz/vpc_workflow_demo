@@ -12,6 +12,7 @@ import (
 
 	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 	pccndao "workflow_qoder/internal/top/pccn/dao"
 	"workflow_qoder/internal/top/registry"
 	topdao "workflow_qoder/internal/top/vpc/dao"
@@ -191,7 +192,12 @@ func (o *Orchestrator) CreateAZSubnet(ctx context.Context, req *models.SubnetReq
 	}
 
 	logger.InfoContext(ctx, "向AZ发送子网创建请求", "az_id", az.ID)
-	resp, err := o.azClient.CreateSubnet(ctx, az.NSPAddr, req)
+	childIdentity, err := operation.DeriveChildIdentity(ctx, "POST /api/v1/subnet", fmt.Sprintf("%s/%s/%s", req.Region, req.AZ, req.SubnetName), req)
+	if err != nil {
+		return nil, fmt.Errorf("derive subnet operation identity: %w", err)
+	}
+	childCtx := operation.ContextWithIdentity(ctx, childIdentity)
+	resp, err := o.azClient.CreateSubnet(childCtx, az.NSPAddr, req)
 	if err != nil {
 		return &models.SubnetResponse{
 			Success: false,

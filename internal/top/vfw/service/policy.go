@@ -11,6 +11,7 @@ import (
 
 	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 	vfwdao "workflow_qoder/internal/top/vfw/dao"
 	topdao "workflow_qoder/internal/top/vpc/dao"
 
@@ -200,6 +201,13 @@ func (s *PolicyService) CreatePolicy(ctx context.Context, req *models.FirewallPo
 				return
 			}
 			httpReq.Header.Set("Content-Type", "application/json")
+			childIdentity, identityErr := operation.DeriveChildIdentity(ctx, "POST /api/v1/firewall/policy", fmt.Sprintf("%s/%s/%s", srcInfo.Region, az, req.PolicyName), azReq)
+			if identityErr != nil {
+				resultChan <- &azResult{az: az, err: identityErr, success: false}
+				s.vfwDAO.UpdateAZRecord(ctx, policyID, az, "", "failed", identityErr.Error())
+				return
+			}
+			operation.ApplyIdentityHeaders(httpReq.Header, childIdentity)
 			resp, err := s.signedHTTP.Do(httpReq)
 
 			result := &azResult{az: az}

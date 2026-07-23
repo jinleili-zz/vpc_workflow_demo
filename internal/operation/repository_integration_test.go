@@ -329,6 +329,7 @@ func openOperationTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("open PostgreSQL: %v", err)
 	}
+	db.SetMaxOpenConns(32)
 	t.Cleanup(func() { _ = db.Close() })
 	if err := db.Ping(); err != nil {
 		t.Fatalf("ping PostgreSQL: %v", err)
