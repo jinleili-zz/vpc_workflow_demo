@@ -14,9 +14,11 @@ import (
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
 	"github.com/jinleili-zz/nsp-platform/trace"
+	"github.com/lib/pq"
 
 	"workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 	"workflow_qoder/internal/orchestration"
 	"workflow_qoder/internal/queue"
 )
@@ -95,8 +97,14 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	}
 
 	if err := o.vpcDAO.Create(ctx, vpcResource); err != nil {
+		code := operation.CodeInternalError
+		if isUniqueViolation(err) {
+			// 同名 VPC 已存在：唯一约束只做了重复检测，明确返回冲突业务码（设计文档 3.3 节）
+			code = operation.CodeResourceAlreadyExists
+		}
 		return &models.VPCResponse{
 			Success: false,
+			Code:    code,
 			Message: fmt.Sprintf("创建VPC资源记录失败: %v", err),
 		}, nil
 	}
@@ -105,6 +113,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	if err != nil {
 		return &models.VPCResponse{
 			Success: false,
+			Code:    operation.CodeInternalError,
 			Message: fmt.Sprintf("序列化VPC任务参数失败: %v", err),
 		}, nil
 	}
@@ -122,6 +131,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	if err != nil {
 		return &models.VPCResponse{
 			Success: false,
+			Code:    operation.CodeInternalError,
 			Message: fmt.Sprintf("提交工作流失败: %v", err),
 		}, nil
 	}
@@ -130,6 +140,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 
 	return &models.VPCResponse{
 		Success:    true,
+		Code:       operation.CodeSuccess,
 		Message:    "VPC创建工作流已启动",
 		VPCID:      vpcID,
 		WorkflowID: workflowID,
@@ -164,8 +175,13 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	}
 
 	if err := o.subnetDAO.Create(ctx, subnetResource); err != nil {
+		code := operation.CodeInternalError
+		if isUniqueViolation(err) {
+			code = operation.CodeResourceAlreadyExists
+		}
 		return &models.SubnetResponse{
 			Success: false,
+			Code:    code,
 			Message: fmt.Sprintf("创建子网资源记录失败: %v", err),
 		}, nil
 	}
@@ -174,6 +190,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	if err != nil {
 		return &models.SubnetResponse{
 			Success: false,
+			Code:    operation.CodeInternalError,
 			Message: fmt.Sprintf("序列化子网任务参数失败: %v", err),
 		}, nil
 	}
@@ -190,6 +207,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	if err != nil {
 		return &models.SubnetResponse{
 			Success: false,
+			Code:    operation.CodeInternalError,
 			Message: fmt.Sprintf("提交工作流失败: %v", err),
 		}, nil
 	}
@@ -198,6 +216,7 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 
 	return &models.SubnetResponse{
 		Success:    true,
+		Code:       operation.CodeSuccess,
 		Message:    "子网创建工作流已启动",
 		SubnetID:   subnetID,
 		WorkflowID: workflowID,
@@ -278,16 +297,20 @@ func (o *AZOrchestrator) GetSubnetStatus(ctx context.Context, subnetName string)
 	}, nil
 }
 
+// DeleteVPC 幂等改造（设计文档 7.10/11.6 节）：删除的业务目标是"资源不存在"（ensure-absent）。
+// 资源不存在、正在删除或已删除时均返回成功；重复 DELETE 与 Saga 重复补偿因此收敛到同一终态。
 func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 	vpc, err := o.vpcDAO.GetByName(ctx, vpcName, o.az)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("VPC不存在: %s", vpcName)
+		logger.InfoContext(ctx, "VPC不存在，删除视为成功（ensure-absent）", "az", o.az, "vpcName", vpcName)
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("查询VPC失败: %v", err)
 	}
-	if vpc.Status != models.ResourceStatusRunning {
-		return fmt.Errorf("VPC状态不是running，无法删除")
+	if vpc.Status == models.ResourceStatusDeleting || vpc.Status == models.ResourceStatusDeleted {
+		logger.InfoContext(ctx, "VPC已在删除中或已删除，删除视为成功（ensure-absent）", "az", o.az, "vpcName", vpcName, "status", vpc.Status)
+		return nil
 	}
 
 	subnetCount, err := o.vpcDAO.CountSubnets(ctx, vpcName, o.az)
@@ -314,16 +337,19 @@ func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 	return nil
 }
 
+// DeleteSubnet 幂等改造：ensure-absent，重复删除收敛到成功。
 func (o *AZOrchestrator) DeleteSubnet(ctx context.Context, subnetName string) error {
 	subnet, err := o.subnetDAO.GetByName(ctx, subnetName, o.az)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("子网不存在: %s", subnetName)
+		logger.InfoContext(ctx, "子网不存在，删除视为成功（ensure-absent）", "az", o.az, "subnetName", subnetName)
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("查询子网失败: %v", err)
 	}
-	if subnet.Status != models.ResourceStatusRunning {
-		return fmt.Errorf("子网状态不是running，无法删除")
+	if subnet.Status == models.ResourceStatusDeleting || subnet.Status == models.ResourceStatusDeleted {
+		logger.InfoContext(ctx, "子网已在删除中或已删除，删除视为成功（ensure-absent）", "az", o.az, "subnetName", subnetName, "status", subnet.Status)
+		return nil
 	}
 
 	if err := o.subnetDAO.UpdateStatus(ctx, subnet.ID, models.ResourceStatusDeleting, ""); err != nil {
@@ -346,16 +372,19 @@ func (o *AZOrchestrator) GetVPCByID(ctx context.Context, vpcID string) (*models.
 	return o.vpcDAO.GetByID(ctx, vpcID)
 }
 
+// DeleteVPCByID 幂等改造：ensure-absent，重复删除收敛到成功。
 func (o *AZOrchestrator) DeleteVPCByID(ctx context.Context, vpcID string) error {
 	vpc, err := o.vpcDAO.GetByID(ctx, vpcID)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("VPC不存在: %s", vpcID)
+		logger.InfoContext(ctx, "VPC不存在，删除视为成功（ensure-absent）", "az", o.az, "vpcID", vpcID)
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("查询VPC失败: %v", err)
 	}
-	if vpc.Status != models.ResourceStatusRunning {
-		return fmt.Errorf("VPC状态不是running，无法删除")
+	if vpc.Status == models.ResourceStatusDeleting || vpc.Status == models.ResourceStatusDeleted {
+		logger.InfoContext(ctx, "VPC已在删除中或已删除，删除视为成功（ensure-absent）", "az", o.az, "vpcID", vpcID, "status", vpc.Status)
+		return nil
 	}
 
 	subnetCount, err := o.vpcDAO.CountSubnetsByVPCID(ctx, vpcID)
@@ -390,16 +419,19 @@ func (o *AZOrchestrator) GetSubnetByID(ctx context.Context, subnetID string) (*m
 	return o.subnetDAO.GetByID(ctx, subnetID)
 }
 
+// DeleteSubnetByID 幂等改造：ensure-absent，重复删除收敛到成功。
 func (o *AZOrchestrator) DeleteSubnetByID(ctx context.Context, subnetID string) error {
 	subnet, err := o.subnetDAO.GetByID(ctx, subnetID)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("子网不存在: %s", subnetID)
+		logger.InfoContext(ctx, "子网不存在，删除视为成功（ensure-absent）", "az", o.az, "subnetID", subnetID)
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("查询子网失败: %v", err)
 	}
-	if subnet.Status != models.ResourceStatusRunning {
-		return fmt.Errorf("子网状态不是running，无法删除")
+	if subnet.Status == models.ResourceStatusDeleting || subnet.Status == models.ResourceStatusDeleted {
+		logger.InfoContext(ctx, "子网已在删除中或已删除，删除视为成功（ensure-absent）", "az", o.az, "subnetID", subnetID, "status", subnet.Status)
+		return nil
 	}
 
 	if err := o.subnetDAO.UpdateStatus(ctx, subnetID, models.ResourceStatusDeleted, ""); err != nil {
@@ -653,15 +685,15 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 
 	vpc, err := o.vpcDAO.GetByName(ctx, req.VPC1.VPCName, o.az)
 	if err == sql.ErrNoRows {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("VPC不存在: %s", req.VPC1.VPCName)}, nil
+		return &models.PCCNResponse{Success: false, Code: operation.CodeInvalidRequest, Message: fmt.Sprintf("VPC不存在: %s", req.VPC1.VPCName)}, nil
 	}
 	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("查询VPC失败: %v", err)}, nil
+		return &models.PCCNResponse{Success: false, Code: operation.CodeInternalError, Message: fmt.Sprintf("查询VPC失败: %v", err)}, nil
 	}
 
 	subnets, err := o.subnetDAO.ListByVPCID(ctx, vpc.ID)
 	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("获取子网列表失败: %v", err)}, nil
+		return &models.PCCNResponse{Success: false, Code: operation.CodeInternalError, Message: fmt.Sprintf("获取子网列表失败: %v", err)}, nil
 	}
 
 	var subnetCIDRs []string
@@ -682,13 +714,31 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 		TotalTasks:    0,
 	}
 
-	if err := o.pccnDAO.Create(ctx, pccnResource); err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("创建PCCN资源记录失败: %v", err)}, nil
+	// 幂等改造（设计文档 7.6 节）：DAO 返回数据库实际持久化的 ID 与判定结果；
+	// 同名资源处于 pending/creating/running 时返回冲突，不再创建孤儿 Task。
+	actualID, outcome, err := o.pccnDAO.Create(ctx, pccnResource)
+	if err != nil {
+		return &models.PCCNResponse{Success: false, Code: operation.CodeInternalError, Message: fmt.Sprintf("创建PCCN资源记录失败: %v", err)}, nil
 	}
+	if outcome == dao.CreateConflict {
+		return &models.PCCNResponse{
+			Success: false,
+			Code:    operation.CodeResourceAlreadyExists,
+			Message: fmt.Sprintf("PCCN %s 已存在且正在创建或运行中（resource_id: %s）", req.PCCNName, actualID),
+			PCCNID:  actualID,
+		}, nil
+	}
+	if outcome == dao.CreateReused {
+		// 旧失败/已删除资源被重置复用：清理历史任务，避免与 uq_tasks_resource_order 冲突
+		if err := o.taskDAO.DeleteByResourceID(ctx, actualID); err != nil {
+			return &models.PCCNResponse{Success: false, Code: operation.CodeInternalError, Message: fmt.Sprintf("清理历史PCCN任务失败: %v", err)}, nil
+		}
+	}
+	pccnID = actualID
 
 	params, err := o.buildPCCNTaskParams(pccnID, req, subnetCIDRs)
 	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("序列化PCCN任务参数失败: %v", err)}, nil
+		return &models.PCCNResponse{Success: false, Code: operation.CodeInternalError, Message: fmt.Sprintf("序列化PCCN任务参数失败: %v", err)}, nil
 	}
 
 	workflowID, err := o.workflowMgr.SubmitWorkflow(ctx, orchestration.WorkflowDef{
@@ -701,7 +751,7 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 		},
 	})
 	if err != nil {
-		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("提交工作流失败: %v", err)}, nil
+		return &models.PCCNResponse{Success: false, Code: operation.CodeInternalError, Message: fmt.Sprintf("提交工作流失败: %v", err)}, nil
 	}
 
 	logger.InfoContext(ctx, "PCCN创建流程启动成功",
@@ -713,6 +763,7 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 
 	return &models.PCCNResponse{
 		Success: true,
+		Code:    operation.CodeSuccess,
 		Message: "PCCN创建工作流已启动",
 		PCCNID:  pccnID,
 		TxID:    workflowID,
@@ -769,20 +820,22 @@ func (o *AZOrchestrator) GetPCCNStatus(ctx context.Context, pccnName string) (*m
 	}, nil
 }
 
+// DeletePCCN 幂等改造（设计文档 7.10/11.6 节）：ensure-absent。
+// PCCN 物理删除记录；资源不存在或删除中（上次删除在状态更新后中断）均继续收敛到不存在。
 func (o *AZOrchestrator) DeletePCCN(ctx context.Context, pccnName string) error {
 	pccn, err := o.pccnDAO.GetByName(ctx, pccnName, o.az)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("PCCN不存在: %s", pccnName)
+		logger.InfoContext(ctx, "PCCN不存在，删除视为成功（ensure-absent）", "az", o.az, "pccnName", pccnName)
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("查询PCCN失败: %v", err)
 	}
-	if pccn.Status != models.ResourceStatusRunning {
-		return fmt.Errorf("PCCN状态不是running，无法删除")
-	}
 
-	if err := o.pccnDAO.UpdateStatus(ctx, pccn.ID, models.ResourceStatusDeleting, ""); err != nil {
-		return fmt.Errorf("更新PCCN状态失败: %v", err)
+	if pccn.Status != models.ResourceStatusDeleting {
+		if err := o.pccnDAO.UpdateStatus(ctx, pccn.ID, models.ResourceStatusDeleting, ""); err != nil {
+			return fmt.Errorf("更新PCCN状态失败: %v", err)
+		}
 	}
 	if err := o.pccnDAO.DeleteByName(ctx, pccnName, o.az); err != nil {
 		return fmt.Errorf("删除PCCN记录失败: %v", err)
@@ -847,4 +900,10 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// isUniqueViolation 判断 PostgreSQL 唯一约束冲突（SQLSTATE 23505）。
+func isUniqueViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "23505"
 }

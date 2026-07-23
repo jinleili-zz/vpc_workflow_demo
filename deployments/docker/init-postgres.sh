@@ -17,6 +17,8 @@ EOSQL
 SAGA_FILE="/migrations/saga.sql"
 MIGRATION_FILE="/migrations/001_init_postgresql.sql"
 PCCN_FILE="/migrations/004_create_pccn_tables.sql"
+OPERATIONS_FILE="/migrations/005_create_orchestration_operations.sql"
+TASKS_UNIQUE_FILE="/migrations/006_add_tasks_resource_order_unique.sql"
 
 for DB in top_nsp_vpc top_nsp_vfw nsp_cn_beijing_1a_vpc nsp_cn_beijing_1a_vfw nsp_cn_beijing_1b_vpc nsp_cn_beijing_1b_vfw nsp_cn_shanghai_1a_vpc nsp_cn_shanghai_1a_vfw; do
     echo "Running migrations on database: $DB"
@@ -28,6 +30,12 @@ for DB in top_nsp_vpc top_nsp_vfw nsp_cn_beijing_1a_vpc nsp_cn_beijing_1a_vfw ns
     fi
     if [ -f "$PCCN_FILE" ]; then
         psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$DB" -f "$PCCN_FILE" || true
+    fi
+    if [ -f "$OPERATIONS_FILE" ]; then
+        psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$DB" -f "$OPERATIONS_FILE" || true
+    fi
+    if [ -f "$TASKS_UNIQUE_FILE" ]; then
+        psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$DB" -f "$TASKS_UNIQUE_FILE" || true
     fi
 done
 

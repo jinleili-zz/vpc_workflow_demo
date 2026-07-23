@@ -12,6 +12,7 @@ import (
 
 	"workflow_qoder/internal/bootstrap"
 	"workflow_qoder/internal/config"
+	"workflow_qoder/internal/operation"
 	"workflow_qoder/internal/top/api"
 	"workflow_qoder/internal/top/orchestrator"
 	"workflow_qoder/internal/top/registry"
@@ -156,8 +157,16 @@ func main() {
 	// Initialize orchestrator with SAGA engine
 	orch := orchestrator.NewOrchestrator(ctx, reg, topDB, components.SagaEngine, components.TracedHTTP, components.Signer)
 
+	// 幂等 Operation 服务（设计文档 10.1 节）；数据库不可用时降级为非幂等路径
+	var opService *operation.Service
+	if topDB != nil {
+		opService = operation.NewService(topDB, "top-nsp-vpc")
+	} else {
+		logger.Platform().Warn("PostgreSQL 不可用，北向幂等键将不生效")
+	}
+
 	// Initialize API server
-	server := api.NewServer(reg, orch, components.TracedHTTP, components.Signer)
+	server := api.NewServer(reg, orch, components.TracedHTTP, components.Signer, opService)
 
 	// Setup middlewares (trace, auth, logger) BEFORE routes
 	components.SetupGinMiddlewares(server.Engine())

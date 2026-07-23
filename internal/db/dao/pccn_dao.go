@@ -17,7 +17,23 @@ func NewPCCNDAO(db *sql.DB) *PCCNDAO {
 	return &PCCNDAO{db: db}
 }
 
-func (d *PCCNDAO) Create(ctx context.Context, pccn *models.PCCNResource) error {
+// CreateOutcome 描述 PCCN 资源创建/复用的判定结果。
+type CreateOutcome int
+
+const (
+	// CreateInserted 新插入了资源行。
+	CreateInserted CreateOutcome = iota
+	// CreateReused 旧行处于 failed/deleted 终态，被重置为 pending 复用（返回旧行 ID）。
+	CreateReused
+	// CreateConflict 同名资源处于 pending/creating/running，存在进行中的工作流，
+	// 调用方必须返回冲突响应，不得再创建 Task（否则产生孤儿/重复 Task）。
+	CreateConflict
+)
+
+// Create 幂等改造（设计文档 7.6 节）：
+// 返回数据库实际持久化的 resource_id 与判定结果，调用方必须使用该 ID 创建后续 Task，
+// 禁止继续使用本次请求中新生成的 ID（旧实现会导致 Task 与资源失联）。
+func (d *PCCNDAO) Create(ctx context.Context, pccn *models.PCCNResource) (string, CreateOutcome, error) {
 	subnetsJSON, _ := json.Marshal(pccn.Subnets)
 	query := `
 		INSERT INTO pccn_resources (
@@ -27,14 +43,35 @@ func (d *PCCNDAO) Create(ctx context.Context, pccn *models.PCCNResource) error {
 		ON CONFLICT (pccn_name, az) DO UPDATE SET
 			status = EXCLUDED.status,
 			subnets = EXCLUDED.subnets,
+			total_tasks = 0,
+			completed_tasks = 0,
+			failed_tasks = 0,
 			updated_at = CURRENT_TIMESTAMP
-		WHERE pccn_resources.status IN ('pending', 'failed', 'deleted')
+		WHERE pccn_resources.status IN ('failed', 'deleted')
+		RETURNING id
 	`
-	_, err := d.db.ExecContext(ctx, query,
+	var actualID string
+	err := d.db.QueryRowContext(ctx, query,
 		pccn.ID, pccn.PCCNName, pccn.VPCName, pccn.VPCRegion, pccn.PeerVPCName, pccn.PeerVPCRegion, pccn.AZ,
 		pccn.Status, subnetsJSON, pccn.TotalTasks, pccn.CompletedTasks, pccn.FailedTasks,
-	)
-	return err
+	).Scan(&actualID)
+	if err == nil {
+		if actualID == pccn.ID {
+			return actualID, CreateInserted, nil
+		}
+		// DO UPDATE 不更新 id 列，返回旧行 ID 即表示复用
+		return actualID, CreateReused, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", CreateConflict, err
+	}
+
+	// UPSERT 的 WHERE 条件不满足（0 行受影响）：同名资源正在创建或运行中
+	existing, getErr := d.GetByName(ctx, pccn.PCCNName, pccn.AZ)
+	if getErr != nil {
+		return "", CreateConflict, getErr
+	}
+	return existing.ID, CreateConflict, nil
 }
 
 func (d *PCCNDAO) GetByID(ctx context.Context, id string) (*models.PCCNResource, error) {

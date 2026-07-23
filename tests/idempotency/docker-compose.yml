@@ -1,0 +1,35 @@
+# 幂等测试专用依赖环境：单实例 PostgreSQL + 单实例 Redis
+# 仅供 scripts/test-idempotency.sh 与 tests/idempotency 使用。
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: idem-postgres
+    environment:
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_top
+    ports:
+      - "15433:5432"
+    volumes:
+      - ./init-test-db.sh:/docker-entrypoint-initdb.d/init-test-db.sh
+      - ../../internal/db/migrations/001_init_postgresql.sql:/migrations/001_init_postgresql.sql
+      - ../../internal/db/migrations/004_create_pccn_tables.sql:/migrations/004_create_pccn_tables.sql
+      - ../../internal/db/migrations/005_create_orchestration_operations.sql:/migrations/005_create_orchestration_operations.sql
+      - ../../internal/db/migrations/006_add_tasks_resource_order_unique.sql:/migrations/006_add_tasks_resource_order_unique.sql
+      - ../../deployments/docker/saga-migration.sql:/migrations/saga.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nsp_user -d nsp_top"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    container_name: idem-redis
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30

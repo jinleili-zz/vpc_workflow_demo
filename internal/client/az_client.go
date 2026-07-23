@@ -86,8 +86,10 @@ func (c *AZNSPClient) CreateVPC(ctx context.Context, azAddr string, req *models.
 	return &vpcResp, nil
 }
 
-// CreateSubnet 在指定AZ创建子网
-func (c *AZNSPClient) CreateSubnet(ctx context.Context, azAddr string, req *models.SubnetRequest) (*models.SubnetResponse, error) {
+// CreateSubnet 在指定AZ创建子网。
+// idempotencyKey 非空时透传 X-Idempotency-Key：Top 侧相同 Operation 的重试
+// 会在 AZ 命中同一 Operation 并重放第一次响应，避免重复创建子网（设计文档 7.2/11.2 节）。
+func (c *AZNSPClient) CreateSubnet(ctx context.Context, azAddr string, req *models.SubnetRequest, idempotencyKey string) (*models.SubnetResponse, error) {
 	url := fmt.Sprintf("%s/api/v1/subnet", azAddr)
 
 	body, err := json.Marshal(req)
@@ -100,6 +102,9 @@ func (c *AZNSPClient) CreateSubnet(ctx context.Context, azAddr string, req *mode
 		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		httpReq.Header.Set("X-Idempotency-Key", idempotencyKey)
+	}
 
 	resp, err := c.do(httpReq)
 

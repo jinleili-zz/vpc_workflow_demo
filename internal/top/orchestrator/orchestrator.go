@@ -161,6 +161,7 @@ func (o *Orchestrator) CreateRegionVPC(ctx context.Context, req *models.VPCReque
 	return &models.VPCResponse{
 		Success:    true,
 		Message:    fmt.Sprintf("VPC创建任务已提交，事务ID: %s", txID),
+		VPCID:      vpcID,
 		WorkflowID: txID,
 	}, nil
 }
@@ -170,8 +171,9 @@ func (o *Orchestrator) QuerySagaTransaction(ctx context.Context, txID string) (*
 	return o.sagaEngine.Query(ctx, txID)
 }
 
-// CreateAZSubnet 创建AZ级子网（路由到指定AZ）
-func (o *Orchestrator) CreateAZSubnet(ctx context.Context, req *models.SubnetRequest) (*models.SubnetResponse, error) {
+// CreateAZSubnet 创建AZ级子网（路由到指定AZ）。
+// idempotencyKey 由 Top 层 Operation 派生，使 Top 重试在 AZ 侧命中同一 Operation。
+func (o *Orchestrator) CreateAZSubnet(ctx context.Context, req *models.SubnetRequest, idempotencyKey string) (*models.SubnetResponse, error) {
 	logger.InfoContext(ctx, "开始创建AZ级子网", "subnet_name", req.SubnetName, "region", req.Region, "az", req.AZ)
 
 	az, err := o.registry.GetAZ(ctx, req.Region, req.AZ)
@@ -191,7 +193,7 @@ func (o *Orchestrator) CreateAZSubnet(ctx context.Context, req *models.SubnetReq
 	}
 
 	logger.InfoContext(ctx, "向AZ发送子网创建请求", "az_id", az.ID)
-	resp, err := o.azClient.CreateSubnet(ctx, az.NSPAddr, req)
+	resp, err := o.azClient.CreateSubnet(ctx, az.NSPAddr, req, idempotencyKey)
 	if err != nil {
 		return &models.SubnetResponse{
 			Success: false,

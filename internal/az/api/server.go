@@ -14,6 +14,7 @@ import (
 	"workflow_qoder/internal/az/orchestrator"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinleili-zz/nsp-platform/auth"
@@ -25,6 +26,7 @@ import (
 type Server struct {
 	cfg          *config.NSPConfig
 	orchestrator *orchestrator.AZOrchestrator
+	opService    *operation.Service
 	router       *gin.Engine
 	db           *sql.DB
 }
@@ -58,6 +60,7 @@ func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, inspector taskque
 	server := &Server{
 		cfg:          cfg,
 		orchestrator: orch,
+		opService:    operation.NewService(db, "az-nsp-vpc"),
 		router:       router,
 		db:           db,
 	}
@@ -114,6 +117,9 @@ func (s *Server) setupRoutes() {
 		api.POST("/task/replay/:task_id", s.replayTask)
 		api.GET("/task/:task_id", s.getTaskByID)
 
+		// 幂等 Operation 统一查询入口（设计文档 11.1 节）
+		api.GET("/operations/:operation_id", s.opService.GetOperation)
+
 		api.GET("/health", s.health)
 	}
 }
@@ -123,22 +129,40 @@ func (s *Server) createVPC(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.VPCResponse{
 			Success: false,
+			Code:    operation.CodeInvalidRequest,
 			Message: fmt.Sprintf("请求参数错误: %v", err),
 		})
 		return
 	}
 
-	ctx := c.Request.Context()
-	resp, err := s.orchestrator.CreateVPC(ctx, &req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.VPCResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建VPC失败: %v", err),
-		})
-		return
+	// Saga Step 重试携带稳定的 X-Idempotency-Key（step.ID）与 X-Saga-Transaction-Id，
+	// 相同 Step 重试将命中同一 AZ Operation 并重放第一次响应（设计文档 11.2 节）。
+	if sagaTxID := c.GetHeader(operation.HeaderSagaTransactionID); sagaTxID != "" {
+		logger.InfoContext(c.Request.Context(), "收到Saga VPC创建请求",
+			"saga_tx_id", sagaTxID, "idempotency_key", c.GetHeader(operation.HeaderIdempotencyKey))
 	}
 
-	c.JSON(http.StatusOK, resp)
+	s.opService.HandleCreate(c, operation.BeginCommand{
+		CallerScope:       operation.CallerScopeFromRequest(c, "top-nsp-vpc"),
+		RouteScope:        "POST /api/v1/vpc",
+		OperationType:     "create_vpc",
+		IdempotencyKey:    c.GetHeader(operation.HeaderIdempotencyKey),
+		RootOperationID:   c.GetHeader(operation.HeaderRootOperationID),
+		ParentOperationID: c.GetHeader(operation.HeaderParentOperationID),
+		Request:           req,
+	}, func(ctx context.Context, op *operation.Operation) (int, any) {
+		resp, err := s.orchestrator.CreateVPC(ctx, &req)
+		if err != nil {
+			return http.StatusInternalServerError, &models.VPCResponse{
+				Success:     false,
+				Code:        operation.CodeInternalError,
+				OperationID: op.OperationID,
+				Message:     fmt.Sprintf("创建VPC失败: %v", err),
+			}
+		}
+		resp.OperationID = op.OperationID
+		return http.StatusOK, resp
+	})
 }
 
 func (s *Server) getVPCStatus(c *gin.Context) {
@@ -165,6 +189,7 @@ func (s *Server) deleteVPC(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
+			"code":    operation.CodeInternalError,
 			"message": err.Error(),
 		})
 		return
@@ -172,6 +197,7 @@ func (s *Server) deleteVPC(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,
+		"code":     operation.CodeSuccess,
 		"message":  "VPC已成功删除",
 		"vpc_name": vpcName,
 		"az":       s.orchestrator.GetAZ(),
@@ -183,22 +209,33 @@ func (s *Server) createSubnet(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.SubnetResponse{
 			Success: false,
+			Code:    operation.CodeInvalidRequest,
 			Message: fmt.Sprintf("请求参数错误: %v", err),
 		})
 		return
 	}
 
-	ctx := c.Request.Context()
-	resp, err := s.orchestrator.CreateSubnet(ctx, &req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建子网失败: %v", err),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, resp)
+	s.opService.HandleCreate(c, operation.BeginCommand{
+		CallerScope:       operation.CallerScopeFromRequest(c, "top-nsp-vpc"),
+		RouteScope:        "POST /api/v1/subnet",
+		OperationType:     "create_subnet",
+		IdempotencyKey:    c.GetHeader(operation.HeaderIdempotencyKey),
+		RootOperationID:   c.GetHeader(operation.HeaderRootOperationID),
+		ParentOperationID: c.GetHeader(operation.HeaderParentOperationID),
+		Request:           req,
+	}, func(ctx context.Context, op *operation.Operation) (int, any) {
+		resp, err := s.orchestrator.CreateSubnet(ctx, &req)
+		if err != nil {
+			return http.StatusInternalServerError, &models.SubnetResponse{
+				Success:     false,
+				Code:        operation.CodeInternalError,
+				OperationID: op.OperationID,
+				Message:     fmt.Sprintf("创建子网失败: %v", err),
+			}
+		}
+		resp.OperationID = op.OperationID
+		return http.StatusOK, resp
+	})
 }
 
 func (s *Server) getSubnetStatus(c *gin.Context) {
@@ -225,6 +262,7 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
+			"code":    operation.CodeInternalError,
 			"message": err.Error(),
 		})
 		return
@@ -232,6 +270,7 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
+		"code":    operation.CodeSuccess,
 		"message": "子网已成功删除",
 	})
 }
@@ -283,6 +322,7 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
+			"code":    operation.CodeInternalError,
 			"message": err.Error(),
 		})
 		return
@@ -290,6 +330,7 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 
 	resp := gin.H{
 		"success": true,
+		"code":    operation.CodeSuccess,
 		"message": "VPC已成功删除",
 		"az":      s.orchestrator.GetAZ(),
 	}
@@ -345,6 +386,7 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
+			"code":    operation.CodeInternalError,
 			"message": err.Error(),
 		})
 		return
@@ -352,6 +394,7 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
+		"code":    operation.CodeSuccess,
 		"message": "子网已成功删除",
 	})
 }
@@ -433,33 +476,47 @@ func (s *Server) health(c *gin.Context) {
 // =====================================================
 
 func (s *Server) createPCCN(c *gin.Context) {
-	ctx := c.Request.Context()
-
 	var req models.PCCNRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("请求参数错误: %v", err),
+		c.JSON(http.StatusBadRequest, models.PCCNResponse{
+			Success: false,
+			Code:    operation.CodeInvalidRequest,
+			Message: fmt.Sprintf("请求参数错误: %v", err),
 		})
 		return
 	}
 
-	logger.InfoContext(ctx, "收到PCCN创建请求", "pccn_name", req.PCCNName, "az", s.cfg.AZ)
-
-	resp, err := s.orchestrator.CreatePCCN(ctx, &req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("创建PCCN失败: %v", err),
-		})
-		return
-	}
-
-	if resp.Success {
-		c.JSON(http.StatusOK, resp)
+	if sagaTxID := c.GetHeader(operation.HeaderSagaTransactionID); sagaTxID != "" {
+		logger.InfoContext(c.Request.Context(), "收到Saga PCCN创建请求",
+			"saga_tx_id", sagaTxID, "idempotency_key", c.GetHeader(operation.HeaderIdempotencyKey), "pccn_name", req.PCCNName, "az", s.cfg.AZ)
 	} else {
-		c.JSON(http.StatusBadRequest, resp)
+		logger.InfoContext(c.Request.Context(), "收到PCCN创建请求", "pccn_name", req.PCCNName, "az", s.cfg.AZ)
 	}
+
+	s.opService.HandleCreate(c, operation.BeginCommand{
+		CallerScope:       operation.CallerScopeFromRequest(c, "top-nsp-vpc"),
+		RouteScope:        "POST /api/v1/pccn",
+		OperationType:     "create_pccn",
+		IdempotencyKey:    c.GetHeader(operation.HeaderIdempotencyKey),
+		RootOperationID:   c.GetHeader(operation.HeaderRootOperationID),
+		ParentOperationID: c.GetHeader(operation.HeaderParentOperationID),
+		Request:           req,
+	}, func(ctx context.Context, op *operation.Operation) (int, any) {
+		resp, err := s.orchestrator.CreatePCCN(ctx, &req)
+		if err != nil {
+			return http.StatusInternalServerError, &models.PCCNResponse{
+				Success:     false,
+				Code:        operation.CodeInternalError,
+				OperationID: op.OperationID,
+				Message:     fmt.Sprintf("创建PCCN失败: %v", err),
+			}
+		}
+		resp.OperationID = op.OperationID
+		if resp.Success {
+			return http.StatusOK, resp
+		}
+		return http.StatusBadRequest, resp
+	})
 }
 
 func (s *Server) getPccnStatus(c *gin.Context) {
@@ -501,6 +558,7 @@ func (s *Server) deletePCCN(c *gin.Context) {
 	if err := s.orchestrator.DeletePCCN(ctx, pccnName); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
+			"code":    operation.CodeInternalError,
 			"message": err.Error(),
 		})
 		return
@@ -508,6 +566,7 @@ func (s *Server) deletePCCN(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
+		"code":    operation.CodeSuccess,
 		"message": "PCCN删除成功",
 	})
 }

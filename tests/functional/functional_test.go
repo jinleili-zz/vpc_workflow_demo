@@ -276,10 +276,23 @@ func TestTaskDAOBatchAndStatus(t *testing.T) {
 		t.Errorf("task-001 status=%s queuedAt=%v, want queued with timestamp", t1.Status, t1.QueuedAt)
 	}
 
-	taskDAO.UpdateResult(ctx, "task-001", models.TaskStatusCompleted, map[string]string{"result": "ok"}, "")
+	applied, err := taskDAO.UpdateResult(ctx, "task-001", models.TaskStatusCompleted, map[string]string{"result": "ok"}, "")
+	if err != nil || !applied {
+		t.Errorf("task-001 UpdateResult applied=%v err=%v, want applied=true", applied, err)
+	}
 	t1b, _ := taskDAO.GetByID(ctx, "task-001")
 	if t1b.Status != models.TaskStatusCompleted || t1b.CompletedAt == nil {
 		t.Errorf("task-001 status=%s completedAt=%v, want completed with timestamp", t1b.Status, t1b.CompletedAt)
+	}
+
+	// CAS：终态任务再次 UpdateResult 必须 applied=false，不得覆盖
+	applied2, err := taskDAO.UpdateResult(ctx, "task-001", models.TaskStatusFailed, nil, "duplicate")
+	if err != nil || applied2 {
+		t.Errorf("task-001 duplicate UpdateResult applied=%v err=%v, want applied=false", applied2, err)
+	}
+	t1c, _ := taskDAO.GetByID(ctx, "task-001")
+	if t1c.Status != models.TaskStatusCompleted {
+		t.Errorf("task-001 status=%s after duplicate UpdateResult, want completed", t1c.Status)
 	}
 
 	// 完成后下一个 pending 应该是 task-002

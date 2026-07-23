@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
 	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 	"workflow_qoder/internal/top/orchestrator"
 	"workflow_qoder/internal/top/registry"
 
@@ -18,16 +20,18 @@ import (
 type Server struct {
 	registry     *registry.Registry
 	orchestrator *orchestrator.Orchestrator
+	opService    *operation.Service
 	signedHTTP   *client.SignedTracedClient
 	router       *gin.Engine
 }
 
-func NewServer(registry *registry.Registry, orchestrator *orchestrator.Orchestrator, tracedHTTP *trace.TracedClient, signer *auth.Signer) *Server {
+func NewServer(registry *registry.Registry, orchestrator *orchestrator.Orchestrator, tracedHTTP *trace.TracedClient, signer *auth.Signer, opService *operation.Service) *Server {
 	router := gin.New()
 
 	server := &Server{
 		registry:     registry,
 		orchestrator: orchestrator,
+		opService:    opService,
 		signedHTTP:   client.NewSignedTracedClient(tracedHTTP, signer),
 		router:       router,
 	}
@@ -68,7 +72,29 @@ func (s *Server) SetupRoutes() {
 		api.GET("/pccn/:pccn_name/status", s.getPCCNStatus)
 		api.GET("/pccns", s.listPCCNs)
 		api.DELETE("/pccn/:pccn_name", s.deletePCCN)
+
+		// 幂等 Operation 统一查询入口（设计文档 11.1 节）
+		api.GET("/operations/:operation_id", s.getOperation)
 	}
+}
+
+// getOperation 查询幂等 Operation；opService 未配置（数据库不可用）时返回 503。
+func (s *Server) getOperation(c *gin.Context) {
+	if s.opService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "数据库未配置"})
+		return
+	}
+	s.opService.GetOperation(c)
+}
+
+// handleIdempotent 在 opService 可用时走统一幂等流程；数据库不可用时降级为直接执行。
+func (s *Server) handleIdempotent(c *gin.Context, cmd operation.BeginCommand, fn func(ctx context.Context, op *operation.Operation) (int, any)) {
+	if s.opService == nil {
+		httpCode, resp := fn(c.Request.Context(), nil)
+		c.JSON(httpCode, resp)
+		return
+	}
+	s.opService.HandleCreate(c, cmd, fn)
 }
 
 func (s *Server) Run(addr string) error {
@@ -202,22 +228,45 @@ func (s *Server) createVPC(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.VPCResponse{
 			Success: false,
+			Code:    operation.CodeInvalidRequest,
 			Message: fmt.Sprintf("请求参数错误: %v", err),
 		})
 		return
 	}
 
-	ctx := c.Request.Context()
-	resp, err := s.orchestrator.CreateRegionVPC(ctx, &req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.VPCResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建VPC失败: %v", err),
-		})
-		return
-	}
+	// 北向幂等契约（设计文档 11.1 节）：相同 Idempotency-Key + 相同请求只创建一个
+	// Operation 和一个 Saga；重复请求重放第一次的 operation_id/resource_id。
+	s.handleIdempotent(c, operation.BeginCommand{
+		CallerScope:    "northbound",
+		RouteScope:     "POST /api/v1/vpc",
+		OperationType:  "create_vpc",
+		IdempotencyKey: c.GetHeader("Idempotency-Key"),
+		Request:        req,
+	}, func(ctx context.Context, op *operation.Operation) (int, any) {
+		resp, err := s.orchestrator.CreateRegionVPC(ctx, &req)
+		if err != nil {
+			return http.StatusInternalServerError, &models.VPCResponse{
+				Success:     false,
+				Code:        operation.CodeInternalError,
+				OperationID: operationIDOf(op),
+				Message:     fmt.Sprintf("创建VPC失败: %v", err),
+			}
+		}
+		resp.OperationID = operationIDOf(op)
+		if resp.Success {
+			resp.Code = operation.CodeSuccess
+		} else {
+			resp.Code = operation.CodeInternalError
+		}
+		return http.StatusOK, resp
+	})
+}
 
-	c.JSON(http.StatusOK, resp)
+func operationIDOf(op *operation.Operation) string {
+	if op == nil {
+		return ""
+	}
+	return op.OperationID
 }
 
 func (s *Server) listVPCs(c *gin.Context) {
@@ -426,22 +475,42 @@ func (s *Server) createSubnet(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.SubnetResponse{
 			Success: false,
+			Code:    operation.CodeInvalidRequest,
 			Message: fmt.Sprintf("请求参数错误: %v", err),
 		})
 		return
 	}
 
-	ctx := c.Request.Context()
-	resp, err := s.orchestrator.CreateAZSubnet(ctx, &req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建子网失败: %v", err),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, resp)
+	s.handleIdempotent(c, operation.BeginCommand{
+		CallerScope:    "northbound",
+		RouteScope:     "POST /api/v1/subnet",
+		OperationType:  "create_subnet",
+		IdempotencyKey: c.GetHeader("Idempotency-Key"),
+		Request:        req,
+	}, func(ctx context.Context, op *operation.Operation) (int, any) {
+		// 派生 AZ 侧幂等键：Top 重试同一 Operation 时，AZ 命中同一 Operation 并重放，
+		// 避免"AZ 已创建子网但 Top 未收到响应"后的重复创建（设计文档 7.2 节）。
+		azIdempotencyKey := ""
+		if op != nil {
+			azIdempotencyKey = "subnet:" + op.OperationID
+		}
+		resp, err := s.orchestrator.CreateAZSubnet(ctx, &req, azIdempotencyKey)
+		if err != nil {
+			return http.StatusInternalServerError, &models.SubnetResponse{
+				Success:     false,
+				Code:        operation.CodeInternalError,
+				OperationID: operationIDOf(op),
+				Message:     fmt.Sprintf("创建子网失败: %v", err),
+			}
+		}
+		resp.OperationID = operationIDOf(op)
+		if resp.Success {
+			resp.Code = operation.CodeSuccess
+		} else {
+			resp.Code = operation.CodeInternalError
+		}
+		return http.StatusOK, resp
+	})
 }
 
 func (s *Server) getSubnetStatus(c *gin.Context) {
@@ -611,27 +680,36 @@ func (s *Server) createPCCN(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.PCCNResponse{
 			Success: false,
+			Code:    operation.CodeInvalidRequest,
 			Message: fmt.Sprintf("请求参数错误: %v", err),
 		})
 		return
 	}
 
-	ctx := c.Request.Context()
-	resp, err := s.orchestrator.CreatePCCN(ctx, &req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.PCCNResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建PCCN失败: %v", err),
-		})
-		return
-	}
-
-	if !resp.Success {
-		c.JSON(http.StatusBadRequest, resp)
-		return
-	}
-
-	c.JSON(http.StatusOK, resp)
+	s.handleIdempotent(c, operation.BeginCommand{
+		CallerScope:    "northbound",
+		RouteScope:     "POST /api/v1/pccn",
+		OperationType:  "create_pccn",
+		IdempotencyKey: c.GetHeader("Idempotency-Key"),
+		Request:        req,
+	}, func(ctx context.Context, op *operation.Operation) (int, any) {
+		resp, err := s.orchestrator.CreatePCCN(ctx, &req)
+		if err != nil {
+			return http.StatusInternalServerError, &models.PCCNResponse{
+				Success:     false,
+				Code:        operation.CodeInternalError,
+				OperationID: operationIDOf(op),
+				Message:     fmt.Sprintf("创建PCCN失败: %v", err),
+			}
+		}
+		resp.OperationID = operationIDOf(op)
+		if resp.Success {
+			resp.Code = operation.CodeSuccess
+			return http.StatusOK, resp
+		}
+		resp.Code = operation.CodeInternalError
+		return http.StatusBadRequest, resp
+	})
 }
 
 func (s *Server) getPCCNStatus(c *gin.Context) {

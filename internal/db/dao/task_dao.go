@@ -124,6 +124,14 @@ func (d *TaskDAO) GetNextPendingTask(ctx context.Context, resourceID string) (*m
 	return task, err
 }
 
+// DeleteByResourceID 删除资源关联的全部任务。
+// 用于旧失败/已删除资源被重置复用时清理历史任务，避免与
+// uq_tasks_resource_order 唯一约束和新工作流任务冲突（设计文档 7.8 节）。
+func (d *TaskDAO) DeleteByResourceID(ctx context.Context, resourceID string) error {
+	_, err := d.db.ExecContext(ctx, `DELETE FROM tasks WHERE resource_id = $1`, resourceID)
+	return err
+}
+
 func (d *TaskDAO) GetTaskStats(ctx context.Context, resourceID string) (total, completed, failed int, err error) {
 	query := `
 		SELECT COUNT(*),
@@ -185,7 +193,12 @@ func (d *TaskDAO) UpdateRetryProgress(ctx context.Context, id string, retryCount
 	return err
 }
 
-func (d *TaskDAO) UpdateResult(ctx context.Context, id string, status models.TaskStatus, result any, errMsg string) error {
+// UpdateResult 幂等改造（设计文档 7.8/11.5 节）：
+// 终态更新使用 CAS——只有当前状态不是终态时才允许推进，
+// 返回 applied=true 表示本次调用完成了唯一一次有效状态迁移；
+// applied=false 表示任务已被并发/重复 Reply 推进到终态，
+// 调用方必须跳过计数累加和下一步发布，防止 completed_tasks 重复 +1 与重复投递。
+func (d *TaskDAO) UpdateResult(ctx context.Context, id string, status models.TaskStatus, result any, errMsg string) (bool, error) {
 	var resultJSON any
 	if result != nil {
 		resultJSON = nullableJSON(mustJSONString(result))
@@ -199,9 +212,17 @@ func (d *TaskDAO) UpdateResult(ctx context.Context, id string, status models.Tas
 		    completed_at = $4,
 		    updated_at = $4
 		WHERE id = $5
+		  AND status NOT IN ('completed', 'failed', 'cancelled')
 	`
-	_, err := d.db.ExecContext(ctx, query, status, resultJSON, nullString(errMsg), time.Now(), id)
-	return err
+	res, err := d.db.ExecContext(ctx, query, status, resultJSON, nullString(errMsg), time.Now(), id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
 }
 
 func (d *TaskDAO) getOne(ctx context.Context, query string, args ...any) (*models.Task, error) {

@@ -72,8 +72,33 @@ Relevant code:
 
 - `internal/db/migrations/001_init_postgresql.sql`
 - `internal/db/migrations/004_create_pccn_tables.sql`
+- `internal/db/migrations/005_create_orchestration_operations.sql`
+- `internal/db/migrations/006_add_tasks_resource_order_unique.sql`
 - `deployments/docker/init-postgres.sh`
 - `deployments/docker/saga-migration.sql`
+
+## Idempotency
+
+The system implements the phase 0/1 scope of `docs/architecture/idempotency-analysis-and-design.md`:
+
+- All AZ VPC/Subnet/PCCN write responses carry a unified `code` field (`"0"` on success), which the Saga executor requires to recognize success.
+- `orchestration_operations` (migration 005) is the linearization point for idempotent writes: `(owner_service, caller_scope, route_scope, idempotency_key)`. Top NSP consumes the northbound `Idempotency-Key` header; AZ NSP consumes Saga's `X-Idempotency-Key` (and Top's derived key on the Subnet path). Same key + same request replays the stored response; same key + different request returns `409 IDEMPOTENCY_KEY_REUSED`.
+- `tasks (resource_id, task_order)` is unique (migration 006); task terminal updates are CAS-guarded so duplicate/concurrent replies only advance the workflow once.
+- `internal/operation` holds the shared Operation service and the gin `HandleCreate` helper.
+- AZ deletes follow ensure-absent semantics: deleting a missing/deleting/deleted resource succeeds.
+
+Relevant code:
+
+- `internal/operation`
+- `internal/orchestration/workflow.go`
+- `internal/db/dao/task_dao.go`
+- `internal/db/dao/pccn_dao.go`
+
+Idempotency business tests (single-instance docker PostgreSQL/Redis + one top/az/worker instance):
+
+```bash
+scripts/test-idempotency.sh
+```
 
 ## Workflow Model
 
@@ -272,6 +297,7 @@ Main routes include:
 - `GET /api/v1/pccn/:pccn_name/status`
 - `GET /api/v1/pccns`
 - `DELETE /api/v1/pccn/:pccn_name`
+- `GET /api/v1/operations/:operation_id`
 
 Relevant code:
 
@@ -295,6 +321,7 @@ Main routes include:
 - `DELETE /api/v1/pccn/:pccn_name`
 - `POST /api/v1/task/replay/:task_id`
 - `GET /api/v1/task/:task_id`
+- `GET /api/v1/operations/:operation_id`
 
 Relevant code:
 

@@ -37,11 +37,13 @@ type VPCRequest struct {
 
 // VPCResponse VPC创建响应
 type VPCResponse struct {
-	Success    bool              `json:"success"`
-	Message    string            `json:"message"`
-	VPCID      string            `json:"vpc_id,omitempty"`
-	WorkflowID string            `json:"workflow_id,omitempty"`
-	AZResults  map[string]string `json:"az_results,omitempty"` // AZ级别的结果
+	Success     bool              `json:"success"`
+	Code        string            `json:"code"` // 统一业务码，成功为 "0"（Saga executor 成功判定依赖该字段）
+	Message     string            `json:"message"`
+	OperationID string            `json:"operation_id,omitempty"` // 幂等 Operation ID，可用于重试与查询
+	VPCID       string            `json:"vpc_id,omitempty"`
+	WorkflowID  string            `json:"workflow_id,omitempty"`
+	AZResults   map[string]string `json:"az_results,omitempty"` // AZ级别的结果
 }
 
 // SubnetRequest 子网创建请求
@@ -55,10 +57,12 @@ type SubnetRequest struct {
 
 // SubnetResponse 子网创建响应
 type SubnetResponse struct {
-	Success    bool   `json:"success"`
-	Message    string `json:"message"`
-	SubnetID   string `json:"subnet_id,omitempty"`
-	WorkflowID string `json:"workflow_id,omitempty"`
+	Success     bool   `json:"success"`
+	Code        string `json:"code"` // 统一业务码，成功为 "0"
+	Message     string `json:"message"`
+	OperationID string `json:"operation_id,omitempty"`
+	SubnetID    string `json:"subnet_id,omitempty"`
+	WorkflowID  string `json:"workflow_id,omitempty"`
 }
 
 // RegisterAZRequest AZ注册请求
@@ -94,10 +98,12 @@ type PCCNRequest struct {
 
 // PCCNResponse PCCN创建响应
 type PCCNResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	PCCNID  string `json:"pccn_id,omitempty"`  // PCCN唯一标识
-	TxID    string `json:"tx_id,omitempty"`    // Saga事务ID（Top层）或WorkflowID（AZ层）
+	Success     bool   `json:"success"`
+	Code        string `json:"code"` // 统一业务码，成功为 "0"（Saga executor 成功判定依赖该字段）
+	Message     string `json:"message"`
+	OperationID string `json:"operation_id,omitempty"` // 幂等 Operation ID
+	PCCNID      string `json:"pccn_id,omitempty"`      // PCCN唯一标识
+	TxID        string `json:"tx_id,omitempty"`        // Saga事务ID（Top层）或WorkflowID（AZ层）
 }
 
 // PCCNStatusQueryResponse PCCN状态查询响应 (Top层)

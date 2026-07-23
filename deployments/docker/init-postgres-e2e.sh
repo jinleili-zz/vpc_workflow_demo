@@ -27,6 +27,8 @@ EOSQL
 SAGA_FILE="/migrations/saga.sql"
 MIGRATION_FILE="/migrations/001_init_postgresql.sql"
 PCCN_FILE="/migrations/004_create_pccn_tables.sql"
+OPERATIONS_FILE="/migrations/005_create_orchestration_operations.sql"
+TASKS_UNIQUE_FILE="/migrations/006_add_tasks_resource_order_unique.sql"
 
 for DB in top_nsp_vpc top_nsp_vfw nsp_cn_beijing_1a_vpc nsp_cn_beijing_1a_vfw nsp_demo; do
     echo "Running migrations on database: $DB"
@@ -38,6 +40,12 @@ for DB in top_nsp_vpc top_nsp_vfw nsp_cn_beijing_1a_vpc nsp_cn_beijing_1a_vfw ns
     fi
     if [ -f "$PCCN_FILE" ]; then
         psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$DB" -f "$PCCN_FILE" || true
+    fi
+    if [ -f "$OPERATIONS_FILE" ]; then
+        psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$DB" -f "$OPERATIONS_FILE" || true
+    fi
+    if [ -f "$TASKS_UNIQUE_FILE" ]; then
+        psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$DB" -f "$TASKS_UNIQUE_FILE" || true
     fi
     # Ensure locked_by columns exist (saga.sql ALTER TABLE may have failed silently)
     psql -v ON_ERROR_STOP=0 --username "$POSTGRES_USER" --dbname "$DB" -c "ALTER TABLE saga_transactions ADD COLUMN IF NOT EXISTS locked_by VARCHAR(128), ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;" 2>/dev/null || true
