@@ -13,6 +13,7 @@ import (
 	"workflow_qoder/internal/az/vfw/orchestrator"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinleili-zz/nsp-platform/auth"
@@ -35,6 +36,7 @@ func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, inspector taskque
 	// Add trace middleware for distributed tracing
 	instanceID := fmt.Sprintf("az-nsp-vfw-%s-%s", cfg.Region, cfg.AZ)
 	router.Use(trace.TraceMiddleware(instanceID))
+	router.Use(operation.HTTPMiddleware())
 	router.Use(ginLoggerMiddleware())
 	if cfg.Auth.EnableAuth && verifier != nil {
 		skipPaths := cfg.Auth.SkipAuthPaths

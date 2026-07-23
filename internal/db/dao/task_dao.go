@@ -171,7 +171,7 @@ func (d *TaskDAO) UpdateQueued(ctx context.Context, id, asynqTaskID string) erro
 	return err
 }
 
-func (d *TaskDAO) UpdateRetryProgress(ctx context.Context, id string, retryCount, maxRetries int, errMsg string) error {
+func (d *TaskDAO) UpdateRetryProgress(ctx context.Context, id string, retryCount, maxRetries int, errMsg string) (bool, error) {
 	query := `
 		UPDATE tasks
 		SET status = 'queued',
@@ -180,12 +180,20 @@ func (d *TaskDAO) UpdateRetryProgress(ctx context.Context, id string, retryCount
 		    error_message = $3,
 		    updated_at = $4
 		WHERE id = $5
+		  AND status NOT IN ('completed', 'failed', 'cancelled')
 	`
-	_, err := d.db.ExecContext(ctx, query, retryCount, maxRetries, nullString(errMsg), time.Now(), id)
-	return err
+	result, err := d.db.ExecContext(ctx, query, retryCount, maxRetries, nullString(errMsg), time.Now(), id)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
 }
 
-func (d *TaskDAO) UpdateResult(ctx context.Context, id string, status models.TaskStatus, result any, errMsg string) error {
+func (d *TaskDAO) UpdateResult(ctx context.Context, id string, status models.TaskStatus, result any, errMsg string) (bool, error) {
 	var resultJSON any
 	if result != nil {
 		resultJSON = nullableJSON(mustJSONString(result))
@@ -199,9 +207,17 @@ func (d *TaskDAO) UpdateResult(ctx context.Context, id string, status models.Tas
 		    completed_at = $4,
 		    updated_at = $4
 		WHERE id = $5
+		  AND status NOT IN ('completed', 'failed', 'cancelled')
 	`
-	_, err := d.db.ExecContext(ctx, query, status, resultJSON, nullString(errMsg), time.Now(), id)
-	return err
+	resultExec, err := d.db.ExecContext(ctx, query, status, resultJSON, nullString(errMsg), time.Now(), id)
+	if err != nil {
+		return false, err
+	}
+	rows, err := resultExec.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
 }
 
 func (d *TaskDAO) getOne(ctx context.Context, query string, args ...any) (*models.Task, error) {

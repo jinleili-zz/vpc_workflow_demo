@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"workflow_qoder/internal/config"
+	"workflow_qoder/internal/operation"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinleili-zz/nsp-platform/auth"
@@ -65,5 +66,32 @@ func TestServerAuthMiddleware(t *testing.T) {
 	server.router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("signed protected status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestServerCapturesSagaIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.NSPConfig{Region: "cn-test-1", AZ: "cn-test-1a"}
+	server := NewServer(cfg, nil, nil, trace.NewTracedClient(nil), nil, nil)
+	server.router.POST("/test/saga-identity", func(c *gin.Context) {
+		identity, ok := operation.IdentityFromContext(c.Request.Context())
+		if !ok {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		c.JSON(http.StatusOK, identity)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test/saga-identity", nil)
+	req.Header.Set(operation.HeaderSagaTransactionID, "saga-vpc-1")
+	req.Header.Set(operation.HeaderIdempotencyKey, "step-vpc-1")
+	recorder := httptest.NewRecorder()
+	server.router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if got := recorder.Body.String(); got != `{"saga_transaction_id":"saga-vpc-1","idempotency_key":"step-vpc-1"}` {
+		t.Fatalf("captured identity = %s", got)
 	}
 }

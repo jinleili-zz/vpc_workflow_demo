@@ -17,7 +17,7 @@ func NewPCCNDAO(db *sql.DB) *PCCNDAO {
 	return &PCCNDAO{db: db}
 }
 
-func (d *PCCNDAO) Create(ctx context.Context, pccn *models.PCCNResource) error {
+func (d *PCCNDAO) Create(ctx context.Context, pccn *models.PCCNResource) (*models.PCCNResource, error) {
 	subnetsJSON, _ := json.Marshal(pccn.Subnets)
 	query := `
 		INSERT INTO pccn_resources (
@@ -29,12 +29,23 @@ func (d *PCCNDAO) Create(ctx context.Context, pccn *models.PCCNResource) error {
 			subnets = EXCLUDED.subnets,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE pccn_resources.status IN ('pending', 'failed', 'deleted')
+		RETURNING id
 	`
-	_, err := d.db.ExecContext(ctx, query,
+	var persistedID string
+	err := d.db.QueryRowContext(ctx, query,
 		pccn.ID, pccn.PCCNName, pccn.VPCName, pccn.VPCRegion, pccn.PeerVPCName, pccn.PeerVPCRegion, pccn.AZ,
 		pccn.Status, subnetsJSON, pccn.TotalTasks, pccn.CompletedTasks, pccn.FailedTasks,
-	)
-	return err
+	).Scan(&persistedID)
+	if err == sql.ErrNoRows {
+		existing, getErr := d.GetByName(ctx, pccn.PCCNName, pccn.AZ)
+		if getErr != nil {
+			return nil, getErr
+		}
+		return existing, nil
+	} else if err != nil {
+		return nil, err
+	}
+	return d.GetByID(ctx, persistedID)
 }
 
 func (d *PCCNDAO) GetByID(ctx context.Context, id string) (*models.PCCNResource, error) {

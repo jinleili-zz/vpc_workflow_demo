@@ -131,6 +131,8 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	return &models.VPCResponse{
 		Success:    true,
 		Message:    "VPC创建工作流已启动",
+		ResourceID: vpcID,
+		Status:     "accepted",
 		VPCID:      vpcID,
 		WorkflowID: workflowID,
 	}, nil
@@ -199,6 +201,8 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	return &models.SubnetResponse{
 		Success:    true,
 		Message:    "子网创建工作流已启动",
+		ResourceID: subnetID,
+		Status:     "accepted",
 		SubnetID:   subnetID,
 		WorkflowID: workflowID,
 	}, nil
@@ -682,9 +686,11 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 		TotalTasks:    0,
 	}
 
-	if err := o.pccnDAO.Create(ctx, pccnResource); err != nil {
+	persistedPCCN, err := o.pccnDAO.Create(ctx, pccnResource)
+	if err != nil {
 		return &models.PCCNResponse{Success: false, Message: fmt.Sprintf("创建PCCN资源记录失败: %v", err)}, nil
 	}
+	pccnID = persistedPCCN.ID
 
 	params, err := o.buildPCCNTaskParams(pccnID, req, subnetCIDRs)
 	if err != nil {
@@ -712,10 +718,12 @@ func (o *AZOrchestrator) CreatePCCN(ctx context.Context, req *models.PCCNRequest
 	)
 
 	return &models.PCCNResponse{
-		Success: true,
-		Message: "PCCN创建工作流已启动",
-		PCCNID:  pccnID,
-		TxID:    workflowID,
+		Success:    true,
+		Message:    "PCCN创建工作流已启动",
+		ResourceID: pccnID,
+		Status:     "accepted",
+		PCCNID:     pccnID,
+		TxID:       workflowID,
 	}, nil
 }
 

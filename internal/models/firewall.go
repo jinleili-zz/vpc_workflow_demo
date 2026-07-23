@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type FirewallPolicyRequest struct {
 	PolicyName  string `json:"policy_name" binding:"required"`
@@ -38,10 +41,22 @@ type AZFirewallPolicyRequest struct {
 }
 
 type AZFirewallPolicyResponse struct {
-	Success    bool   `json:"success"`
-	Message    string `json:"message"`
-	PolicyID   string `json:"policy_id,omitempty"`
-	WorkflowID string `json:"workflow_id,omitempty"`
+	Code        string `json:"code,omitempty"`
+	Success     bool   `json:"success"`
+	Message     string `json:"message"`
+	OperationID string `json:"operation_id,omitempty"`
+	ResourceID  string `json:"resource_id,omitempty"`
+	Status      string `json:"status,omitempty"`
+	PolicyID    string `json:"policy_id,omitempty"`
+	WorkflowID  string `json:"workflow_id,omitempty"`
+}
+
+func (r AZFirewallPolicyResponse) MarshalJSON() ([]byte, error) {
+	type responseAlias AZFirewallPolicyResponse
+	if r.Success && r.Code == "" {
+		r.Code = "0"
+	}
+	return json.Marshal(responseAlias(r))
 }
 
 type PolicyRegistry struct {
@@ -122,17 +137,17 @@ type AZDetail struct {
 }
 
 type VPCRegistry struct {
-	ID           string               `json:"id"`
-	VPCName      string               `json:"vpc_name"`
-	Region       string               `json:"region"`
-	VRFName      string               `json:"vrf_name"`
-	VLANId       int                  `json:"vlan_id"`
-	FirewallZone string               `json:"firewall_zone"`
-	Status       string               `json:"status"`
-	SagaTxID     string               `json:"saga_tx_id,omitempty"`
-	AZDetails    map[string]AZDetail  `json:"az_details"`
-	CreatedAt    time.Time            `json:"created_at"`
-	UpdatedAt    time.Time            `json:"updated_at"`
+	ID           string              `json:"id"`
+	VPCName      string              `json:"vpc_name"`
+	Region       string              `json:"region"`
+	VRFName      string              `json:"vrf_name"`
+	VLANId       int                 `json:"vlan_id"`
+	FirewallZone string              `json:"firewall_zone"`
+	Status       string              `json:"status"`
+	SagaTxID     string              `json:"saga_tx_id,omitempty"`
+	AZDetails    map[string]AZDetail `json:"az_details"`
+	CreatedAt    time.Time           `json:"created_at"`
+	UpdatedAt    time.Time           `json:"updated_at"`
 }
 
 type SubnetRegistry struct {

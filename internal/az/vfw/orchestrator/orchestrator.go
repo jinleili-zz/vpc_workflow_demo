@@ -117,6 +117,8 @@ func (o *VFWOrchestrator) CreatePolicy(ctx context.Context, req *models.AZFirewa
 	return &models.AZFirewallPolicyResponse{
 		Success:    true,
 		Message:    "防火墙策略创建工作流已启动",
+		ResourceID: policyID,
+		Status:     "accepted",
 		PolicyID:   policyID,
 		WorkflowID: workflowID,
 	}, nil

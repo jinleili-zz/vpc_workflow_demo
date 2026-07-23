@@ -42,8 +42,8 @@ type TaskStore interface {
 	GetByResourceAndOrder(ctx context.Context, resourceID string, taskOrder int) (*models.Task, error)
 	GetNextPendingTask(ctx context.Context, resourceID string) (*models.Task, error)
 	UpdateQueued(ctx context.Context, id, asynqTaskID string) error
-	UpdateRetryProgress(ctx context.Context, id string, retryCount, maxRetries int, errMsg string) error
-	UpdateResult(ctx context.Context, id string, status models.TaskStatus, result any, errMsg string) error
+	UpdateRetryProgress(ctx context.Context, id string, retryCount, maxRetries int, errMsg string) (bool, error)
+	UpdateResult(ctx context.Context, id string, status models.TaskStatus, result any, errMsg string) (bool, error)
 }
 
 type QueueResolver func(deviceType string, priority int) string
@@ -118,7 +118,7 @@ func (m *Manager) SubmitWorkflow(ctx context.Context, def WorkflowDef) (string, 
 	}
 
 	if err := m.publishTask(ctx, tasks[0], len(tasks)); err != nil {
-		_ = m.taskStore.UpdateResult(ctx, tasks[0].ID, models.TaskStatusFailed, nil, err.Error())
+		_, _ = m.taskStore.UpdateResult(ctx, tasks[0].ID, models.TaskStatusFailed, nil, err.Error())
 		_ = resourceStore.IncrementFailedTasks(ctx, def.ResourceID)
 		_ = resourceStore.UpdateStatus(ctx, def.ResourceID, models.ResourceStatusFailed, err.Error())
 		return "", fmt.Errorf("发布首个step失败: %w", err)
@@ -159,8 +159,13 @@ func (m *Manager) HandleReply(ctx context.Context, task *taskqueue.Task) error {
 
 	switch reply.Status {
 	case ReplyStatusSuccess:
-		if err := m.taskStore.UpdateResult(ctx, currentTask.ID, models.TaskStatusCompleted, string(reply.Result), ""); err != nil {
+		updated, err := m.taskStore.UpdateResult(ctx, currentTask.ID, models.TaskStatusCompleted, string(reply.Result), "")
+		if err != nil {
 			return fmt.Errorf("更新任务完成状态失败: %w", err)
+		}
+		if !updated {
+			logger.InfoContext(ctx, "忽略并发重复reply", "resourceID", resourceID, "taskID", currentTask.ID)
+			return nil
 		}
 		if err := resourceStore.IncrementCompletedTasks(ctx, resourceID); err != nil {
 			return fmt.Errorf("更新完成任务计数失败: %w", err)
@@ -186,13 +191,22 @@ func (m *Manager) HandleReply(ctx context.Context, task *taskqueue.Task) error {
 
 	case ReplyStatusFailed:
 		if !reply.FinalFailure {
-			if err := m.taskStore.UpdateRetryProgress(ctx, currentTask.ID, reply.RetryCount, reply.MaxRetries, reply.Error); err != nil {
+			updated, err := m.taskStore.UpdateRetryProgress(ctx, currentTask.ID, reply.RetryCount, reply.MaxRetries, reply.Error)
+			if err != nil {
 				return fmt.Errorf("更新任务重试进度失败: %w", err)
+			}
+			if !updated {
+				logger.InfoContext(ctx, "忽略迟到的重试reply", "resourceID", resourceID, "taskID", currentTask.ID)
 			}
 			return nil
 		}
-		if err := m.taskStore.UpdateResult(ctx, currentTask.ID, models.TaskStatusFailed, nil, reply.Error); err != nil {
+		updated, err := m.taskStore.UpdateResult(ctx, currentTask.ID, models.TaskStatusFailed, nil, reply.Error)
+		if err != nil {
 			return fmt.Errorf("更新任务失败状态失败: %w", err)
+		}
+		if !updated {
+			logger.InfoContext(ctx, "忽略并发重复reply", "resourceID", resourceID, "taskID", currentTask.ID)
+			return nil
 		}
 		if err := resourceStore.IncrementFailedTasks(ctx, resourceID); err != nil {
 			return fmt.Errorf("更新失败任务计数失败: %w", err)
@@ -225,9 +239,10 @@ func (m *Manager) publishTask(ctx context.Context, task *models.Task, totalSteps
 	}
 
 	info, err := m.broker.Publish(ctx, &taskqueue.Task{
-		Type:    task.TaskType,
-		Payload: []byte(task.TaskParams),
-		Queue:   queueName,
+		Type:     task.TaskType,
+		Payload:  []byte(task.TaskParams),
+		Queue:    queueName,
+		MaxRetry: &task.MaxRetries,
 		Reply: &taskqueue.ReplySpec{
 			Queue: m.replyQueueName,
 		},

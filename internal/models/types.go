@@ -1,5 +1,7 @@
 package models
 
+import "encoding/json"
+
 // ServiceLevel 服务级别
 type ServiceLevel string
 
@@ -27,7 +29,7 @@ type AZ struct {
 
 // VPCRequest VPC创建请求（扩展）
 type VPCRequest struct {
-	VPCID        string `json:"vpc_id,omitempty"`                // Top层统一生成的VPC ID，AZ层使用此ID
+	VPCID        string `json:"vpc_id,omitempty"` // Top层统一生成的VPC ID，AZ层使用此ID
 	VPCName      string `json:"vpc_name" binding:"required"`
 	Region       string `json:"region" binding:"required"` // 新增：指定Region
 	VRFName      string `json:"vrf_name" binding:"required"`
@@ -37,11 +39,23 @@ type VPCRequest struct {
 
 // VPCResponse VPC创建响应
 type VPCResponse struct {
-	Success    bool              `json:"success"`
-	Message    string            `json:"message"`
-	VPCID      string            `json:"vpc_id,omitempty"`
-	WorkflowID string            `json:"workflow_id,omitempty"`
-	AZResults  map[string]string `json:"az_results,omitempty"` // AZ级别的结果
+	Code        string            `json:"code,omitempty"`
+	Success     bool              `json:"success"`
+	Message     string            `json:"message"`
+	OperationID string            `json:"operation_id,omitempty"`
+	ResourceID  string            `json:"resource_id,omitempty"`
+	Status      string            `json:"status,omitempty"`
+	VPCID       string            `json:"vpc_id,omitempty"`
+	WorkflowID  string            `json:"workflow_id,omitempty"`
+	AZResults   map[string]string `json:"az_results,omitempty"` // AZ级别的结果
+}
+
+func (r VPCResponse) MarshalJSON() ([]byte, error) {
+	type responseAlias VPCResponse
+	if r.Success && r.Code == "" {
+		r.Code = "0"
+	}
+	return json.Marshal(responseAlias(r))
 }
 
 // SubnetRequest 子网创建请求
@@ -55,10 +69,22 @@ type SubnetRequest struct {
 
 // SubnetResponse 子网创建响应
 type SubnetResponse struct {
-	Success    bool   `json:"success"`
-	Message    string `json:"message"`
-	SubnetID   string `json:"subnet_id,omitempty"`
-	WorkflowID string `json:"workflow_id,omitempty"`
+	Code        string `json:"code,omitempty"`
+	Success     bool   `json:"success"`
+	Message     string `json:"message"`
+	OperationID string `json:"operation_id,omitempty"`
+	ResourceID  string `json:"resource_id,omitempty"`
+	Status      string `json:"status,omitempty"`
+	SubnetID    string `json:"subnet_id,omitempty"`
+	WorkflowID  string `json:"workflow_id,omitempty"`
+}
+
+func (r SubnetResponse) MarshalJSON() ([]byte, error) {
+	type responseAlias SubnetResponse
+	if r.Success && r.Code == "" {
+		r.Code = "0"
+	}
+	return json.Marshal(responseAlias(r))
 }
 
 // RegisterAZRequest AZ注册请求
@@ -86,18 +112,30 @@ type VPCRef struct {
 
 // PCCNRequest PCCN创建请求 (Top层)
 type PCCNRequest struct {
-	PCCNID   string `json:"pccn_id,omitempty"`             // Top层生成的PCCN ID，AZ层使用
-	PCCNName string `json:"pccn_name" binding:"required"`  // PCCN名称
-	VPC1     VPCRef `json:"vpc1" binding:"required"`       // VPC1引用（含Region）
-	VPC2     VPCRef `json:"vpc2" binding:"required"`       // VPC2引用（含Region）
+	PCCNID   string `json:"pccn_id,omitempty"`            // Top层生成的PCCN ID，AZ层使用
+	PCCNName string `json:"pccn_name" binding:"required"` // PCCN名称
+	VPC1     VPCRef `json:"vpc1" binding:"required"`      // VPC1引用（含Region）
+	VPC2     VPCRef `json:"vpc2" binding:"required"`      // VPC2引用（含Region）
 }
 
 // PCCNResponse PCCN创建响应
 type PCCNResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	PCCNID  string `json:"pccn_id,omitempty"`  // PCCN唯一标识
-	TxID    string `json:"tx_id,omitempty"`    // Saga事务ID（Top层）或WorkflowID（AZ层）
+	Code        string `json:"code,omitempty"`
+	Success     bool   `json:"success"`
+	Message     string `json:"message"`
+	OperationID string `json:"operation_id,omitempty"`
+	ResourceID  string `json:"resource_id,omitempty"`
+	Status      string `json:"status,omitempty"`
+	PCCNID      string `json:"pccn_id,omitempty"` // PCCN唯一标识
+	TxID        string `json:"tx_id,omitempty"`   // Saga事务ID（Top层）或WorkflowID（AZ层）
+}
+
+func (r PCCNResponse) MarshalJSON() ([]byte, error) {
+	type responseAlias PCCNResponse
+	if r.Success && r.Code == "" {
+		r.Code = "0"
+	}
+	return json.Marshal(responseAlias(r))
 }
 
 // PCCNStatusQueryResponse PCCN状态查询响应 (Top层)
