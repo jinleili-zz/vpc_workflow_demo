@@ -17,12 +17,24 @@ type FirewallPolicyRequest struct {
 }
 
 type FirewallPolicyResponse struct {
-	Success    bool              `json:"success"`
-	Message    string            `json:"message"`
-	PolicyID   string            `json:"policy_id,omitempty"`
-	SourceZone string            `json:"source_zone,omitempty"`
-	DestZone   string            `json:"dest_zone,omitempty"`
-	AZResults  map[string]string `json:"az_results,omitempty"`
+	Code        string            `json:"code,omitempty"`
+	Success     bool              `json:"success"`
+	Message     string            `json:"message"`
+	OperationID string            `json:"operation_id,omitempty"`
+	ResourceID  string            `json:"resource_id,omitempty"`
+	Status      string            `json:"status,omitempty"`
+	PolicyID    string            `json:"policy_id,omitempty"`
+	SourceZone  string            `json:"source_zone,omitempty"`
+	DestZone    string            `json:"dest_zone,omitempty"`
+	AZResults   map[string]string `json:"az_results,omitempty"`
+}
+
+func (r FirewallPolicyResponse) MarshalJSON() ([]byte, error) {
+	type responseAlias FirewallPolicyResponse
+	if r.Success && r.Code == "" {
+		r.Code = "0"
+	}
+	return json.Marshal(responseAlias(r))
 }
 
 type AZFirewallPolicyRequest struct {
@@ -86,6 +98,7 @@ type PolicyRegistry struct {
 type PolicyAZRecord struct {
 	ID           string    `json:"id"`
 	PolicyID     string    `json:"policy_id"`
+	Region       string    `json:"region"`
 	AZ           string    `json:"az"`
 	AZPolicyID   string    `json:"az_policy_id"`
 	Status       string    `json:"status"`

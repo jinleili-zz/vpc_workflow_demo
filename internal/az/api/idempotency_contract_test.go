@@ -74,6 +74,7 @@ func TestAZWriteRoutesExposeSagaCompatibleResponseContract(t *testing.T) {
 	vpcBody := map[string]any{
 		"vpc_id": vpcID, "vpc_name": vpcName, "region": cfg.Region,
 		"vrf_name": "vrf-contract", "vlan_id": 3101, "firewall_zone": "zone-contract",
+		"_root_operation_id": "top-root-" + unique, "_parent_operation_id": "top-parent-" + unique, "_resource_generation": 1,
 	}
 	vpc := postContractJSON(t, server, "/api/v1/vpc", keyPrefix+"-vpc", vpcBody)
 	assertContractResponse(t, vpc, "vpc_id", vpcID, "workflow_id")
@@ -89,6 +90,9 @@ func TestAZWriteRoutesExposeSagaCompatibleResponseContract(t *testing.T) {
 	}
 	if operationResponse["operation_id"] != operationID || operationResponse["resource_id"] != vpcID || operationResponse["generation"] != float64(1) {
 		t.Fatalf("operation response identity invalid: %#v", operationResponse)
+	}
+	if operationResponse["root_operation_id"] != "top-root-"+unique || operationResponse["parent_operation_id"] != "top-parent-"+unique {
+		t.Fatalf("Saga payload ancestry was not preserved: %#v", operationResponse)
 	}
 	if _, exposed := operationResponse["idempotency_key"]; exposed {
 		t.Fatalf("operation response exposed raw idempotency key: %#v", operationResponse)

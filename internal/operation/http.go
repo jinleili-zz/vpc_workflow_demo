@@ -13,11 +13,13 @@ import (
 )
 
 const (
-	HeaderSagaTransactionID  = "X-Saga-Transaction-Id"
-	HeaderIdempotencyKey     = "X-Idempotency-Key"
-	HeaderRootOperationID    = "X-Root-Operation-Id"
-	HeaderParentOperationID  = "X-Parent-Operation-Id"
-	HeaderResourceGeneration = "X-Resource-Generation"
+	HeaderSagaTransactionID        = "X-Saga-Transaction-Id"
+	HeaderIdempotencyKey           = "X-Idempotency-Key"
+	HeaderNorthboundIdempotencyKey = "Idempotency-Key"
+	HeaderIdempotencyGenerated     = "X-Idempotency-Key-Generated"
+	HeaderRootOperationID          = "X-Root-Operation-Id"
+	HeaderParentOperationID        = "X-Parent-Operation-Id"
+	HeaderResourceGeneration       = "X-Resource-Generation"
 )
 
 type RequestIdentity struct {
@@ -61,6 +63,38 @@ func HTTPMiddleware() gin.HandlerFunc {
 	}
 }
 
+// NorthboundHTTPMiddleware establishes the client request identity. During the
+// compatibility period a missing key is generated and returned to the caller;
+// enforce=true switches the endpoint to the strict contract.
+func NorthboundHTTPMiddleware(enforce bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.GetHeader(HeaderNorthboundIdempotencyKey)
+		if key == "" {
+			key = c.GetHeader(HeaderIdempotencyKey)
+		}
+		if key == "" && enforce {
+			c.AbortWithStatusJSON(400, gin.H{"code": ErrInvalidIdempotencyKey.Error(), "message": "Idempotency-Key is required"})
+			return
+		}
+		if key == "" {
+			key = uuid.NewString()
+			c.Header(HeaderNorthboundIdempotencyKey, key)
+			c.Header(HeaderIdempotencyGenerated, "true")
+			c.Header("Warning", `299 NSP "Idempotency-Key was generated; retry protection requires clients to reuse it"`)
+		}
+		if err := validateIdempotencyKey(key); err != nil {
+			c.AbortWithStatusJSON(400, gin.H{"code": ErrInvalidIdempotencyKey.Error(), "message": err.Error()})
+			return
+		}
+
+		identity := RequestIdentity{IdempotencyKey: key}
+		ctx := ContextWithIdentity(c.Request.Context(), identity)
+		c.Request = c.Request.WithContext(ctx)
+		logger.InfoContext(ctx, "收到Northbound幂等请求", "idempotency_key_hash", KeyDigest(key))
+		c.Next()
+	}
+}
+
 func IdentityFromContext(ctx context.Context) (RequestIdentity, bool) {
 	identity, ok := ctx.Value(identityContextKey{}).(RequestIdentity)
 	return identity, ok
@@ -68,6 +102,26 @@ func IdentityFromContext(ctx context.Context) (RequestIdentity, bool) {
 
 func ContextWithIdentity(ctx context.Context, identity RequestIdentity) context.Context {
 	return context.WithValue(ctx, identityContextKey{}, identity)
+}
+
+func ContextWithIdentityFallback(ctx context.Context, fallback RequestIdentity) context.Context {
+	identity, _ := IdentityFromContext(ctx)
+	if identity.RootOperationID == "" {
+		identity.RootOperationID = fallback.RootOperationID
+	}
+	if identity.ParentOperationID == "" {
+		identity.ParentOperationID = fallback.ParentOperationID
+	}
+	if identity.ResourceGeneration == 0 {
+		identity.ResourceGeneration = fallback.ResourceGeneration
+	}
+	if identity.IdempotencyKey == "" {
+		identity.IdempotencyKey = fallback.IdempotencyKey
+	}
+	if identity.SagaTransactionID == "" {
+		identity.SagaTransactionID = fallback.SagaTransactionID
+	}
+	return ContextWithIdentity(ctx, identity)
 }
 
 type HeaderSetter interface {

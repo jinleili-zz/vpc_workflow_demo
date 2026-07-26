@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 
 	"workflow_qoder/internal/models"
 	"workflow_qoder/internal/operation"
@@ -20,7 +23,6 @@ type Server struct {
 
 func NewServer(policyService *service.PolicyService) *Server {
 	router := gin.Default()
-	router.Use(operation.HTTPMiddleware())
 
 	server := &Server{
 		policyService: policyService,
@@ -34,11 +36,13 @@ func NewServer(policyService *service.PolicyService) *Server {
 
 func (s *Server) setupRoutes() {
 	api := s.router.Group("/api/v1")
+	idempotentWrite := operation.NorthboundHTTPMiddleware(strings.EqualFold(os.Getenv("NSP_IDEMPOTENCY_API_ENFORCE"), "true"))
 	{
 		api.POST("/register/az", s.registerAZ)
 		api.POST("/heartbeat", s.heartbeat)
 
-		api.POST("/firewall/policy", s.createPolicy)
+		api.POST("/firewall/policy", idempotentWrite, s.createPolicy)
+		api.GET("/operations/:operation_id", s.getOperation)
 		api.GET("/firewall/policy/:policy_id/status", s.getPolicyStatus)
 		api.DELETE("/firewall/policy/:policy_id", s.deletePolicy)
 		api.GET("/firewall/policies", s.listPolicies)
@@ -100,6 +104,18 @@ func (s *Server) createPolicy(c *gin.Context) {
 	ctx := c.Request.Context()
 	resp, err := s.policyService.CreatePolicy(ctx, &req)
 	if err != nil {
+		if errors.Is(err, operation.ErrInvalidIdempotencyKey) {
+			c.JSON(http.StatusBadRequest, gin.H{"code": operation.ErrInvalidIdempotencyKey.Error(), "message": err.Error()})
+			return
+		}
+		if errors.Is(err, operation.ErrIdempotencyKeyReused) {
+			c.JSON(http.StatusConflict, gin.H{"code": operation.ErrIdempotencyKeyReused.Error(), "message": err.Error()})
+			return
+		}
+		if errors.Is(err, operation.ErrResourceSpecConflict) {
+			c.JSON(http.StatusConflict, gin.H{"code": operation.ErrResourceSpecConflict.Error(), "message": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, models.FirewallPolicyResponse{
 			Success: false,
 			Message: fmt.Sprintf("创建策略失败: %v", err),
@@ -107,7 +123,20 @@ func (s *Server) createPolicy(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, resp)
+	status := http.StatusAccepted
+	if !resp.Success {
+		status = http.StatusBadRequest
+	}
+	c.JSON(status, resp)
+}
+
+func (s *Server) getOperation(c *gin.Context) {
+	op, err := s.policyService.GetOperation(c.Request.Context(), c.Param("operation_id"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": "OPERATION_NOT_FOUND", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, op)
 }
 
 func (s *Server) getPolicyStatus(c *gin.Context) {
@@ -132,12 +161,19 @@ func (s *Server) getPolicyStatus(c *gin.Context) {
 
 func (s *Server) deletePolicy(c *gin.Context) {
 	policyID := c.Param("policy_id")
-	ctx := context.Background()
+	ctx := c.Request.Context()
 
 	err := s.policyService.DeletePolicy(ctx, policyID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
+		status := http.StatusBadRequest
+		code := "DELETE_FAILED"
+		if errors.Is(err, operation.ErrResourceOperationInProgress) {
+			status = http.StatusConflict
+			code = "RESOURCE_OPERATION_IN_PROGRESS"
+		}
+		c.JSON(status, gin.H{
 			"success": false,
+			"code":    code,
 			"message": err.Error(),
 		})
 		return

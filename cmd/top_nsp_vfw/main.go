@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"workflow_qoder/internal/bootstrap"
 	"workflow_qoder/internal/config"
@@ -100,6 +101,7 @@ func main() {
 	logger.Platform().Info("[Top NSP VFW] VFW数据库连接成功")
 
 	policyService := service.NewPolicyService(vpcDB, vfwDB, components.Signer)
+	policyService.StartReconciler(ctx, 5*time.Second)
 
 	server := api.NewServer(policyService)
 

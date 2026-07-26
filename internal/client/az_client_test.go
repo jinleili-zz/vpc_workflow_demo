@@ -165,6 +165,32 @@ func TestDeleteVPCWithoutTrace(t *testing.T) {
 	}
 }
 
+func TestDeleteVPCTreatsNotFoundAsAlreadyAbsent(t *testing.T) {
+	client := NewAZNSPClient(nil, nil)
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusNotFound, `{"message":"VPC not found"}`), nil
+		}),
+	}
+
+	if err := client.DeleteVPC(context.Background(), "http://example.com", "test-vpc"); err != nil {
+		t.Fatalf("DeleteVPC should treat a missing VPC as already absent: %v", err)
+	}
+}
+
+func TestDeletePCCNTreatsNotFoundAsAlreadyAbsent(t *testing.T) {
+	client := NewAZNSPClient(nil, nil)
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/pccn/pccn-a" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		return jsonResponse(http.StatusNotFound, ""), nil
+	})}
+	if err := client.DeletePCCN(t.Context(), "http://example.com", "pccn-a"); err != nil {
+		t.Fatalf("DeletePCCN should ensure absent: %v", err)
+	}
+}
+
 func TestHealthCheckWithTrace(t *testing.T) {
 	tracedClient := trace.NewTracedClient(&http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

@@ -27,8 +27,18 @@ docker compose -f "$compose_file" exec -T postgres sh -ceu '
     if [ "$has_tasks" = "t" ]; then
       echo "applying AZ Outbox/Inbox migration to $database"
       psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$database" -f /migrations/006_create_outbox_inbox.sql
+      echo "applying Worker Ledger migration to $database"
+      psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$database" -f /migrations/008_create_worker_ledger.sql
     else
       echo "skipping AZ Outbox/Inbox migration for $database: no tasks table"
+    fi
+    has_saga=$(psql -U "$POSTGRES_USER" -d "$database" -Atc \
+      "SELECT to_regclass('public.saga_transactions') IS NOT NULL")
+    has_top_vpc=$(psql -U "$POSTGRES_USER" -d "$database" -Atc \
+      "SELECT to_regclass('public.vpc_registry') IS NOT NULL")
+    if [ "$has_saga" = "t" ] && [ "$has_top_vpc" = "t" ]; then
+      echo "applying Top Saga submission migration to $database"
+      psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$database" -f /migrations/007_create_top_saga_submissions.sql
     fi
   done
 '

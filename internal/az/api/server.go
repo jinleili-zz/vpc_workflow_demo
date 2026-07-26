@@ -145,7 +145,9 @@ func (s *Server) createVPC(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx := operation.ContextWithIdentityFallback(c.Request.Context(), operation.RequestIdentity{
+		RootOperationID: req.RootOperationID, ParentOperationID: req.ParentOperationID, ResourceGeneration: req.ResourceGeneration,
+	})
 	resp, err := s.orchestrator.CreateVPC(ctx, &req)
 	if err != nil {
 		writeCreateError(c, "创建VPC失败", err)
@@ -388,10 +390,11 @@ func (s *Server) replayTask(c *gin.Context) {
 		return
 	}
 
-	if task.Status != models.TaskStatusFailed {
-		c.JSON(http.StatusBadRequest, gin.H{
+	if task.Status == models.TaskStatusCompleted || task.Status == models.TaskStatusFailed || task.Status == models.TaskStatusCancelled {
+		c.JSON(http.StatusConflict, gin.H{
 			"success": false,
-			"message": fmt.Sprintf("任务状态不是failed，无法重做 (当前状态: %s)", task.Status),
+			"code":    "TERMINAL_TASK_REPLAY_REQUIRES_NEW_OPERATION",
+			"message": fmt.Sprintf("终态任务不能原地Replay，请使用新的Idempotency-Key发起业务操作 (当前状态: %s)", task.Status),
 		})
 		return
 	}
@@ -444,8 +447,6 @@ func (s *Server) health(c *gin.Context) {
 // =====================================================
 
 func (s *Server) createPCCN(c *gin.Context) {
-	ctx := c.Request.Context()
-
 	var req models.PCCNRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -454,6 +455,9 @@ func (s *Server) createPCCN(c *gin.Context) {
 		})
 		return
 	}
+	ctx := operation.ContextWithIdentityFallback(c.Request.Context(), operation.RequestIdentity{
+		RootOperationID: req.RootOperationID, ParentOperationID: req.ParentOperationID, ResourceGeneration: req.ResourceGeneration,
+	})
 
 	logger.InfoContext(ctx, "收到PCCN创建请求", "pccn_name", req.PCCNName, "az", s.cfg.AZ)
 
@@ -482,6 +486,12 @@ func writeCreateError(c *gin.Context, prefix string, err error) {
 	} else if errors.Is(err, operation.ErrIdempotencyKeyReused) {
 		status = http.StatusConflict
 		code = operation.ErrIdempotencyKeyReused.Error()
+	} else if errors.Is(err, operation.ErrResourceSpecConflict) {
+		status = http.StatusConflict
+		code = operation.ErrResourceSpecConflict.Error()
+	} else if errors.Is(err, operation.ErrResourceOperationInProgress) {
+		status = http.StatusConflict
+		code = operation.ErrResourceOperationInProgress.Error()
 	}
 	c.JSON(status, gin.H{"code": code, "success": false, "message": fmt.Sprintf("%s: %v", prefix, err)})
 }

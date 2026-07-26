@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"workflow_qoder/internal/models"
@@ -85,6 +86,7 @@ func (r *Registry) GetRegionAZs(ctx context.Context, region string) ([]*models.A
 	if len(azIDs) == 0 {
 		return nil, fmt.Errorf("Region %s 没有注册的AZ", region)
 	}
+	sort.Strings(azIDs)
 
 	// 获取每个AZ的详细信息
 	azs := make([]*models.AZ, 0, len(azIDs))
@@ -155,7 +157,7 @@ func (r *Registry) CheckAZHealth(ctx context.Context, region, azID string) (bool
 func (r *Registry) ListAllRegions(ctx context.Context) ([]string, error) {
 	var keys []string
 	var err error
-	
+
 	if clusterClient, ok := r.redisClient.(*redis.ClusterClient); ok {
 		err = clusterClient.ForEachMaster(ctx, func(ctx context.Context, client *redis.Client) error {
 			nodeKeys, err := client.Keys(ctx, "region:*:azs").Result()
@@ -168,7 +170,7 @@ func (r *Registry) ListAllRegions(ctx context.Context) ([]string, error) {
 	} else {
 		keys, err = r.redisClient.Keys(ctx, "region:*:azs").Result()
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("获取Region列表失败: %v", err)
 	}
@@ -185,6 +187,7 @@ func (r *Registry) ListAllRegions(ctx context.Context) ([]string, error) {
 
 	return regions, nil
 }
+
 // ListAllAZs 列出所有AZ
 func (r *Registry) ListAllAZs(ctx context.Context) ([]*models.AZ, error) {
 	regions, err := r.ListAllRegions(ctx)

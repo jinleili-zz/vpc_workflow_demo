@@ -718,6 +718,36 @@ func TestHandleReplyTxCannotCrossCurrentResourceGeneration(t *testing.T) {
 	}
 }
 
+func TestHandleReplyTxAcknowledgesReplyAfterResourceWasDeleted(t *testing.T) {
+	db := openDurableTestDB(t)
+	resourceID := insertDurableTestVPC(t, db)
+	t.Cleanup(func() { cleanupDurableTestWorkflow(t, db, resourceID) })
+	repository := NewWorkflowRepository(db, "az-nsp-vpc")
+	publishedTask := submitAndDispatchFirstTask(t, repository, durableTestWorkflow(resourceID))
+	replyTask := durableReplyTask(t, publishedTask, ReplyStatusSuccess, uuid.NewString())
+	var reply ReplyPayload
+	if err := json.Unmarshal(replyTask.Payload, &reply); err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM vpc_resources WHERE id = $1`, resourceID); err != nil {
+		t.Fatalf("delete resource before late reply: %v", err)
+	}
+	decision, err := repository.HandleReplyTx(t.Context(), "az-vpc-reply", replyTask)
+	if err != nil || decision != ReplyDecisionStale {
+		t.Fatalf("late deleted-resource reply decision=%s err=%v", decision, err)
+	}
+	var resultCode string
+	if err := db.QueryRow(`
+		SELECT result_code FROM inbox_events
+		WHERE consumer_name = 'az-vpc-reply' AND event_id = $1
+	`, reply.EventID).Scan(&resultCode); err != nil {
+		t.Fatalf("load late reply inbox result: %v", err)
+	}
+	if resultCode != "stale_resource_generation" {
+		t.Fatalf("late reply result = %q", resultCode)
+	}
+}
+
 type unexpectedReplyDecisionError struct {
 	decision ReplyDecision
 }

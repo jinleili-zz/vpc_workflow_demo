@@ -29,6 +29,7 @@ type AZ struct {
 
 // VPCRequest VPC创建请求（扩展）
 type VPCRequest struct {
+	InternalOperationIdentity
 	VPCID        string `json:"vpc_id,omitempty"` // Top层统一生成的VPC ID，AZ层使用此ID
 	VPCName      string `json:"vpc_name" binding:"required"`
 	Region       string `json:"region" binding:"required"` // 新增：指定Region
@@ -112,10 +113,19 @@ type VPCRef struct {
 
 // PCCNRequest PCCN创建请求 (Top层)
 type PCCNRequest struct {
+	InternalOperationIdentity
 	PCCNID   string `json:"pccn_id,omitempty"`            // Top层生成的PCCN ID，AZ层使用
 	PCCNName string `json:"pccn_name" binding:"required"` // PCCN名称
 	VPC1     VPCRef `json:"vpc1" binding:"required"`      // VPC1引用（含Region）
 	VPC2     VPCRef `json:"vpc2" binding:"required"`      // VPC2引用（含Region）
+}
+
+// InternalOperationIdentity carries Top operation ancestry through Saga
+// payloads until the Saga library supports custom identity headers.
+type InternalOperationIdentity struct {
+	RootOperationID    string `json:"_root_operation_id,omitempty"`
+	ParentOperationID  string `json:"_parent_operation_id,omitempty"`
+	ResourceGeneration int64  `json:"_resource_generation,omitempty"`
 }
 
 // PCCNResponse PCCN创建响应

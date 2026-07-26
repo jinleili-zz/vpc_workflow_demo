@@ -61,6 +61,89 @@ func TestHTTPMiddlewareRejectsInvalidExplicitResourceGeneration(t *testing.T) {
 	}
 }
 
+func TestNorthboundHTTPMiddlewareUsesExplicitKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(NorthboundHTTPMiddleware(false))
+	router.POST("/work", func(c *gin.Context) {
+		identity, ok := IdentityFromContext(c.Request.Context())
+		if !ok {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		c.JSON(http.StatusOK, identity)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/work", nil)
+	req.Header.Set(HeaderNorthboundIdempotencyKey, "client-key-1")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"idempotency_key":"client-key-1"`) {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get(HeaderIdempotencyGenerated); got != "" {
+		t.Fatalf("generated header = %q, want empty", got)
+	}
+}
+
+func TestNorthboundHTTPMiddlewareGeneratesCompatibilityKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(NorthboundHTTPMiddleware(false))
+	router.POST("/work", func(c *gin.Context) {
+		identity, ok := IdentityFromContext(c.Request.Context())
+		if !ok || identity.IdempotencyKey == "" {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		c.Status(http.StatusAccepted)
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/work", nil))
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusAccepted)
+	}
+	if recorder.Header().Get(HeaderIdempotencyGenerated) != "true" {
+		t.Fatalf("generated header = %q", recorder.Header().Get(HeaderIdempotencyGenerated))
+	}
+	if recorder.Header().Get(HeaderNorthboundIdempotencyKey) == "" {
+		t.Fatal("generated idempotency key was not returned")
+	}
+	if !strings.Contains(recorder.Header().Get("Warning"), "Idempotency-Key") {
+		t.Fatalf("warning header = %q", recorder.Header().Get("Warning"))
+	}
+}
+
+func TestNorthboundHTTPMiddlewareEnforcesAndValidatesKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name  string
+		key   string
+		force bool
+	}{
+		{name: "missing", force: true},
+		{name: "control-character", key: "bad\nkey"},
+		{name: "too-long", key: strings.Repeat("x", 257)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			router := gin.New()
+			router.Use(NorthboundHTTPMiddleware(test.force))
+			router.POST("/work", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+			req := httptest.NewRequest(http.MethodPost, "/work", nil)
+			if test.key != "" {
+				req.Header.Set(HeaderNorthboundIdempotencyKey, test.key)
+			}
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), ErrInvalidIdempotencyKey.Error()) {
+				t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestHTTPMiddlewareLogsSagaIdentityWithoutRawKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -96,6 +179,26 @@ func TestKeyDigestDoesNotExposeRawKey(t *testing.T) {
 	}
 	if digest != KeyDigest(key) {
 		t.Fatal("same key produced different digests")
+	}
+}
+
+func TestContextWithIdentityFallbackPreservesHeaderIdentity(t *testing.T) {
+	ctx := ContextWithIdentity(t.Context(), RequestIdentity{
+		SagaTransactionID: "saga-1",
+		IdempotencyKey:    "step-1",
+		RootOperationID:   "header-root",
+	})
+	ctx = ContextWithIdentityFallback(ctx, RequestIdentity{
+		RootOperationID:    "payload-root",
+		ParentOperationID:  "payload-parent",
+		ResourceGeneration: 3,
+	})
+	identity, ok := IdentityFromContext(ctx)
+	if !ok {
+		t.Fatal("identity missing")
+	}
+	if identity.RootOperationID != "header-root" || identity.ParentOperationID != "payload-parent" || identity.ResourceGeneration != 3 || identity.IdempotencyKey != "step-1" {
+		t.Fatalf("merged identity = %#v", identity)
 	}
 }
 

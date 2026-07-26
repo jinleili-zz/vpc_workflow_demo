@@ -143,6 +143,12 @@ func (s *Server) createPolicy(c *gin.Context) {
 		} else if errors.Is(err, operation.ErrIdempotencyKeyReused) {
 			status = http.StatusConflict
 			code = operation.ErrIdempotencyKeyReused.Error()
+		} else if errors.Is(err, operation.ErrResourceSpecConflict) {
+			status = http.StatusConflict
+			code = operation.ErrResourceSpecConflict.Error()
+		} else if errors.Is(err, operation.ErrResourceOperationInProgress) {
+			status = http.StatusConflict
+			code = operation.ErrResourceOperationInProgress.Error()
 		}
 		c.JSON(status, models.AZFirewallPolicyResponse{Code: code, Success: false, Message: fmt.Sprintf("创建策略失败: %v", err)})
 		return

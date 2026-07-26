@@ -9,9 +9,11 @@ import (
 type Decision string
 
 const (
-	DecisionNew      Decision = "new"
-	DecisionReplay   Decision = "replay"
-	DecisionConflict Decision = "conflict"
+	DecisionNew              Decision = "new"
+	DecisionReplay           Decision = "replay"
+	DecisionConflict         Decision = "conflict"
+	DecisionResourceConflict Decision = "resource_conflict"
+	DecisionResourceBusy     Decision = "resource_busy"
 )
 
 type Status string

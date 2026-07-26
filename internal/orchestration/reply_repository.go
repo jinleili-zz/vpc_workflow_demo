@@ -344,6 +344,12 @@ func staleResourceGeneration(ctx context.Context, tx *sql.Tx, task *models.Task)
 	var generation int64
 	var currentOperationID sql.NullString
 	if err := tx.QueryRowContext(ctx, query, task.ResourceID).Scan(&generation, &currentOperationID); err != nil {
+		if err == sql.ErrNoRows {
+			// Physical deletion is an absent tombstone in the current schema.
+			// Late replies from the retired generation must be acknowledged as
+			// stale instead of retried forever.
+			return true, nil
+		}
 		return false, err
 	}
 	if task.Generation > generation {

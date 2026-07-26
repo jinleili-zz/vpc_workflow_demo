@@ -25,6 +25,7 @@ import (
 const staleWorkflowTimeout = 5 * time.Minute
 
 type AZOrchestrator struct {
+	db           *sql.DB
 	vpcDAO       *dao.VPCDAO
 	subnetDAO    *dao.SubnetDAO
 	pccnDAO      *dao.PCCNDAO
@@ -55,6 +56,7 @@ func NewAZOrchestrator(db *sql.DB, broker taskqueue.Broker, inspector taskqueue.
 	workflowMgr.RegisterResourceStore(models.ResourceTypePCCN, dao.NewPCCNDAO(db))
 
 	return &AZOrchestrator{
+		db:           db,
 		vpcDAO:       dao.NewVPCDAO(db),
 		subnetDAO:    dao.NewSubnetDAO(db),
 		pccnDAO:      dao.NewPCCNDAO(db),
@@ -116,7 +118,7 @@ func (o *AZOrchestrator) CreateVPC(ctx context.Context, req *models.VPCRequest) 
 	}
 
 	workflowID, persistedVPCID, err := o.workflowMgr.SubmitPreparedWorkflow(ctx, func(ctx context.Context, tx *sql.Tx) (orchestration.WorkflowDef, error) {
-		op, decision, err := o.beginCreateOperationTx(ctx, tx, "POST /api/v1/vpc", "create_vpc", fmt.Sprintf("%s/%s/%s", req.Region, o.az, req.VPCName), req, "vpc", vpcID)
+		op, decision, err := o.beginCreateOperationTx(ctx, tx, "POST /api/v1/vpc", "create_vpc", fmt.Sprintf("%s/%s/%s", o.region, o.az, req.VPCName), req, "vpc", vpcID)
 		if err != nil {
 			return orchestration.WorkflowDef{}, err
 		}
@@ -198,7 +200,21 @@ func (o *AZOrchestrator) CreateSubnet(ctx context.Context, req *models.SubnetReq
 	}
 
 	workflowID, persistedSubnetID, err := o.workflowMgr.SubmitPreparedWorkflow(ctx, func(ctx context.Context, tx *sql.Tx) (orchestration.WorkflowDef, error) {
-		op, decision, err := o.beginCreateOperationTx(ctx, tx, "POST /api/v1/subnet", "create_subnet", fmt.Sprintf("%s/%s/%s", req.Region, o.az, req.SubnetName), req, "subnet", subnetID)
+		var parentStatus models.ResourceStatus
+		if err := tx.QueryRowContext(ctx, `
+			SELECT status FROM vpc_resources
+			WHERE vpc_name = $1 AND az = $2
+			FOR UPDATE
+		`, req.VPCName, o.az).Scan(&parentStatus); err != nil {
+			if err == sql.ErrNoRows {
+				return orchestration.WorkflowDef{}, fmt.Errorf("parent VPC %s does not exist in AZ %s", req.VPCName, o.az)
+			}
+			return orchestration.WorkflowDef{}, err
+		}
+		if parentStatus != models.ResourceStatusRunning {
+			return orchestration.WorkflowDef{}, fmt.Errorf("parent VPC %s is %s, want running", req.VPCName, parentStatus)
+		}
+		op, decision, err := o.beginCreateOperationTx(ctx, tx, "POST /api/v1/subnet", "create_subnet", fmt.Sprintf("%s/%s/%s", o.region, o.az, req.SubnetName), req, "subnet", subnetID)
 		if err != nil {
 			return orchestration.WorkflowDef{}, err
 		}
@@ -256,7 +272,7 @@ func (o *AZOrchestrator) beginCreateOperationTx(ctx context.Context, tx *sql.Tx,
 	if generation == 0 {
 		generation = 1
 	}
-	op, decision, err := o.operationSvc.BeginTx(ctx, tx, operation.BeginRequest{
+	op, decision, err := o.operationSvc.BeginTargetTx(ctx, tx, operation.BeginRequest{
 		RootOperationID:   rootOperationID,
 		ParentOperationID: identity.ParentOperationID,
 		OwnerService:      fmt.Sprintf("az-nsp-vpc-%s", o.az),
@@ -275,6 +291,12 @@ func (o *AZOrchestrator) beginCreateOperationTx(ctx context.Context, tx *sql.Tx,
 	}
 	if decision == operation.DecisionConflict {
 		return nil, decision, operation.ErrIdempotencyKeyReused
+	}
+	if decision == operation.DecisionResourceConflict {
+		return nil, decision, operation.ErrResourceSpecConflict
+	}
+	if decision == operation.DecisionResourceBusy {
+		return nil, decision, operation.ErrResourceOperationInProgress
 	}
 	return op, decision, nil
 }
@@ -354,17 +376,14 @@ func (o *AZOrchestrator) GetSubnetStatus(ctx context.Context, subnetName string)
 }
 
 func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
+	targetScope := fmt.Sprintf("%s/%s/%s", o.region, o.az, vpcName)
 	vpc, err := o.vpcDAO.GetByName(ctx, vpcName, o.az)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("VPC不存在: %s", vpcName)
+		return o.deleteResourceAndReleaseTarget(ctx, "vpc_resources", "vpc_name", vpcName, "vpc", targetScope)
 	}
 	if err != nil {
 		return fmt.Errorf("查询VPC失败: %v", err)
 	}
-	if vpc.Status != models.ResourceStatusRunning {
-		return fmt.Errorf("VPC状态不是running，无法删除")
-	}
-
 	subnetCount, err := o.vpcDAO.CountSubnets(ctx, vpcName, o.az)
 	if err != nil {
 		return fmt.Errorf("查询子网数量失败: %v", err)
@@ -375,14 +394,14 @@ func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 
 	policyCount, err := o.checkZonePolicies(ctx, vpc.FirewallZone)
 	if err != nil {
-		logger.InfoContext(ctx, "检查Zone策略失败", "az", o.az, "error", err)
+		return fmt.Errorf("检查Zone策略失败: %w", err)
 	}
 	if policyCount > 0 {
 		return fmt.Errorf("Zone %s 中存在%d条防火墙策略，无法删除VPC", vpc.FirewallZone, policyCount)
 	}
 
-	if err := o.vpcDAO.UpdateStatus(ctx, vpc.ID, models.ResourceStatusDeleting, ""); err != nil {
-		return fmt.Errorf("更新VPC状态失败: %v", err)
+	if err := o.deleteResourceAndReleaseTarget(ctx, "vpc_resources", "vpc_name", vpcName, "vpc", targetScope); err != nil {
+		return fmt.Errorf("原子删除VPC失败: %w", err)
 	}
 
 	logger.InfoContext(ctx, "VPC删除成功", "az", o.az, "vpcName", vpcName)
@@ -390,19 +409,16 @@ func (o *AZOrchestrator) DeleteVPC(ctx context.Context, vpcName string) error {
 }
 
 func (o *AZOrchestrator) DeleteSubnet(ctx context.Context, subnetName string) error {
-	subnet, err := o.subnetDAO.GetByName(ctx, subnetName, o.az)
+	targetScope := fmt.Sprintf("%s/%s/%s", o.region, o.az, subnetName)
+	_, err := o.subnetDAO.GetByName(ctx, subnetName, o.az)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("子网不存在: %s", subnetName)
+		return o.deleteResourceAndReleaseTarget(ctx, "subnet_resources", "subnet_name", subnetName, "subnet", targetScope)
 	}
 	if err != nil {
 		return fmt.Errorf("查询子网失败: %v", err)
 	}
-	if subnet.Status != models.ResourceStatusRunning {
-		return fmt.Errorf("子网状态不是running，无法删除")
-	}
-
-	if err := o.subnetDAO.UpdateStatus(ctx, subnet.ID, models.ResourceStatusDeleting, ""); err != nil {
-		return fmt.Errorf("更新子网状态失败: %v", err)
+	if err := o.deleteResourceAndReleaseTarget(ctx, "subnet_resources", "subnet_name", subnetName, "subnet", targetScope); err != nil {
+		return fmt.Errorf("原子删除子网失败: %w", err)
 	}
 
 	logger.InfoContext(ctx, "子网删除成功", "az", o.az, "subnetName", subnetName)
@@ -424,37 +440,12 @@ func (o *AZOrchestrator) GetVPCByID(ctx context.Context, vpcID string) (*models.
 func (o *AZOrchestrator) DeleteVPCByID(ctx context.Context, vpcID string) error {
 	vpc, err := o.vpcDAO.GetByID(ctx, vpcID)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("VPC不存在: %s", vpcID)
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("查询VPC失败: %v", err)
 	}
-	if vpc.Status != models.ResourceStatusRunning {
-		return fmt.Errorf("VPC状态不是running，无法删除")
-	}
-
-	subnetCount, err := o.vpcDAO.CountSubnetsByVPCID(ctx, vpcID)
-	if err != nil {
-		return fmt.Errorf("查询子网数量失败: %v", err)
-	}
-	if subnetCount > 0 {
-		return fmt.Errorf("VPC下存在%d个子网，无法删除", subnetCount)
-	}
-
-	policyCount, err := o.checkZonePolicies(ctx, vpc.FirewallZone)
-	if err != nil {
-		logger.InfoContext(ctx, "检查Zone策略失败", "az", o.az, "error", err)
-	}
-	if policyCount > 0 {
-		return fmt.Errorf("Zone %s 中存在%d条防火墙策略，无法删除VPC", vpc.FirewallZone, policyCount)
-	}
-
-	if err := o.vpcDAO.UpdateStatus(ctx, vpcID, models.ResourceStatusDeleted, ""); err != nil {
-		return fmt.Errorf("更新VPC状态失败: %v", err)
-	}
-
-	logger.InfoContext(ctx, "VPC删除成功", "az", o.az, "vpcID", vpcID)
-	return nil
+	return o.DeleteVPC(ctx, vpc.VPCName)
 }
 
 func (o *AZOrchestrator) ListSubnetsByVPCID(ctx context.Context, vpcID string) ([]*models.SubnetResource, error) {
@@ -468,21 +459,12 @@ func (o *AZOrchestrator) GetSubnetByID(ctx context.Context, subnetID string) (*m
 func (o *AZOrchestrator) DeleteSubnetByID(ctx context.Context, subnetID string) error {
 	subnet, err := o.subnetDAO.GetByID(ctx, subnetID)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("子网不存在: %s", subnetID)
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("查询子网失败: %v", err)
 	}
-	if subnet.Status != models.ResourceStatusRunning {
-		return fmt.Errorf("子网状态不是running，无法删除")
-	}
-
-	if err := o.subnetDAO.UpdateStatus(ctx, subnetID, models.ResourceStatusDeleted, ""); err != nil {
-		return fmt.Errorf("更新子网状态失败: %v", err)
-	}
-
-	logger.InfoContext(ctx, "子网删除成功", "az", o.az, "subnetID", subnetID)
-	return nil
+	return o.DeleteSubnet(ctx, subnet.SubnetName)
 }
 
 func (o *AZOrchestrator) GetTaskByID(ctx context.Context, taskID string) (*models.Task, error) {
@@ -498,12 +480,8 @@ func (o *AZOrchestrator) ReplayTask(ctx context.Context, taskID string) error {
 	if err != nil {
 		return fmt.Errorf("获取任务失败: %v", err)
 	}
-	if task.Status != models.TaskStatusFailed {
-		return fmt.Errorf("任务状态不是failed，无法重做 (当前状态: %s)", task.Status)
-	}
-
-	if err := o.resetResourceStatus(ctx, task.ResourceType, task.ResourceID); err != nil {
-		return err
+	if task.Status == models.TaskStatusCompleted || task.Status == models.TaskStatusFailed || task.Status == models.TaskStatusCancelled {
+		return fmt.Errorf("终态任务不能原地Replay；请使用新的Idempotency-Key发起审计后的业务操作 (当前状态: %s)", task.Status)
 	}
 
 	queueName := o.resolveQueueName(task.DeviceType, task.Priority)
@@ -527,19 +505,6 @@ func (o *AZOrchestrator) ReplayTask(ctx context.Context, taskID string) error {
 
 	logger.InfoContext(ctx, "任务重做成功", "az", o.az, "taskID", taskID)
 	return nil
-}
-
-func (o *AZOrchestrator) resetResourceStatus(ctx context.Context, resourceType models.ResourceType, resourceID string) error {
-	switch resourceType {
-	case models.ResourceTypeVPC:
-		return o.vpcDAO.UpdateStatus(ctx, resourceID, models.ResourceStatusCreating, "")
-	case models.ResourceTypeSubnet:
-		return o.subnetDAO.UpdateStatus(ctx, resourceID, models.ResourceStatusCreating, "")
-	case models.ResourceTypePCCN:
-		return o.pccnDAO.UpdateStatus(ctx, resourceID, models.ResourceStatusCreating, "")
-	default:
-		return fmt.Errorf("不支持的资源类型: %s", resourceType)
-	}
 }
 
 func (o *AZOrchestrator) StartCompensationTask(ctx context.Context, interval time.Duration) {
@@ -894,26 +859,68 @@ func (o *AZOrchestrator) GetPCCNStatus(ctx context.Context, pccnName string) (*m
 }
 
 func (o *AZOrchestrator) DeletePCCN(ctx context.Context, pccnName string) error {
-	pccn, err := o.pccnDAO.GetByName(ctx, pccnName, o.az)
+	targetScope := fmt.Sprintf("%s/%s", o.az, pccnName)
+	_, err := o.pccnDAO.GetByName(ctx, pccnName, o.az)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("PCCN不存在: %s", pccnName)
+		return o.deleteResourceAndReleaseTarget(ctx, "pccn_resources", "pccn_name", pccnName, "pccn", targetScope)
 	}
 	if err != nil {
 		return fmt.Errorf("查询PCCN失败: %v", err)
 	}
-	if pccn.Status != models.ResourceStatusRunning {
-		return fmt.Errorf("PCCN状态不是running，无法删除")
-	}
-
-	if err := o.pccnDAO.UpdateStatus(ctx, pccn.ID, models.ResourceStatusDeleting, ""); err != nil {
-		return fmt.Errorf("更新PCCN状态失败: %v", err)
-	}
-	if err := o.pccnDAO.DeleteByName(ctx, pccnName, o.az); err != nil {
-		return fmt.Errorf("删除PCCN记录失败: %v", err)
+	if err := o.deleteResourceAndReleaseTarget(ctx, "pccn_resources", "pccn_name", pccnName, "pccn", targetScope); err != nil {
+		return fmt.Errorf("原子删除PCCN失败: %w", err)
 	}
 
 	logger.InfoContext(ctx, "PCCN删除成功", "az", o.az, "pccn_name", pccnName)
 	return nil
+}
+
+func (o *AZOrchestrator) deleteResourceAndReleaseTarget(ctx context.Context, table, nameColumn, name, resourceType, targetScope string) error {
+	allowed := map[string]string{"vpc_resources": "vpc_name", "subnet_resources": "subnet_name", "pccn_resources": "pccn_name"}
+	if allowed[table] != nameColumn {
+		return fmt.Errorf("unsupported resource table %q", table)
+	}
+	tx, err := o.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	ownerService := fmt.Sprintf("az-nsp-vpc-%s", o.az)
+	if err := o.operationSvc.MarkTargetRetiringTx(ctx, tx, ownerService, resourceType, targetScope); err != nil {
+		return err
+	}
+	query := fmt.Sprintf(`SELECT id FROM %s WHERE %s = $1 AND az = $2 FOR UPDATE`, table, nameColumn)
+	var resourceID string
+	err = tx.QueryRowContext(ctx, query, name, o.az).Scan(&resourceID)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if table == "vpc_resources" && resourceID != "" {
+		var subnetCount int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM subnet_resources WHERE vpc_name = $1 AND az = $2 AND status != 'deleted'`, name, o.az).Scan(&subnetCount); err != nil {
+			return err
+		}
+		if subnetCount > 0 {
+			return fmt.Errorf("VPC下存在%d个子网，无法删除", subnetCount)
+		}
+	}
+	if err := o.operationSvc.ReleaseTargetTx(ctx, tx, ownerService, resourceType, targetScope); err != nil {
+		return err
+	}
+	if resourceID != "" {
+		// The demo DeviceDriver persists its queryable device state in the AZ
+		// database. Remove it before the resource identity is retired. A late
+		// create task is fenced by Runtime.resourceGenerationCurrent and will
+		// reconcile the same target back to absent.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM worker_device_state WHERE target_key = $1`, resourceID); err != nil {
+			return err
+		}
+		deleteQuery := fmt.Sprintf(`DELETE FROM %s WHERE id = $1`, table)
+		if _, err := tx.ExecContext(ctx, deleteQuery, resourceID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (o *AZOrchestrator) ListPCCNs(ctx context.Context) ([]*models.PCCNResource, error) {
