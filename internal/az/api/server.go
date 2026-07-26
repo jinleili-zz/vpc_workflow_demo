@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"workflow_qoder/internal/az/orchestrator"
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinleili-zz/nsp-platform/auth"
@@ -36,6 +38,7 @@ func NewServer(cfg *config.NSPConfig, broker taskqueue.Broker, inspector taskque
 	// Add trace middleware for distributed tracing
 	instanceID := fmt.Sprintf("az-nsp-vpc-%s-%s", cfg.Region, cfg.AZ)
 	router.Use(trace.TraceMiddleware(instanceID))
+	router.Use(operation.HTTPMiddleware())
 	router.Use(ginLoggerMiddleware())
 	if cfg.Auth.EnableAuth && verifier != nil {
 		skipPaths := cfg.Auth.SkipAuthPaths
@@ -113,9 +116,23 @@ func (s *Server) setupRoutes() {
 
 		api.POST("/task/replay/:task_id", s.replayTask)
 		api.GET("/task/:task_id", s.getTaskByID)
+		api.GET("/operations/:operation_id", s.getOperation)
 
 		api.GET("/health", s.health)
 	}
+}
+
+func (s *Server) getOperation(c *gin.Context) {
+	op, err := s.orchestrator.GetOperation(c.Request.Context(), c.Param("operation_id"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"code": "OPERATION_NOT_FOUND", "message": "operation not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, op)
 }
 
 func (s *Server) createVPC(c *gin.Context) {
@@ -128,13 +145,12 @@ func (s *Server) createVPC(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx := operation.ContextWithIdentityFallback(c.Request.Context(), operation.RequestIdentity{
+		RootOperationID: req.RootOperationID, ParentOperationID: req.ParentOperationID, ResourceGeneration: req.ResourceGeneration,
+	})
 	resp, err := s.orchestrator.CreateVPC(ctx, &req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.VPCResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建VPC失败: %v", err),
-		})
+		writeCreateError(c, "创建VPC失败", err)
 		return
 	}
 
@@ -191,10 +207,7 @@ func (s *Server) createSubnet(c *gin.Context) {
 	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateSubnet(ctx, &req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
-			Success: false,
-			Message: fmt.Sprintf("创建子网失败: %v", err),
-		})
+		writeCreateError(c, "创建子网失败", err)
 		return
 	}
 
@@ -377,10 +390,11 @@ func (s *Server) replayTask(c *gin.Context) {
 		return
 	}
 
-	if task.Status != models.TaskStatusFailed {
-		c.JSON(http.StatusBadRequest, gin.H{
+	if task.Status == models.TaskStatusCompleted || task.Status == models.TaskStatusFailed || task.Status == models.TaskStatusCancelled {
+		c.JSON(http.StatusConflict, gin.H{
 			"success": false,
-			"message": fmt.Sprintf("任务状态不是failed，无法重做 (当前状态: %s)", task.Status),
+			"code":    "TERMINAL_TASK_REPLAY_REQUIRES_NEW_OPERATION",
+			"message": fmt.Sprintf("终态任务不能原地Replay，请使用新的Idempotency-Key发起业务操作 (当前状态: %s)", task.Status),
 		})
 		return
 	}
@@ -433,8 +447,6 @@ func (s *Server) health(c *gin.Context) {
 // =====================================================
 
 func (s *Server) createPCCN(c *gin.Context) {
-	ctx := c.Request.Context()
-
 	var req models.PCCNRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -443,15 +455,15 @@ func (s *Server) createPCCN(c *gin.Context) {
 		})
 		return
 	}
+	ctx := operation.ContextWithIdentityFallback(c.Request.Context(), operation.RequestIdentity{
+		RootOperationID: req.RootOperationID, ParentOperationID: req.ParentOperationID, ResourceGeneration: req.ResourceGeneration,
+	})
 
 	logger.InfoContext(ctx, "收到PCCN创建请求", "pccn_name", req.PCCNName, "az", s.cfg.AZ)
 
 	resp, err := s.orchestrator.CreatePCCN(ctx, &req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("创建PCCN失败: %v", err),
-		})
+		writeCreateError(c, "创建PCCN失败", err)
 		return
 	}
 
@@ -460,6 +472,28 @@ func (s *Server) createPCCN(c *gin.Context) {
 	} else {
 		c.JSON(http.StatusBadRequest, resp)
 	}
+}
+
+func writeCreateError(c *gin.Context, prefix string, err error) {
+	status := http.StatusInternalServerError
+	code := "INTERNAL_ERROR"
+	if errors.Is(err, operation.ErrInvalidIdempotencyKey) {
+		status = http.StatusBadRequest
+		code = operation.ErrInvalidIdempotencyKey.Error()
+	} else if errors.Is(err, operation.ErrInvalidResourceGeneration) {
+		status = http.StatusBadRequest
+		code = operation.ErrInvalidResourceGeneration.Error()
+	} else if errors.Is(err, operation.ErrIdempotencyKeyReused) {
+		status = http.StatusConflict
+		code = operation.ErrIdempotencyKeyReused.Error()
+	} else if errors.Is(err, operation.ErrResourceSpecConflict) {
+		status = http.StatusConflict
+		code = operation.ErrResourceSpecConflict.Error()
+	} else if errors.Is(err, operation.ErrResourceOperationInProgress) {
+		status = http.StatusConflict
+		code = operation.ErrResourceOperationInProgress.Error()
+	}
+	c.JSON(status, gin.H{"code": code, "success": false, "message": fmt.Sprintf("%s: %v", prefix, err)})
 }
 
 func (s *Server) getPccnStatus(c *gin.Context) {
@@ -654,4 +688,8 @@ func (s *Server) StartHeartbeat(ctx context.Context) {
 // inconsistencies between workflow state and resource state.
 func (s *Server) StartCompensationTask(ctx context.Context, interval time.Duration) {
 	s.orchestrator.StartCompensationTask(ctx, interval)
+}
+
+func (s *Server) StartOutboxDispatcher(ctx context.Context, interval time.Duration) {
+	s.orchestrator.StartOutboxDispatcher(ctx, interval)
 }

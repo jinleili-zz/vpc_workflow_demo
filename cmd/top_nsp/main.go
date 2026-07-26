@@ -155,6 +155,7 @@ func main() {
 
 	// Initialize orchestrator with SAGA engine
 	orch := orchestrator.NewOrchestrator(ctx, reg, topDB, components.SagaEngine, components.TracedHTTP, components.Signer)
+	orch.StartReconciler(5 * time.Second)
 
 	// Initialize API server
 	server := api.NewServer(reg, orch, components.TracedHTTP, components.Signer)

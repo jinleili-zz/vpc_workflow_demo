@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 
 	"github.com/google/uuid"
 )
@@ -29,6 +31,7 @@ func (d *TopPCCNDAO) RegisterPCCN(ctx context.Context, pccn *models.PCCNRegistry
 		INSERT INTO pccn_registry (id, pccn_name, vpc1_name, vpc1_region, vpc2_name, vpc2_region, status, saga_tx_id, vpc_details)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (pccn_name) DO UPDATE SET
+		id = EXCLUDED.id,
 			vpc1_name = EXCLUDED.vpc1_name,
 			vpc1_region = EXCLUDED.vpc1_region,
 			vpc2_name = EXCLUDED.vpc2_name,
@@ -115,6 +118,13 @@ func (d *TopPCCNDAO) GetPCCNByID(ctx context.Context, pccnID string) (*models.PC
 
 // UpdatePCCNStatus updates the PCCN status and VPC details
 func (d *TopPCCNDAO) UpdatePCCNStatus(ctx context.Context, pccnName, status string, vpcDetails map[string]models.VPCDetail) error {
+	if vpcDetails == nil {
+		_, err := d.db.ExecContext(ctx, `
+			UPDATE pccn_registry SET status = $1, updated_at = NOW()
+			WHERE pccn_name = $2
+		`, status, pccnName)
+		return err
+	}
 	vpcDetailsJSON, err := json.Marshal(vpcDetails)
 	if err != nil {
 		return err
@@ -137,6 +147,59 @@ func (d *TopPCCNDAO) DeletePCCN(ctx context.Context, pccnName string) error {
 	query := `DELETE FROM pccn_registry WHERE pccn_name = $1`
 	_, err := d.db.ExecContext(ctx, query, pccnName)
 	return err
+}
+
+func (d *TopPCCNDAO) DeletePCCNAndReleaseTarget(ctx context.Context, pccnName string) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var persistedName string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT pccn_name
+		FROM pccn_registry WHERE pccn_name = $1 FOR UPDATE
+	`, pccnName).Scan(&persistedName); err != nil {
+		if err != sql.ErrNoRows {
+			return err
+		}
+		persistedName = pccnName
+	}
+	if err := assertTerminalPCCNClaim(ctx, tx, persistedName); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pccn_registry WHERE pccn_name = $1`, pccnName); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_target_claims SET active = FALSE, retiring = FALSE, updated_at = NOW()
+		WHERE owner_service = 'top-nsp-vpc' AND resource_type = 'pccn' AND target_scope = $1 AND active = TRUE
+	`, persistedName); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func assertTerminalPCCNClaim(ctx context.Context, tx *sql.Tx, targetScope string) error {
+	var status operation.Status
+	err := tx.QueryRowContext(ctx, `
+		SELECT operation.status
+		FROM orchestration_target_claims claim
+		JOIN orchestration_operations operation ON operation.operation_id = claim.operation_id
+		WHERE claim.owner_service = 'top-nsp-vpc' AND claim.resource_type = 'pccn'
+		  AND claim.target_scope = $1 AND claim.active = TRUE
+		FOR UPDATE OF claim, operation
+	`, targetScope).Scan(&status)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !status.Terminal() {
+		return fmt.Errorf("%w: target create operation is %s", operation.ErrResourceOperationInProgress, status)
+	}
+	return nil
 }
 
 // ListAllPCCNs lists all PCCNs

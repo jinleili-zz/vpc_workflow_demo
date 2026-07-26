@@ -306,6 +306,7 @@ COMMENT ON TABLE policy_registry IS '防火墙策略注册表';
 CREATE TABLE IF NOT EXISTS policy_az_records (
     id VARCHAR(64) PRIMARY KEY,
     policy_id VARCHAR(64) NOT NULL,
+    region VARCHAR(64) NOT NULL,
     az VARCHAR(64) NOT NULL,
     az_policy_id VARCHAR(64),
     
@@ -315,7 +316,7 @@ CREATE TABLE IF NOT EXISTS policy_az_records (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     
-    CONSTRAINT uk_policy_az UNIQUE (policy_id, az),
+    CONSTRAINT uk_policy_region_az UNIQUE (policy_id, region, az),
     CONSTRAINT fk_policy_id FOREIGN KEY (policy_id) REFERENCES policy_registry(id) ON DELETE CASCADE
 );
 

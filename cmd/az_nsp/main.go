@@ -176,6 +176,7 @@ func main() {
 
 	// 启动补偿任务（每30秒检查一次工作流与资源状态不一致的情况）
 	server.StartCompensationTask(ctx, 30*time.Second)
+	server.StartOutboxDispatcher(ctx, time.Second)
 
 	go server.StartHeartbeat(ctx)
 

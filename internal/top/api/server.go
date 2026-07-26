@@ -1,11 +1,16 @@
 package api
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 
 	"workflow_qoder/internal/client"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 	"workflow_qoder/internal/top/orchestrator"
 	"workflow_qoder/internal/top/registry"
 
@@ -41,9 +46,11 @@ func (s *Server) Engine() *gin.Engine {
 
 func (s *Server) SetupRoutes() {
 	api := s.router.Group("/api/v1")
+	idempotentWrite := operation.NorthboundHTTPMiddleware(strings.EqualFold(os.Getenv("NSP_IDEMPOTENCY_API_ENFORCE"), "true"))
 	{
 		api.GET("/health", s.health)
-		api.POST("/vpc", s.createVPC)
+		api.POST("/vpc", idempotentWrite, s.createVPC)
+		api.GET("/operations/:operation_id", s.getOperation)
 		api.GET("/vpcs", s.listVPCs)
 		api.GET("/vpc/:vpc_name/status", s.getVPCStatus)
 		api.DELETE("/vpc/:vpc_name", s.deleteVPC)
@@ -57,14 +64,14 @@ func (s *Server) SetupRoutes() {
 		api.POST("/az/heartbeat", s.heartbeat)
 		api.POST("/register/az", s.registerAZ) // alias
 		api.POST("/heartbeat", s.heartbeat)    // alias
-		api.POST("/subnet", s.createSubnet)
+		api.POST("/subnet", idempotentWrite, s.createSubnet)
 		api.GET("/subnet/:subnet_name/status", s.getSubnetStatus)
 		api.DELETE("/subnet/:subnet_name", s.deleteSubnet)
 		api.GET("/subnet/id/:subnet_id", s.getSubnetByID)
 		api.DELETE("/subnet/id/:subnet_id", s.deleteSubnetByID)
 
 		// PCCN routes
-		api.POST("/pccn", s.createPCCN)
+		api.POST("/pccn", idempotentWrite, s.createPCCN)
 		api.GET("/pccn/:pccn_name/status", s.getPCCNStatus)
 		api.GET("/pccns", s.listPCCNs)
 		api.DELETE("/pccn/:pccn_name", s.deletePCCN)
@@ -210,6 +217,9 @@ func (s *Server) createVPC(c *gin.Context) {
 	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateRegionVPC(ctx, &req)
 	if err != nil {
+		if writeOperationError(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, models.VPCResponse{
 			Success: false,
 			Message: fmt.Sprintf("创建VPC失败: %v", err),
@@ -217,7 +227,36 @@ func (s *Server) createVPC(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, resp)
+	status := http.StatusAccepted
+	if !resp.Success {
+		status = http.StatusBadRequest
+	}
+	c.JSON(status, resp)
+}
+
+func (s *Server) getOperation(c *gin.Context) {
+	op, err := s.orchestrator.GetOperation(c.Request.Context(), c.Param("operation_id"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": "OPERATION_NOT_FOUND", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, op)
+}
+
+func writeOperationError(c *gin.Context, err error) bool {
+	switch {
+	case errors.Is(err, operation.ErrInvalidIdempotencyKey):
+		c.JSON(http.StatusBadRequest, gin.H{"code": operation.ErrInvalidIdempotencyKey.Error(), "message": err.Error()})
+		return true
+	case errors.Is(err, operation.ErrIdempotencyKeyReused):
+		c.JSON(http.StatusConflict, gin.H{"code": operation.ErrIdempotencyKeyReused.Error(), "message": err.Error()})
+		return true
+	case errors.Is(err, operation.ErrResourceSpecConflict):
+		c.JSON(http.StatusConflict, gin.H{"code": operation.ErrResourceSpecConflict.Error(), "message": err.Error()})
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) listVPCs(c *gin.Context) {
@@ -260,10 +299,11 @@ func (s *Server) getVPCStatus(c *gin.Context) {
 
 	vpc, err := s.orchestrator.GetVPCByName(ctx, vpcName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("VPC不存在: %v", err),
-		})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "VPC已不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": fmt.Sprintf("查询VPC失败: %v", err)})
 		return
 	}
 
@@ -296,16 +336,24 @@ func (s *Server) deleteVPC(c *gin.Context) {
 	// 检查 VPC 是否存在防火墙策略
 	vpc, err := s.orchestrator.GetVPCByName(ctx, vpcName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("VPC不存在: %v", err),
-		})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "VPC已不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": fmt.Sprintf("查询VPC失败: %v", err)})
 		return
 	}
 
 	if vpc.FirewallZone != "" {
 		policyCount, err := s.orchestrator.CheckZonePolicies(ctx, vpc.FirewallZone)
-		if err == nil && policyCount > 0 {
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("无法确认VPC防火墙策略依赖: %v", err),
+			})
+			return
+		}
+		if policyCount > 0 {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
 				"message": fmt.Sprintf("VPC关联的Zone %s 下存在 %d 条防火墙策略，无法删除", vpc.FirewallZone, policyCount),
@@ -314,9 +362,12 @@ func (s *Server) deleteVPC(c *gin.Context) {
 		}
 	}
 
-	// 更新状态为 deleted
-	if err := s.orchestrator.UpdateVPCStatus(ctx, vpcName, "deleted", nil); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
+	if err := s.orchestrator.DeleteRegionVPC(ctx, vpc); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, operation.ErrResourceOperationInProgress) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{
 			"success": false,
 			"message": fmt.Sprintf("删除VPC失败: %v", err),
 		})
@@ -344,7 +395,11 @@ func (s *Server) getVPCByID(c *gin.Context) {
 
 	vpc, err := s.orchestrator.GetVPCByID(ctx, vpcID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "VPC已不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": fmt.Sprintf("查询VPC失败: %v", err)})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -364,7 +419,11 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 
 	vpc, err := s.orchestrator.GetVPCByID(ctx, vpcID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "VPC已不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": fmt.Sprintf("查询VPC失败: %v", err)})
 		return
 	}
 
@@ -383,7 +442,14 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 
 	if vpc.FirewallZone != "" {
 		policyCount, err := s.orchestrator.CheckZonePolicies(ctx, vpc.FirewallZone)
-		if err == nil && policyCount > 0 {
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("无法确认VPC防火墙策略依赖: %v", err),
+			})
+			return
+		}
+		if policyCount > 0 {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
 				"message": fmt.Sprintf("VPC关联的Zone %s 下存在 %d 条防火墙策略，无法删除", vpc.FirewallZone, policyCount),
@@ -392,8 +458,12 @@ func (s *Server) deleteVPCByID(c *gin.Context) {
 		}
 	}
 
-	if err := s.orchestrator.UpdateVPCStatus(ctx, vpcName, "deleted", nil); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": fmt.Sprintf("删除VPC失败: %v", err)})
+	if err := s.orchestrator.DeleteRegionVPC(ctx, vpc); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, operation.ErrResourceOperationInProgress) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"success": false, "message": fmt.Sprintf("删除VPC失败: %v", err)})
 		return
 	}
 
@@ -434,6 +504,9 @@ func (s *Server) createSubnet(c *gin.Context) {
 	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreateAZSubnet(ctx, &req)
 	if err != nil {
+		if writeOperationError(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, models.SubnetResponse{
 			Success: false,
 			Message: fmt.Sprintf("创建子网失败: %v", err),
@@ -441,7 +514,11 @@ func (s *Server) createSubnet(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, resp)
+	status := http.StatusAccepted
+	if !resp.Success {
+		status = http.StatusBadRequest
+	}
+	c.JSON(status, resp)
 }
 
 func (s *Server) getSubnetStatus(c *gin.Context) {
@@ -459,7 +536,6 @@ func (s *Server) getSubnetStatus(c *gin.Context) {
 		})
 		return
 	}
-
 	// 获取 AZ 信息
 	azInfo, err := s.registry.GetAZ(ctx, region, az)
 	if err != nil {
@@ -516,6 +592,10 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 		})
 		return
 	}
+	if err := s.orchestrator.MarkSubnetDeleting(ctx, az, subnetName); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"success": false, "code": "RESOURCE_OPERATION_IN_PROGRESS", "message": err.Error()})
+		return
+	}
 
 	azInfo, err := s.registry.GetAZ(ctx, region, az)
 	if err != nil {
@@ -537,6 +617,12 @@ func (s *Server) deleteSubnet(c *gin.Context) {
 		return
 	}
 	defer resp.Body.Close()
+	if (resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices) || resp.StatusCode == http.StatusNotFound {
+		if err := s.orchestrator.DeleteSubnetTopologyAndReleaseTarget(ctx, az, subnetName); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": fmt.Sprintf("提交Top子网删除状态失败: %v", err)})
+			return
+		}
+	}
 
 	c.DataFromReader(resp.StatusCode, resp.ContentLength, "application/json", resp.Body, nil)
 }
@@ -552,10 +638,13 @@ func (s *Server) getSubnetByID(c *gin.Context) {
 
 	subnet, err := s.orchestrator.GetSubnetByID(ctx, subnetID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "子网已不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": fmt.Sprintf("查询子网失败: %v", err)})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"subnet":  subnet,
@@ -574,7 +663,15 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 	// Get subnet info from Top DAO to find region/az
 	subnet, err := s.orchestrator.GetSubnetByID(ctx, subnetID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "子网已不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": fmt.Sprintf("查询子网失败: %v", err)})
+		return
+	}
+	if err := s.orchestrator.MarkSubnetDeleting(ctx, subnet.AZ, subnet.SubnetName); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"success": false, "code": "RESOURCE_OPERATION_IN_PROGRESS", "message": err.Error()})
 		return
 	}
 
@@ -598,6 +695,12 @@ func (s *Server) deleteSubnetByID(c *gin.Context) {
 		return
 	}
 	defer resp.Body.Close()
+	if (resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices) || resp.StatusCode == http.StatusNotFound {
+		if err := s.orchestrator.DeleteSubnetTopologyAndReleaseTarget(ctx, subnet.AZ, subnet.SubnetName); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": fmt.Sprintf("提交Top子网删除状态失败: %v", err)})
+			return
+		}
+	}
 
 	c.DataFromReader(resp.StatusCode, resp.ContentLength, "application/json", resp.Body, nil)
 }
@@ -619,6 +722,9 @@ func (s *Server) createPCCN(c *gin.Context) {
 	ctx := c.Request.Context()
 	resp, err := s.orchestrator.CreatePCCN(ctx, &req)
 	if err != nil {
+		if writeOperationError(c, err) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, models.PCCNResponse{
 			Success: false,
 			Message: fmt.Sprintf("创建PCCN失败: %v", err),
@@ -631,7 +737,7 @@ func (s *Server) createPCCN(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusAccepted, resp)
 }
 
 func (s *Server) getPCCNStatus(c *gin.Context) {
@@ -704,7 +810,11 @@ func (s *Server) deletePCCN(c *gin.Context) {
 
 	resp, err := s.orchestrator.DeletePCCN(ctx, pccnName)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.PCCNResponse{
+		status := http.StatusInternalServerError
+		if errors.Is(err, operation.ErrResourceOperationInProgress) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, models.PCCNResponse{
 			Success: false,
 			Message: fmt.Sprintf("删除PCCN失败: %v", err),
 		})

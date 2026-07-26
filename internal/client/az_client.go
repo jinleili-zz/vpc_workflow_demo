@@ -12,6 +12,7 @@ import (
 	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/trace"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 )
 
 // AZNSPClient AZ NSP HTTP客户端
@@ -60,6 +61,7 @@ func (c *AZNSPClient) CreateVPC(ctx context.Context, azAddr string, req *models.
 		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	applyOperationIdentity(ctx, httpReq)
 
 	resp, err := c.do(httpReq)
 
@@ -100,6 +102,7 @@ func (c *AZNSPClient) CreateSubnet(ctx context.Context, azAddr string, req *mode
 		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	applyOperationIdentity(ctx, httpReq)
 
 	resp, err := c.do(httpReq)
 
@@ -148,6 +151,29 @@ func (c *AZNSPClient) HealthCheck(ctx context.Context, azAddr string) error {
 	return nil
 }
 
+// GetOperation returns the durable AZ child operation used by Top reconcilers.
+func (c *AZNSPClient) GetOperation(ctx context.Context, azAddr, operationID string) (*operation.Operation, error) {
+	url := fmt.Sprintf("%s/api/v1/operations/%s", azAddr, operationID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create operation status request: %w", err)
+	}
+	resp, err := c.do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("query AZ operation: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("query AZ operation returned %d: %s", resp.StatusCode, string(body))
+	}
+	var result operation.Operation
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode AZ operation: %w", err)
+	}
+	return &result, nil
+}
+
 // DeleteVPC 删除指定AZ的VPC（补偿操作）
 func (c *AZNSPClient) DeleteVPC(ctx context.Context, azAddr string, vpcName string) error {
 	url := fmt.Sprintf("%s/api/v1/vpc/%s", azAddr, vpcName)
@@ -163,7 +189,7 @@ func (c *AZNSPClient) DeleteVPC(ctx context.Context, azAddr string, vpcName stri
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 		respBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("删除VPC失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
 	}
@@ -221,6 +247,7 @@ func (c *AZNSPClient) CreatePCCN(ctx context.Context, azAddr string, req *models
 		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	applyOperationIdentity(ctx, httpReq)
 
 	resp, err := c.do(httpReq)
 
@@ -245,6 +272,12 @@ func (c *AZNSPClient) CreatePCCN(ctx context.Context, azAddr string, req *models
 	}
 
 	return &pccnResp, nil
+}
+
+func applyOperationIdentity(ctx context.Context, req *http.Request) {
+	if identity, ok := operation.IdentityFromContext(ctx); ok {
+		operation.ApplyIdentityHeaders(req.Header, identity)
+	}
 }
 
 // GetPCCNStatus queries the PCCN status in the specified AZ
@@ -279,7 +312,7 @@ func (c *AZNSPClient) GetPCCNStatus(ctx context.Context, azAddr string, pccnName
 	return &pccnStatus, nil
 }
 
-// DeletePCCN deletes a PCCN connection in the specified AZ
+// DeletePCCN ensures a PCCN connection is absent in the specified AZ.
 func (c *AZNSPClient) DeletePCCN(ctx context.Context, azAddr string, pccnName string) error {
 	url := fmt.Sprintf("%s/api/v1/pccn/%s", azAddr, pccnName)
 
@@ -294,7 +327,7 @@ func (c *AZNSPClient) DeletePCCN(ctx context.Context, azAddr string, pccnName st
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 		respBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("删除PCCN失败，状态码: %d, 响应: %s", resp.StatusCode, string(respBody))
 	}

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
@@ -294,6 +295,9 @@ func publishReply(ctx context.Context, broker taskqueue.Broker, task *taskqueue.
 	for k, v := range task.Metadata {
 		metadata[k] = v
 	}
+	if replyPayload.EventID != "" {
+		metadata[orchestration.MetadataKeyEventID] = replyPayload.EventID
+	}
 
 	if _, err := broker.Publish(ctx, &taskqueue.Task{
 		Type:     orchestration.ReplyTaskType,
@@ -325,6 +329,47 @@ func buildReplyPayload(ctx context.Context, task *taskqueue.Task, status orchest
 		TotalSteps:   totalSteps,
 		Status:       status,
 		Error:        errMsg,
+	}
+	if task.Metadata[orchestration.MetadataKeyProtocolVersion] != "" {
+		protocolVersion, err := metadataInt(task.Metadata, orchestration.MetadataKeyProtocolVersion)
+		if err != nil {
+			return nil, err
+		}
+		if int16(protocolVersion) != orchestration.TaskProtocolVersion {
+			return nil, fmt.Errorf("不支持的task protocol version: %d", protocolVersion)
+		}
+		generation, err := metadataInt(task.Metadata, orchestration.MetadataKeyGeneration)
+		if err != nil {
+			return nil, err
+		}
+		attempt, err := metadataInt(task.Metadata, orchestration.MetadataKeyAttempt)
+		if err != nil {
+			return nil, err
+		}
+		if retryCount, ok := asynq.GetRetryCount(ctx); ok {
+			attempt += retryCount
+		}
+		reply.ProtocolVersion = orchestration.TaskProtocolVersion
+		reply.OperationID = task.Metadata[orchestration.MetadataKeyOperationID]
+		reply.RootOperationID = task.Metadata[orchestration.MetadataKeyRootOperationID]
+		reply.WorkflowID = task.Metadata[orchestration.MetadataKeyWorkflowID]
+		reply.TaskID = task.Metadata[orchestration.MetadataKeyTaskID]
+		reply.Generation = int64(generation)
+		reply.Attempt = attempt
+		reply.StepName = task.Metadata[orchestration.MetadataKeyStepName]
+		stepOrdinal, err := metadataInt(task.Metadata, orchestration.MetadataKeyStepOrdinal)
+		if err != nil {
+			return nil, err
+		}
+		reply.StepOrdinal = stepOrdinal
+		reply.OperationKey = task.Metadata[orchestration.MetadataKeyOperationKey]
+		reply.DesiredHash = task.Metadata[orchestration.MetadataKeyDesiredHash]
+		reply.OccurredAt = time.Now().UTC()
+		if reply.OperationID == "" || reply.RootOperationID == "" || reply.WorkflowID == "" || reply.TaskID == "" || reply.StepName == "" || reply.StepOrdinal <= 0 || reply.OperationKey == "" || reply.DesiredHash == "" {
+			return nil, fmt.Errorf("task v2 metadata缺少workflow身份")
+		}
+		eventKey := fmt.Sprintf("reply:%s:generation:%d:attempt:%d:%s", reply.TaskID, reply.Generation, reply.Attempt, status)
+		reply.EventID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(eventKey)).String()
 	}
 	if status == orchestration.ReplyStatusFailed {
 		retryCount, maxRetries, finalFailure := retryContext(ctx)

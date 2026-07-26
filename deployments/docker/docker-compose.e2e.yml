@@ -37,6 +37,10 @@ services:
       - ./init-postgres-e2e.sh:/docker-entrypoint-initdb.d/init-postgres-e2e.sh
       - ../../internal/db/migrations/001_init_postgresql.sql:/migrations/001_init_postgresql.sql
       - ../../internal/db/migrations/004_create_pccn_tables.sql:/migrations/004_create_pccn_tables.sql
+      - ../../internal/db/migrations/005_create_operations.sql:/migrations/005_create_operations.sql
+      - ../../internal/db/migrations/006_create_outbox_inbox.sql:/migrations/006_create_outbox_inbox.sql
+      - ../../internal/db/migrations/007_create_top_saga_submissions.sql:/migrations/007_create_top_saga_submissions.sql
+      - ../../internal/db/migrations/008_create_worker_ledger.sql:/migrations/008_create_worker_ledger.sql
       - ../../../nsp-platform/saga/migrations/saga.sql:/migrations/saga.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nsp_user -d nsp_top"]
@@ -66,6 +70,7 @@ services:
       - POSTGRES_PORT=5432
       - POSTGRES_USER=nsp_user
       - POSTGRES_PASSWORD=nsp_password
+      - TOP_NSP_VFW_ADDR=http://e2e-top-nsp-vfw:8082
     ports:
       - "18080:8080"
     volumes:
@@ -116,6 +121,7 @@ services:
       - SERVICE_TYPE=az
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - PORT=8080
       - NSP_REDIS_HOST=e2e-redis
       - NSP_REDIS_PORT=6379
@@ -156,6 +162,7 @@ services:
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - PORT=8080
       - REDIS_ADDR=e2e-redis:6379
       - REDIS_BROKER_DB=1
@@ -188,10 +195,16 @@ services:
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - WORKER_TYPE=switch
       - REDIS_ADDR=e2e-redis:6379
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=10
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1a_vpc
     volumes:
       - ./config-e2e.yaml:/app/config/config.yaml
     depends_on:
@@ -209,10 +222,16 @@ services:
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - WORKER_TYPE=firewall
       - REDIS_ADDR=e2e-redis:6379
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=10
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1a_vfw
     volumes:
       - ./config-e2e.yaml:/app/config/config.yaml
     depends_on:

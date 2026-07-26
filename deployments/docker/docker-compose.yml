@@ -87,6 +87,10 @@ services:
       - ./init-postgres.sh:/docker-entrypoint-initdb.d/init-postgres.sh
       - ../../internal/db/migrations/001_init_postgresql.sql:/migrations/001_init_postgresql.sql
       - ../../internal/db/migrations/004_create_pccn_tables.sql:/migrations/004_create_pccn_tables.sql
+      - ../../internal/db/migrations/005_create_operations.sql:/migrations/005_create_operations.sql
+      - ../../internal/db/migrations/006_create_outbox_inbox.sql:/migrations/006_create_outbox_inbox.sql
+      - ../../internal/db/migrations/007_create_top_saga_submissions.sql:/migrations/007_create_top_saga_submissions.sql
+      - ../../internal/db/migrations/008_create_worker_ledger.sql:/migrations/008_create_worker_ledger.sql
       - ./saga-migration.sql:/migrations/saga.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nsp_user -d nsp_top"]
@@ -177,6 +181,7 @@ services:
       - SERVICE_TYPE=az
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - PORT=8080
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
@@ -221,6 +226,7 @@ services:
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - PORT=8080
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
@@ -247,10 +253,16 @@ services:
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - WORKER_TYPE=switch
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=10
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1a_vpc
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
@@ -266,10 +278,16 @@ services:
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - WORKER_TYPE=firewall
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=10
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1a_vfw
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
@@ -288,6 +306,7 @@ services:
       - SERVICE_TYPE=az
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - PORT=8080
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
@@ -332,6 +351,7 @@ services:
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - PORT=8080
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
@@ -358,10 +378,16 @@ services:
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - WORKER_TYPE=switch
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=10
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1b_vpc
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
@@ -377,10 +403,16 @@ services:
     environment:
       - REGION=cn-beijing
       - AZ=cn-beijing-1b
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - WORKER_TYPE=firewall
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=10
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_beijing_1b_vfw
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
@@ -399,6 +431,7 @@ services:
       - SERVICE_TYPE=az
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - PORT=8080
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_DATA_DB=0
@@ -443,6 +476,7 @@ services:
     environment:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - PORT=8080
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
@@ -469,10 +503,16 @@ services:
     environment:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - WORKER_TYPE=switch
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=3
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_shanghai_1a_vpc
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully
@@ -488,10 +528,16 @@ services:
     environment:
       - REGION=cn-shanghai
       - AZ=cn-shanghai-1a
+      - NSP_WORKFLOW_V1_REPLY_ENABLED=${NSP_WORKFLOW_V1_REPLY_ENABLED:-false}
       - WORKER_TYPE=firewall
       - REDIS_ADDR=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - REDIS_BROKER_DB=1
       - WORKER_COUNT=2
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=nsp_user
+      - POSTGRES_PASSWORD=nsp_password
+      - POSTGRES_DB=nsp_cn_shanghai_1a_vfw
     depends_on:
       redis-cluster-setup:
         condition: service_completed_successfully

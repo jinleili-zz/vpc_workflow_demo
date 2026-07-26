@@ -2,20 +2,25 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"workflow_qoder/internal/config"
 	"workflow_qoder/internal/logging"
 	"workflow_qoder/internal/queue"
+	workerruntime "workflow_qoder/internal/worker"
 	"workflow_qoder/tasks"
 
 	"github.com/jinleili-zz/nsp-platform/logger"
+	"github.com/jinleili-zz/nsp-platform/taskqueue"
 	"github.com/jinleili-zz/nsp-platform/taskqueue/asynqbroker"
+	_ "github.com/lib/pq"
 )
 
 func main() {
@@ -56,6 +61,20 @@ func main() {
 			cfg.Redis.BrokerDB = v
 		}
 	}
+	if pgHost := os.Getenv("POSTGRES_HOST"); pgHost != "" {
+		cfg.PostgreSQL.Host = pgHost
+	}
+	if pgPort := os.Getenv("POSTGRES_PORT"); pgPort != "" {
+		if port, err := strconv.Atoi(pgPort); err == nil {
+			cfg.PostgreSQL.Port = port
+		}
+	}
+	if pgUser := os.Getenv("POSTGRES_USER"); pgUser != "" {
+		cfg.PostgreSQL.User = pgUser
+	}
+	if pgPassword := os.Getenv("POSTGRES_PASSWORD"); pgPassword != "" {
+		cfg.PostgreSQL.Password = pgPassword
+	}
 
 	redisAddr := cfg.GetRedisAddr()
 	redisBrokerDB := cfg.GetRedisBrokerDB()
@@ -83,9 +102,34 @@ func main() {
 
 	queuesConfig := queue.GetQueueConfig(region, az, deviceType)
 
-	// 创建 Broker
+	// Worker Ledger is mandatory for v2 tasks. Switch/LB workers coordinate in
+	// the AZ VPC database; firewall workers coordinate in the AZ VFW database.
+	dbName := os.Getenv("POSTGRES_DB")
+	if dbName == "" {
+		suffix := "vpc"
+		if deviceType == queue.DeviceTypeFirewall {
+			suffix = "vfw"
+		}
+		dbName = fmt.Sprintf("nsp_%s_%s", strings.ReplaceAll(az, "-", "_"), suffix)
+	}
+	pgDB, err := sql.Open("postgres", cfg.GetPostgresDSN(dbName))
+	if err != nil {
+		logger.Platform().Error("Worker PostgreSQL连接失败", "error", err)
+		os.Exit(1)
+	}
+	defer pgDB.Close()
+	if err := pgDB.Ping(); err != nil {
+		logger.Platform().Error("Worker PostgreSQL不可用", "database", dbName, "error", err)
+		os.Exit(1)
+	}
+
+	// 创建原始 Broker；handler 使用 Runtime Broker 将 Reply 先写 Outbox。
 	broker := asynqbroker.NewBroker(redisOpt)
 	defer broker.Close()
+	runtime := workerruntime.NewRuntime(pgDB, broker, fmt.Sprintf("worker-%s-%s-%s", workerType, region, az))
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	defer cancelWorker()
+	go runtime.RunDispatcher(workerCtx, time.Second)
 
 	// 创建 Consumer
 	consumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
@@ -96,27 +140,31 @@ func main() {
 	})
 
 	// 注册 task handler
+	wrap := func(handler taskqueue.HandlerFunc) taskqueue.HandlerFunc {
+		return tasks.ValidateTaskProtocol(runtime.Wrap(handler))
+	}
 	switch deviceType {
 	case queue.DeviceTypeSwitch:
-		consumer.Handle("create_vrf_on_switch", tasks.CreateVRFOnSwitchHandler(broker))
-		consumer.Handle("create_vlan_subinterface", tasks.CreateVLANSubInterfaceHandler(broker))
-		consumer.Handle("create_subnet_on_switch", tasks.CreateSubnetOnSwitchHandler(broker))
-		consumer.Handle("configure_subnet_routing", tasks.ConfigureSubnetRoutingHandler(broker))
-		consumer.Handle("create_pccn_connection", tasks.CreatePCCNConnectionHandler(broker))
-		consumer.Handle("configure_pccn_routing", tasks.ConfigurePCCNRoutingHandler(broker))
+		consumer.Handle("create_vrf_on_switch", wrap(tasks.CreateVRFOnSwitchHandler(runtime)))
+		consumer.Handle("create_vlan_subinterface", wrap(tasks.CreateVLANSubInterfaceHandler(runtime)))
+		consumer.Handle("create_subnet_on_switch", wrap(tasks.CreateSubnetOnSwitchHandler(runtime)))
+		consumer.Handle("configure_subnet_routing", wrap(tasks.ConfigureSubnetRoutingHandler(runtime)))
+		consumer.Handle("create_pccn_connection", wrap(tasks.CreatePCCNConnectionHandler(runtime)))
+		consumer.Handle("configure_pccn_routing", wrap(tasks.ConfigurePCCNRoutingHandler(runtime)))
+		consumer.Handle("delete_pccn_connection", wrap(tasks.DeletePCCNConnectionHandler(runtime)))
 	case queue.DeviceTypeFirewall:
-		consumer.Handle("create_firewall_zone", tasks.CreateFirewallZoneHandler(broker))
-		consumer.Handle("create_firewall_policy", tasks.CreateFirewallPolicyHandler(broker))
+		consumer.Handle("create_firewall_zone", wrap(tasks.CreateFirewallZoneHandler(runtime)))
+		consumer.Handle("create_firewall_policy", wrap(tasks.CreateFirewallPolicyHandler(runtime)))
 	case queue.DeviceTypeLoadBalancer:
-		consumer.Handle("create_lb_pool", tasks.CreateLBPoolHandler(broker))
-		consumer.Handle("configure_lb_listener", tasks.ConfigureLBListenerHandler(broker))
+		consumer.Handle("create_lb_pool", wrap(tasks.CreateLBPoolHandler(runtime)))
+		consumer.Handle("configure_lb_listener", wrap(tasks.ConfigureLBListenerHandler(runtime)))
 	}
 
 	taskQueueName := queue.GetQueueName(region, az, deviceType)
 
 	go func() {
 		logger.Platform().Info("Worker 启动", "region", region, "az", az, "workerType", workerType, "concurrency", workerCount, "taskQueue", taskQueueName)
-		if err := consumer.Start(context.Background()); err != nil {
+		if err := consumer.Start(workerCtx); err != nil {
 			logger.Platform().Error("Worker 启动失败", "region", region, "az", az, "workerType", workerType, "error", err)
 			os.Exit(1)
 		}
@@ -127,6 +175,7 @@ func main() {
 	<-quit
 
 	logger.Platform().Info("Worker 收到退出信号，正在关闭...", "region", region, "az", az, "workerType", workerType)
+	cancelWorker()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

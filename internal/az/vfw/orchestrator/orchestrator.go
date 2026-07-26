@@ -16,6 +16,7 @@ import (
 	vfwdao "workflow_qoder/internal/az/vfw/dao"
 	dbdao "workflow_qoder/internal/db/dao"
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 	"workflow_qoder/internal/orchestration"
 	"workflow_qoder/internal/queue"
 )
@@ -23,18 +24,22 @@ import (
 const stalePolicyTimeout = 5 * time.Minute
 
 type VFWOrchestrator struct {
-	policyDAO   *vfwdao.FirewallPolicyDAO
-	taskDAO     *dbdao.TaskDAO
-	workflowMgr *orchestration.Manager
-	inspector   taskqueue.Inspector
-	tracedHTTP  *trace.TracedClient
-	region      string
-	az          string
+	db           *sql.DB
+	policyDAO    *vfwdao.FirewallPolicyDAO
+	taskDAO      *dbdao.TaskDAO
+	workflowMgr  *orchestration.Manager
+	inspector    taskqueue.Inspector
+	tracedHTTP   *trace.TracedClient
+	region       string
+	az           string
+	operationSvc *operation.Service
 }
 
 func NewVFWOrchestrator(db *sql.DB, broker taskqueue.Broker, inspector taskqueue.Inspector, tracedHTTP *trace.TracedClient, region, az string) *VFWOrchestrator {
 	taskDAO := dbdao.NewTaskDAO(db)
-	workflowMgr := orchestration.NewManager(
+	workflowMgr := orchestration.NewDurableManager(
+		db,
+		fmt.Sprintf("az-nsp-vfw-%s", az),
 		broker,
 		taskDAO,
 		func(deviceType string, priority int) string {
@@ -45,13 +50,15 @@ func NewVFWOrchestrator(db *sql.DB, broker taskqueue.Broker, inspector taskqueue
 	workflowMgr.RegisterResourceStore(models.ResourceTypeFirewallPolicy, vfwdao.NewFirewallPolicyDAO(db))
 
 	return &VFWOrchestrator{
-		policyDAO:   vfwdao.NewFirewallPolicyDAO(db),
-		taskDAO:     taskDAO,
-		workflowMgr: workflowMgr,
-		inspector:   inspector,
-		tracedHTTP:  tracedHTTP,
-		region:      region,
-		az:          az,
+		db:           db,
+		policyDAO:    vfwdao.NewFirewallPolicyDAO(db),
+		taskDAO:      taskDAO,
+		workflowMgr:  workflowMgr,
+		inspector:    inspector,
+		tracedHTTP:   tracedHTTP,
+		region:       region,
+		az:           az,
+		operationSvc: operation.NewService(operation.NewRepository(db)),
 	}
 }
 
@@ -61,6 +68,14 @@ func (o *VFWOrchestrator) HandleReplyTask(ctx context.Context, task *taskqueue.T
 
 func (o *VFWOrchestrator) ReplyQueueName() string {
 	return o.workflowMgr.ReplyQueueName()
+}
+
+func (o *VFWOrchestrator) StartOutboxDispatcher(ctx context.Context, interval time.Duration) {
+	o.workflowMgr.StartOutboxDispatcher(ctx, interval)
+}
+
+func (o *VFWOrchestrator) GetOperation(ctx context.Context, operationID string) (*operation.Operation, error) {
+	return o.operationSvc.Get(ctx, operationID)
 }
 
 func (o *VFWOrchestrator) CreatePolicy(ctx context.Context, req *models.AZFirewallPolicyRequest) (*models.AZFirewallPolicyResponse, error) {
@@ -84,42 +99,103 @@ func (o *VFWOrchestrator) CreatePolicy(ctx context.Context, req *models.AZFirewa
 		AZ:          o.az,
 	}
 
-	if err := o.policyDAO.Create(ctx, policy); err != nil {
-		return &models.AZFirewallPolicyResponse{Success: false, Message: fmt.Sprintf("创建策略记录失败: %v", err)}, nil
-	}
-
 	params, err := o.buildPolicyTaskParams(req)
 	if err != nil {
 		return &models.AZFirewallPolicyResponse{Success: false, Message: fmt.Sprintf("序列化策略参数失败: %v", err)}, nil
 	}
 
-	workflowID, err := o.workflowMgr.SubmitWorkflow(ctx, orchestration.WorkflowDef{
-		ResourceType: models.ResourceTypeFirewallPolicy,
-		ResourceID:   policyID,
-		AZ:           o.az,
-		Steps: []orchestration.WorkflowStep{
-			{
-				TaskType:   "create_firewall_policy",
-				TaskName:   "创建防火墙策略",
-				DeviceType: string(queue.DeviceTypeFirewall),
-				Priority:   int(taskqueue.PriorityNormal),
-				MaxRetries: 3,
-				Payload:    params,
+	workflowID, persistedPolicyID, err := o.workflowMgr.SubmitPreparedWorkflow(ctx, func(ctx context.Context, tx *sql.Tx) (orchestration.WorkflowDef, error) {
+		op, decision, err := o.beginCreateOperationTx(ctx, tx, req, policyID)
+		if err != nil {
+			return orchestration.WorkflowDef{}, err
+		}
+		policyID = op.ResourceID
+		policy.ID = policyID
+		if decision == operation.DecisionNew {
+			if err := o.policyDAO.CreateTx(ctx, tx, policy); err != nil {
+				return orchestration.WorkflowDef{}, err
+			}
+		}
+		return orchestration.WorkflowDef{
+			OperationID:       op.OperationID,
+			RootOperationID:   op.RootOperationID,
+			WorkflowID:        op.OperationID,
+			Generation:        op.Generation,
+			OperationRequired: true,
+			ReplayExisting:    decision == operation.DecisionReplay,
+			ResourceType:      models.ResourceTypeFirewallPolicy,
+			ResourceID:        policyID,
+			AZ:                o.az,
+			Steps: []orchestration.WorkflowStep{
+				{
+					TaskType:   "create_firewall_policy",
+					TaskName:   "创建防火墙策略",
+					DeviceType: string(queue.DeviceTypeFirewall),
+					Priority:   int(taskqueue.PriorityNormal),
+					MaxRetries: 3,
+					Payload:    params,
+				},
 			},
-		},
+		}, nil
 	})
 	if err != nil {
-		return &models.AZFirewallPolicyResponse{Success: false, Message: fmt.Sprintf("提交工作流失败: %v", err)}, nil
+		return nil, fmt.Errorf("提交防火墙策略工作流: %w", err)
 	}
+	policyID = persistedPolicyID
 
 	logger.InfoContext(ctx, "防火墙策略创建流程启动成功", "az", o.az, "policy_name", req.PolicyName, "policy_id", policyID, "workflowID", workflowID)
 
 	return &models.AZFirewallPolicyResponse{
-		Success:    true,
-		Message:    "防火墙策略创建工作流已启动",
-		PolicyID:   policyID,
-		WorkflowID: workflowID,
+		Success:     true,
+		Message:     "防火墙策略创建工作流已启动",
+		ResourceID:  policyID,
+		Status:      "accepted",
+		PolicyID:    policyID,
+		WorkflowID:  workflowID,
+		OperationID: workflowID,
 	}, nil
+}
+
+func (o *VFWOrchestrator) beginCreateOperationTx(ctx context.Context, tx *sql.Tx, req *models.AZFirewallPolicyRequest, candidateResourceID string) (*operation.Operation, operation.Decision, error) {
+	identity, _ := operation.IdentityFromContext(ctx)
+	if identity.IdempotencyKey == "" {
+		return nil, "", fmt.Errorf("%w: X-Idempotency-Key is required", operation.ErrInvalidIdempotencyKey)
+	}
+	rootOperationID := identity.RootOperationID
+	if rootOperationID == "" {
+		rootOperationID = identity.SagaTransactionID
+	}
+	generation := identity.ResourceGeneration
+	if generation == 0 {
+		generation = 1
+	}
+	op, decision, err := o.operationSvc.BeginTargetTx(ctx, tx, operation.BeginRequest{
+		RootOperationID:   rootOperationID,
+		ParentOperationID: identity.ParentOperationID,
+		OwnerService:      fmt.Sprintf("az-nsp-vfw-%s", o.az),
+		CallerScope:       "top-nsp-vfw",
+		RouteScope:        "POST /api/v1/firewall/policy",
+		OperationType:     "apply_firewall_policy",
+		TargetScope:       fmt.Sprintf("%s/%s/%s", o.region, o.az, req.PolicyName),
+		IdempotencyKey:    identity.IdempotencyKey,
+		Payload:           req,
+		ResourceType:      "firewall_policy",
+		ResourceID:        candidateResourceID,
+		Generation:        generation,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if decision == operation.DecisionConflict {
+		return nil, decision, operation.ErrIdempotencyKeyReused
+	}
+	if decision == operation.DecisionResourceConflict {
+		return nil, decision, operation.ErrResourceSpecConflict
+	}
+	if decision == operation.DecisionResourceBusy {
+		return nil, decision, operation.ErrResourceOperationInProgress
+	}
+	return op, decision, nil
 }
 
 func (o *VFWOrchestrator) buildPolicyTaskParams(req *models.AZFirewallPolicyRequest) ([]byte, error) {
@@ -173,20 +249,50 @@ func (o *VFWOrchestrator) GetPolicyStatus(ctx context.Context, policyName string
 }
 
 func (o *VFWOrchestrator) DeletePolicy(ctx context.Context, policyName string) error {
-	policy, err := o.policyDAO.GetByName(ctx, policyName, o.az)
+	targetScope := fmt.Sprintf("%s/%s/%s", o.region, o.az, policyName)
+	ownerService := fmt.Sprintf("az-nsp-vfw-%s", o.az)
+	_, err := o.policyDAO.GetByName(ctx, policyName, o.az)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("策略不存在: %s", policyName)
+		return o.deletePolicyAndReleaseTarget(ctx, policyName, ownerService, targetScope)
 	}
 	if err != nil {
 		return fmt.Errorf("查询策略失败: %v", err)
 	}
 
-	if err := o.policyDAO.UpdateStatus(ctx, policy.ID, models.ResourceStatusDeleted, ""); err != nil {
-		return fmt.Errorf("更新策略状态失败: %v", err)
+	if err := o.deletePolicyAndReleaseTarget(ctx, policyName, ownerService, targetScope); err != nil {
+		return fmt.Errorf("原子删除策略失败: %w", err)
 	}
 
 	logger.InfoContext(ctx, "策略删除成功", "az", o.az, "policy_name", policyName)
 	return nil
+}
+
+func (o *VFWOrchestrator) deletePolicyAndReleaseTarget(ctx context.Context, policyName, ownerService, targetScope string) error {
+	tx, err := o.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := o.operationSvc.MarkTargetRetiringTx(ctx, tx, ownerService, "firewall_policy", targetScope); err != nil {
+		return err
+	}
+	var policyID string
+	err = tx.QueryRowContext(ctx, `SELECT id FROM firewall_policies WHERE policy_name = $1 AND az = $2 FOR UPDATE`, policyName, o.az).Scan(&policyID)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if err := o.operationSvc.ReleaseTargetTx(ctx, tx, ownerService, "firewall_policy", targetScope); err != nil {
+		return err
+	}
+	if policyID != "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM worker_device_state WHERE target_key = $1`, policyID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM firewall_policies WHERE id = $1`, policyID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (o *VFWOrchestrator) ListPolicies(ctx context.Context) ([]*models.FirewallPolicy, error) {
@@ -240,7 +346,10 @@ func (o *VFWOrchestrator) runCompensation(ctx context.Context) {
 			continue
 		}
 
-		total, completed, failed, err := o.taskDAO.GetTaskStats(ctx, policy.ID)
+		if policy.CurrentOperationID == "" || policy.Generation <= 0 {
+			continue
+		}
+		total, completed, failed, err := o.taskDAO.GetTaskStatsForOperationGeneration(ctx, policy.ID, policy.CurrentOperationID, policy.Generation)
 		if err != nil {
 			logger.Platform().Error("[VFW补偿任务] 查询任务统计失败", "az", o.az, "policyID", policy.ID, "error", err)
 			continue
@@ -253,7 +362,7 @@ func (o *VFWOrchestrator) runCompensation(ctx context.Context) {
 			_ = o.policyDAO.UpdateStatus(ctx, policy.ID, models.ResourceStatusFailed, "workflow step failed")
 			continue
 		}
-		if o.resourceHasInFlightBrokerTask(ctx, policy.ID) {
+		if o.resourceHasInFlightBrokerTask(ctx, policy.ID, policy.CurrentOperationID, policy.Generation) {
 			continue
 		}
 		if time.Since(policy.UpdatedAt) > stalePolicyTimeout {
@@ -293,8 +402,11 @@ func (o *VFWOrchestrator) resolveQueueName(deviceType string, priority int) stri
 	return queue.GetPriorityQueueName(o.region, o.az, queue.DeviceType(deviceType), queue.TaskPriority(priority))
 }
 
-func (o *VFWOrchestrator) resourceHasInFlightBrokerTask(ctx context.Context, resourceID string) bool {
-	tasks, err := o.taskDAO.GetByResourceID(ctx, resourceID)
+func (o *VFWOrchestrator) resourceHasInFlightBrokerTask(ctx context.Context, resourceID, operationID string, generation int64) bool {
+	if o.workflowMgr.ResourceOperationHasActiveOutbox(ctx, resourceID, operationID, generation) {
+		return true
+	}
+	tasks, err := o.taskDAO.GetByResourceOperationGeneration(ctx, resourceID, operationID, generation)
 	if err != nil {
 		logger.Platform().Error("[VFW补偿任务] 查询任务列表失败", "az", o.az, "resourceID", resourceID, "error", err)
 		return false

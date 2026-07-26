@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type FirewallPolicyRequest struct {
 	PolicyName  string `json:"policy_name" binding:"required"`
@@ -14,12 +17,24 @@ type FirewallPolicyRequest struct {
 }
 
 type FirewallPolicyResponse struct {
-	Success    bool              `json:"success"`
-	Message    string            `json:"message"`
-	PolicyID   string            `json:"policy_id,omitempty"`
-	SourceZone string            `json:"source_zone,omitempty"`
-	DestZone   string            `json:"dest_zone,omitempty"`
-	AZResults  map[string]string `json:"az_results,omitempty"`
+	Code        string            `json:"code,omitempty"`
+	Success     bool              `json:"success"`
+	Message     string            `json:"message"`
+	OperationID string            `json:"operation_id,omitempty"`
+	ResourceID  string            `json:"resource_id,omitempty"`
+	Status      string            `json:"status,omitempty"`
+	PolicyID    string            `json:"policy_id,omitempty"`
+	SourceZone  string            `json:"source_zone,omitempty"`
+	DestZone    string            `json:"dest_zone,omitempty"`
+	AZResults   map[string]string `json:"az_results,omitempty"`
+}
+
+func (r FirewallPolicyResponse) MarshalJSON() ([]byte, error) {
+	type responseAlias FirewallPolicyResponse
+	if r.Success && r.Code == "" {
+		r.Code = "0"
+	}
+	return json.Marshal(responseAlias(r))
 }
 
 type AZFirewallPolicyRequest struct {
@@ -38,10 +53,22 @@ type AZFirewallPolicyRequest struct {
 }
 
 type AZFirewallPolicyResponse struct {
-	Success    bool   `json:"success"`
-	Message    string `json:"message"`
-	PolicyID   string `json:"policy_id,omitempty"`
-	WorkflowID string `json:"workflow_id,omitempty"`
+	Code        string `json:"code,omitempty"`
+	Success     bool   `json:"success"`
+	Message     string `json:"message"`
+	OperationID string `json:"operation_id,omitempty"`
+	ResourceID  string `json:"resource_id,omitempty"`
+	Status      string `json:"status,omitempty"`
+	PolicyID    string `json:"policy_id,omitempty"`
+	WorkflowID  string `json:"workflow_id,omitempty"`
+}
+
+func (r AZFirewallPolicyResponse) MarshalJSON() ([]byte, error) {
+	type responseAlias AZFirewallPolicyResponse
+	if r.Success && r.Code == "" {
+		r.Code = "0"
+	}
+	return json.Marshal(responseAlias(r))
 }
 
 type PolicyRegistry struct {
@@ -71,6 +98,7 @@ type PolicyRegistry struct {
 type PolicyAZRecord struct {
 	ID           string    `json:"id"`
 	PolicyID     string    `json:"policy_id"`
+	Region       string    `json:"region"`
 	AZ           string    `json:"az"`
 	AZPolicyID   string    `json:"az_policy_id"`
 	Status       string    `json:"status"`
@@ -80,26 +108,29 @@ type PolicyAZRecord struct {
 }
 
 type FirewallPolicy struct {
-	ID             string         `json:"id"`
-	PolicyName     string         `json:"policy_name"`
-	SourceZone     string         `json:"source_zone"`
-	DestZone       string         `json:"dest_zone"`
-	SourceIP       string         `json:"source_ip"`
-	DestIP         string         `json:"dest_ip"`
-	SourcePort     string         `json:"source_port"`
-	DestPort       string         `json:"dest_port"`
-	Protocol       string         `json:"protocol"`
-	Action         string         `json:"action"`
-	Description    string         `json:"description"`
-	Status         ResourceStatus `json:"status"`
-	ErrorMessage   string         `json:"error_message,omitempty"`
-	TotalTasks     int            `json:"total_tasks"`
-	CompletedTasks int            `json:"completed_tasks"`
-	FailedTasks    int            `json:"failed_tasks"`
-	Region         string         `json:"region"`
-	AZ             string         `json:"az"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID                 string         `json:"id"`
+	PolicyName         string         `json:"policy_name"`
+	SourceZone         string         `json:"source_zone"`
+	DestZone           string         `json:"dest_zone"`
+	SourceIP           string         `json:"source_ip"`
+	DestIP             string         `json:"dest_ip"`
+	SourcePort         string         `json:"source_port"`
+	DestPort           string         `json:"dest_port"`
+	Protocol           string         `json:"protocol"`
+	Action             string         `json:"action"`
+	Description        string         `json:"description"`
+	Status             ResourceStatus `json:"status"`
+	ErrorMessage       string         `json:"error_message,omitempty"`
+	TotalTasks         int            `json:"total_tasks"`
+	CompletedTasks     int            `json:"completed_tasks"`
+	FailedTasks        int            `json:"failed_tasks"`
+	Generation         int64          `json:"generation"`
+	CurrentOperationID string         `json:"current_operation_id,omitempty"`
+	Version            int64          `json:"version"`
+	Region             string         `json:"region"`
+	AZ                 string         `json:"az"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
 }
 
 type FirewallPolicyStatusResponse struct {
@@ -122,17 +153,17 @@ type AZDetail struct {
 }
 
 type VPCRegistry struct {
-	ID           string               `json:"id"`
-	VPCName      string               `json:"vpc_name"`
-	Region       string               `json:"region"`
-	VRFName      string               `json:"vrf_name"`
-	VLANId       int                  `json:"vlan_id"`
-	FirewallZone string               `json:"firewall_zone"`
-	Status       string               `json:"status"`
-	SagaTxID     string               `json:"saga_tx_id,omitempty"`
-	AZDetails    map[string]AZDetail  `json:"az_details"`
-	CreatedAt    time.Time            `json:"created_at"`
-	UpdatedAt    time.Time            `json:"updated_at"`
+	ID           string              `json:"id"`
+	VPCName      string              `json:"vpc_name"`
+	Region       string              `json:"region"`
+	VRFName      string              `json:"vrf_name"`
+	VLANId       int                 `json:"vlan_id"`
+	FirewallZone string              `json:"firewall_zone"`
+	Status       string              `json:"status"`
+	SagaTxID     string              `json:"saga_tx_id,omitempty"`
+	AZDetails    map[string]AZDetail `json:"az_details"`
+	CreatedAt    time.Time           `json:"created_at"`
+	UpdatedAt    time.Time           `json:"updated_at"`
 }
 
 type SubnetRegistry struct {

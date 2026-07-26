@@ -109,9 +109,21 @@ func httpGet(t *testing.T, url string) (int, map[string]interface{}) {
 }
 
 func httpPost(t *testing.T, url string, payload interface{}) (int, map[string]interface{}) {
+	return httpPostWithKey(t, url, "", payload)
+}
+
+func httpPostWithKey(t *testing.T, url, key string, payload interface{}) (int, map[string]interface{}) {
 	t.Helper()
 	data, _ := json.Marshal(payload)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(data))
+	if err != nil {
+		t.Fatalf("build POST %s: %v", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s failed: %v", url, err)
 	}
@@ -156,6 +168,27 @@ func pollVPCStatusAZ(t *testing.T, vpcName string, timeout time.Duration) string
 		time.Sleep(2 * time.Second)
 	}
 	t.Fatalf("VPC %s did not reach terminal state within %v", vpcName, timeout)
+	return ""
+}
+
+// pollVPCStatusTop waits for the durable Top reconciler to aggregate the AZ
+// terminal state. AZ completion can precede Top aggregation by one polling
+// interval, so dependent resources must not use the AZ state as a proxy.
+func pollVPCStatusTop(t *testing.T, vpcName string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		code, result := httpGet(t, fmt.Sprintf("%s/api/v1/vpc/%s/status", topNSPVPCAddr, vpcName))
+		if code == http.StatusOK {
+			status, _ := result["status"].(string)
+			t.Logf("Top VPC %s status: %s", vpcName, status)
+			if status == "running" || status == "failed" || status == "deleted" {
+				return status
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("Top VPC %s did not reach terminal state within %v", vpcName, timeout)
 	return ""
 }
 
@@ -282,9 +315,10 @@ func TestE2E_03_CreateVPC(t *testing.T) {
 		"firewall_zone": "zone-e2e",
 	}
 
-	code, result := httpPost(t, topNSPVPCAddr+"/api/v1/vpc", payload)
-	if code != 200 {
-		t.Fatalf("expected 200, got %d, body: %v", code, result)
+	const idempotencyKey = "e2e-create-vpc-stable-key"
+	code, result := httpPostWithKey(t, topNSPVPCAddr+"/api/v1/vpc", idempotencyKey, payload)
+	if code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d, body: %v", code, result)
 	}
 
 	success, _ := result["success"].(bool)
@@ -298,6 +332,26 @@ func TestE2E_03_CreateVPC(t *testing.T) {
 	if workflowID == "" {
 		t.Fatal("workflow_id should not be empty for SAGA orchestration")
 	}
+	operationID, _ := result["operation_id"].(string)
+	resourceID, _ := result["resource_id"].(string)
+	for attempt := 0; attempt < 10; attempt++ {
+		replayCode, replay := httpPostWithKey(t, topNSPVPCAddr+"/api/v1/vpc", idempotencyKey, payload)
+		if replayCode != code {
+			t.Fatalf("replay %d status = %d, want %d: %v", attempt+1, replayCode, code, replay)
+		}
+		if replay["operation_id"] != operationID || replay["resource_id"] != resourceID || replay["workflow_id"] != workflowID {
+			t.Fatalf("replay %d identity changed: first=%s/%s/%s replay=%v", attempt+1, operationID, resourceID, workflowID, replay)
+		}
+	}
+	conflictPayload := make(map[string]interface{}, len(payload))
+	for key, value := range payload {
+		conflictPayload[key] = value
+	}
+	conflictPayload["vlan_id"] = 999
+	conflictCode, conflict := httpPostWithKey(t, topNSPVPCAddr+"/api/v1/vpc", idempotencyKey, conflictPayload)
+	if conflictCode != http.StatusConflict {
+		t.Fatalf("same key with different body = %d, want 409: %v", conflictCode, conflict)
+	}
 }
 
 // ============================================================
@@ -307,6 +361,9 @@ func TestE2E_04_PollVPCStatus(t *testing.T) {
 	finalStatus := pollVPCStatusAZ(t, "e2e-test-vpc", 90*time.Second)
 	if finalStatus != "running" {
 		t.Fatalf("VPC expected to be running, got %s", finalStatus)
+	}
+	if topStatus := pollVPCStatusTop(t, "e2e-test-vpc", 30*time.Second); topStatus != "running" {
+		t.Fatalf("Top VPC expected to be running, got %s", topStatus)
 	}
 	t.Logf("VPC e2e-test-vpc reached status: %s", finalStatus)
 }
@@ -349,7 +406,7 @@ func TestE2E_06_GetVPCByID(t *testing.T) {
 	vpcID := findVPCID(t, "e2e-test-vpc")
 
 	code, result := httpGet(t, fmt.Sprintf("%s/api/v1/vpc/id/%s", topNSPVPCAddr, vpcID))
-	if code != 200 {
+	if code != http.StatusOK {
 		t.Fatalf("expected 200, got %d, body: %v", code, result)
 	}
 
@@ -380,8 +437,8 @@ func TestE2E_07_CreateSubnet(t *testing.T) {
 	}
 
 	code, result := httpPost(t, topNSPVPCAddr+"/api/v1/subnet", payload)
-	if code != 200 {
-		t.Fatalf("expected 200, got %d, body: %v", code, result)
+	if code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d, body: %v", code, result)
 	}
 
 	success, _ := result["success"].(bool)
@@ -411,7 +468,7 @@ func TestE2E_09_ListSubnetsByVPCID(t *testing.T) {
 	vpcID := findVPCID(t, "e2e-test-vpc")
 
 	code, result := httpGet(t, fmt.Sprintf("%s/api/v1/vpc/id/%s/subnets", topNSPVPCAddr, vpcID))
-	if code != 200 {
+	if code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", code)
 	}
 
@@ -454,8 +511,8 @@ func TestE2E_10_CreateFirewallPolicy(t *testing.T) {
 	code, result := httpPost(t, topNSPVFWAddr+"/api/v1/firewall/policy", payload)
 	t.Logf("Create policy response (code=%d): %v", code, result)
 
-	if code != 200 {
-		t.Fatalf("expected 200, got %d", code)
+	if code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", code)
 	}
 
 	success, _ := result["success"].(bool)
@@ -469,7 +526,7 @@ func TestE2E_10_CreateFirewallPolicy(t *testing.T) {
 // ============================================================
 func TestE2E_11_ListFirewallPolicies(t *testing.T) {
 	code, result := httpGet(t, topNSPVFWAddr+"/api/v1/firewall/policies")
-	if code != 200 {
+	if code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", code)
 	}
 
@@ -501,7 +558,7 @@ func TestE2E_12_VerifyFirewallPolicyOnAZ(t *testing.T) {
 	code, result := httpGet(t, azNSPVFWAddr+"/api/v1/firewall/policies")
 	t.Logf("AZ VFW policies (code=%d): %v", code, result)
 
-	if code != 200 {
+	if code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", code)
 	}
 
@@ -531,8 +588,8 @@ func TestE2E_13_CreateSecondVPC(t *testing.T) {
 	}
 
 	code, result := httpPost(t, topNSPVPCAddr+"/api/v1/vpc", payload)
-	if code != 200 {
-		t.Fatalf("expected 200, got %d, body: %v", code, result)
+	if code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d, body: %v", code, result)
 	}
 
 	success, _ := result["success"].(bool)
@@ -544,6 +601,9 @@ func TestE2E_13_CreateSecondVPC(t *testing.T) {
 	finalStatus := pollVPCStatusAZ(t, "e2e-test-vpc-2", 90*time.Second)
 	if finalStatus != "running" {
 		t.Fatalf("Second VPC expected to be running, got %s", finalStatus)
+	}
+	if topStatus := pollVPCStatusTop(t, "e2e-test-vpc-2", 30*time.Second); topStatus != "running" {
+		t.Fatalf("Top second VPC expected to be running, got %s", topStatus)
 	}
 	t.Logf("Second VPC e2e-test-vpc-2 created with status: %s", finalStatus)
 }
@@ -567,8 +627,8 @@ func TestE2E_14_CreatePCCN(t *testing.T) {
 	code, result := httpPost(t, topNSPVPCAddr+"/api/v1/pccn", payload)
 	t.Logf("Create PCCN response (code=%d): %v", code, result)
 
-	if code != 200 {
-		t.Fatalf("expected 200, got %d", code)
+	if code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", code)
 	}
 
 	success, _ := result["success"].(bool)
@@ -685,6 +745,9 @@ func TestE2E_18_DeletePCCN(t *testing.T) {
 	if !success {
 		t.Fatalf("PCCN deletion failed: %v", result["message"])
 	}
+	if retryCode, retry := httpDelete(t, fmt.Sprintf("%s/api/v1/pccn/%s", topNSPVPCAddr, "e2e-test-pccn")); retryCode != http.StatusOK {
+		t.Fatalf("repeat PCCN delete = %d, want 200: %v", retryCode, retry)
+	}
 
 	// Wait for PCCN deletion to complete
 	time.Sleep(5 * time.Second)
@@ -709,6 +772,9 @@ func TestE2E_19_DeleteSecondVPC(t *testing.T) {
 
 	if code != 200 {
 		t.Fatalf("expected 200, got %d", code)
+	}
+	if retryCode, retry := httpDelete(t, fmt.Sprintf("%s/api/v1/vpc/id/%s", topNSPVPCAddr, vpcID)); retryCode != http.StatusOK {
+		t.Fatalf("repeat second VPC delete = %d, want 200: %v", retryCode, retry)
 	}
 }
 
@@ -751,6 +817,9 @@ func TestE2E_20_DeleteSubnet(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("expected 200, got %d", code)
 	}
+	if retryCode, retry := httpDelete(t, fmt.Sprintf("%s/api/v1/subnet/id/%s", topNSPVPCAddr, subnetID)); retryCode != http.StatusOK {
+		t.Fatalf("repeat subnet delete = %d, want 200: %v", retryCode, retry)
+	}
 }
 
 // ============================================================
@@ -787,8 +856,11 @@ func TestE2E_21_DeleteFirewallPolicy(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("expected 200, got %d", code)
 	}
+	if retryCode, retry := httpDelete(t, fmt.Sprintf("%s/api/v1/firewall/policy/%s", topNSPVFWAddr, policyID)); retryCode != http.StatusOK {
+		t.Fatalf("repeat policy delete = %d, want 200: %v", retryCode, retry)
+	}
 
-	// Also delete from AZ VFW (top-level delete doesn't propagate to AZ level)
+	// Direct AZ repetition remains safe after Top has already fanned out.
 	code, result = httpDelete(t, fmt.Sprintf("%s/api/v1/firewall/policy/%s", azNSPVFWAddr, "e2e-fw-policy"))
 	t.Logf("Delete AZ policy response (code=%d): %v", code, result)
 }
@@ -804,6 +876,9 @@ func TestE2E_22_DeleteVPC(t *testing.T) {
 
 	if code != 200 {
 		t.Fatalf("expected 200, got %d", code)
+	}
+	if retryCode, retry := httpDelete(t, fmt.Sprintf("%s/api/v1/vpc/id/%s", topNSPVPCAddr, vpcID)); retryCode != http.StatusOK {
+		t.Fatalf("repeat VPC delete = %d, want 200: %v", retryCode, retry)
 	}
 }
 

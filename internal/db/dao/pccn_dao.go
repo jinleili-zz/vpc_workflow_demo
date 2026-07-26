@@ -17,7 +17,29 @@ func NewPCCNDAO(db *sql.DB) *PCCNDAO {
 	return &PCCNDAO{db: db}
 }
 
-func (d *PCCNDAO) Create(ctx context.Context, pccn *models.PCCNResource) error {
+func (d *PCCNDAO) Create(ctx context.Context, pccn *models.PCCNResource) (*models.PCCNResource, error) {
+	persistedID, err := createPCCN(ctx, d.db, pccn)
+	if err != nil {
+		return nil, err
+	}
+	return d.GetByID(ctx, persistedID)
+}
+
+func (d *PCCNDAO) CreateTx(ctx context.Context, tx *sql.Tx, pccn *models.PCCNResource) (*models.PCCNResource, error) {
+	persistedID, err := createPCCN(ctx, tx, pccn)
+	if err != nil {
+		return nil, err
+	}
+	persisted := *pccn
+	persisted.ID = persistedID
+	return &persisted, nil
+}
+
+type pccnQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func createPCCN(ctx context.Context, queryer pccnQueryer, pccn *models.PCCNResource) (string, error) {
 	subnetsJSON, _ := json.Marshal(pccn.Subnets)
 	query := `
 		INSERT INTO pccn_resources (
@@ -29,19 +51,28 @@ func (d *PCCNDAO) Create(ctx context.Context, pccn *models.PCCNResource) error {
 			subnets = EXCLUDED.subnets,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE pccn_resources.status IN ('pending', 'failed', 'deleted')
+		RETURNING id
 	`
-	_, err := d.db.ExecContext(ctx, query,
+	var persistedID string
+	err := queryer.QueryRowContext(ctx, query,
 		pccn.ID, pccn.PCCNName, pccn.VPCName, pccn.VPCRegion, pccn.PeerVPCName, pccn.PeerVPCRegion, pccn.AZ,
 		pccn.Status, subnetsJSON, pccn.TotalTasks, pccn.CompletedTasks, pccn.FailedTasks,
-	)
-	return err
+	).Scan(&persistedID)
+	if err == sql.ErrNoRows {
+		if getErr := queryer.QueryRowContext(ctx, `SELECT id FROM pccn_resources WHERE pccn_name = $1 AND az = $2`, pccn.PCCNName, pccn.AZ).Scan(&persistedID); getErr != nil {
+			return "", getErr
+		}
+	} else if err != nil {
+		return "", err
+	}
+	return persistedID, nil
 }
 
 func (d *PCCNDAO) GetByID(ctx context.Context, id string) (*models.PCCNResource, error) {
 	query := `
 		SELECT id, pccn_name, vpc_name, vpc_region, peer_vpc_name, peer_vpc_region, az,
 		       status, subnets, error_message, total_tasks, completed_tasks, failed_tasks,
-		       created_at, updated_at
+		       generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM pccn_resources
 		WHERE id = $1
 	`
@@ -52,7 +83,7 @@ func (d *PCCNDAO) GetByID(ctx context.Context, id string) (*models.PCCNResource,
 	err := d.db.QueryRowContext(ctx, query, id).Scan(
 		&pccn.ID, &pccn.PCCNName, &pccn.VPCName, &pccn.VPCRegion, &pccn.PeerVPCName, &pccn.PeerVPCRegion, &pccn.AZ,
 		&pccn.Status, &subnetsJSON, &errorMessage, &pccn.TotalTasks, &pccn.CompletedTasks, &pccn.FailedTasks,
-		&pccn.CreatedAt, &pccn.UpdatedAt,
+		&pccn.Generation, &pccn.CurrentOperationID, &pccn.Version, &pccn.CreatedAt, &pccn.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -72,7 +103,7 @@ func (d *PCCNDAO) GetByName(ctx context.Context, pccnName, az string) (*models.P
 	query := `
 		SELECT id, pccn_name, vpc_name, vpc_region, peer_vpc_name, peer_vpc_region, az,
 		       status, subnets, error_message, total_tasks, completed_tasks, failed_tasks,
-		       created_at, updated_at
+		       generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM pccn_resources
 		WHERE pccn_name = $1 AND az = $2
 	`
@@ -83,7 +114,7 @@ func (d *PCCNDAO) GetByName(ctx context.Context, pccnName, az string) (*models.P
 	err := d.db.QueryRowContext(ctx, query, pccnName, az).Scan(
 		&pccn.ID, &pccn.PCCNName, &pccn.VPCName, &pccn.VPCRegion, &pccn.PeerVPCName, &pccn.PeerVPCRegion, &pccn.AZ,
 		&pccn.Status, &subnetsJSON, &errorMessage, &pccn.TotalTasks, &pccn.CompletedTasks, &pccn.FailedTasks,
-		&pccn.CreatedAt, &pccn.UpdatedAt,
+		&pccn.Generation, &pccn.CurrentOperationID, &pccn.Version, &pccn.CreatedAt, &pccn.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -139,7 +170,7 @@ func (d *PCCNDAO) ListAll(ctx context.Context) ([]*models.PCCNResource, error) {
 	query := `
 		SELECT id, pccn_name, vpc_name, vpc_region, peer_vpc_name, peer_vpc_region, az,
 		       status, subnets, error_message, total_tasks, completed_tasks, failed_tasks,
-		       created_at, updated_at
+		       generation, COALESCE(current_operation_id, ''), version, created_at, updated_at
 		FROM pccn_resources
 		WHERE status != 'deleted'
 		ORDER BY created_at DESC
@@ -158,7 +189,7 @@ func (d *PCCNDAO) ListAll(ctx context.Context) ([]*models.PCCNResource, error) {
 		err := rows.Scan(
 			&pccn.ID, &pccn.PCCNName, &pccn.VPCName, &pccn.VPCRegion, &pccn.PeerVPCName, &pccn.PeerVPCRegion, &pccn.AZ,
 			&pccn.Status, &subnetsJSON, &errorMessage, &pccn.TotalTasks, &pccn.CompletedTasks, &pccn.FailedTasks,
-			&pccn.CreatedAt, &pccn.UpdatedAt,
+			&pccn.Generation, &pccn.CurrentOperationID, &pccn.Version, &pccn.CreatedAt, &pccn.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err

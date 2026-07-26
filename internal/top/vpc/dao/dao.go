@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net"
 	"time"
 
 	"workflow_qoder/internal/models"
+	"workflow_qoder/internal/operation"
 
 	"github.com/google/uuid"
 )
@@ -30,6 +32,8 @@ func (d *TopVPCDAO) RegisterVPC(ctx context.Context, vpc *models.VPCRegistry) er
 		INSERT INTO vpc_registry (id, vpc_name, region, vrf_name, vlan_id, firewall_zone, status, saga_tx_id, az_details)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (vpc_name) DO UPDATE SET
+		id = EXCLUDED.id,
+		region = EXCLUDED.region,
 		vrf_name = EXCLUDED.vrf_name,
 		vlan_id = EXCLUDED.vlan_id,
 		firewall_zone = EXCLUDED.firewall_zone,
@@ -53,6 +57,80 @@ func (d *TopVPCDAO) UpdateVPCOverallStatus(ctx context.Context, vpcName, status 
 	query := `UPDATE vpc_registry SET status = $1, az_details = $2, updated_at = NOW() WHERE vpc_name = $3`
 	_, err = d.db.ExecContext(ctx, query, status, azDetailsJSON, vpcName)
 	return err
+}
+
+func (d *TopVPCDAO) MarkVPCDeletedAndReleaseTarget(ctx context.Context, vpcName string, azDetails map[string]models.AZDetail) error {
+	azDetailsJSON, err := json.Marshal(azDetails)
+	if err != nil {
+		return err
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var persistedName string
+	if err := tx.QueryRowContext(ctx, `SELECT vpc_name FROM vpc_registry WHERE vpc_name = $1 FOR UPDATE`, vpcName).Scan(&persistedName); err != nil {
+		return err
+	}
+	if err := assertTerminalTargetClaim(ctx, tx, "vpc", persistedName); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE vpc_registry SET status = 'deleted', az_details = $1, updated_at = NOW() WHERE vpc_name = $2`, azDetailsJSON, vpcName); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_target_claims SET active = FALSE, retiring = FALSE, updated_at = NOW()
+		WHERE owner_service = 'top-nsp-vpc' AND resource_type = 'vpc' AND target_scope = $1 AND active = TRUE
+	`, persistedName); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *TopVPCDAO) MarkVPCDeleting(ctx context.Context, vpcName string) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var persistedName string
+	if err := tx.QueryRowContext(ctx, `SELECT vpc_name FROM vpc_registry WHERE vpc_name = $1 FOR UPDATE`, vpcName).Scan(&persistedName); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE vpc_registry SET status = 'deleting', updated_at = NOW() WHERE vpc_name = $1`, persistedName); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_target_claims SET retiring = TRUE, updated_at = NOW()
+		WHERE owner_service = 'top-nsp-vpc' AND resource_type = 'vpc'
+		  AND target_scope = $1 AND active = TRUE
+	`, persistedName); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func assertTerminalTargetClaim(ctx context.Context, tx *sql.Tx, resourceType, targetScope string) error {
+	var status operation.Status
+	err := tx.QueryRowContext(ctx, `
+		SELECT operation.status
+		FROM orchestration_target_claims claim
+		JOIN orchestration_operations operation ON operation.operation_id = claim.operation_id
+		WHERE claim.owner_service = 'top-nsp-vpc' AND claim.resource_type = $1
+		  AND claim.target_scope = $2 AND claim.active = TRUE
+		FOR UPDATE OF claim, operation
+	`, resourceType, targetScope).Scan(&status)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !status.Terminal() {
+		return fmt.Errorf("%w: target create operation is %s", operation.ErrResourceOperationInProgress, status)
+	}
+	return nil
 }
 
 // GetVPCByName 根据 vpc_name 查询唯一的 VPC 记录
@@ -107,6 +185,9 @@ func (d *TopVPCDAO) RegisterSubnet(ctx context.Context, subnet *models.SubnetReg
 		INSERT INTO subnet_registry (id, subnet_name, vpc_name, region, az, az_subnet_id, cidr, firewall_zone, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (subnet_name, az) DO UPDATE SET
+		id = EXCLUDED.id,
+		vpc_name = EXCLUDED.vpc_name,
+		region = EXCLUDED.region,
 		az_subnet_id = EXCLUDED.az_subnet_id,
 		cidr = EXCLUDED.cidr,
 		firewall_zone = EXCLUDED.firewall_zone,
@@ -147,7 +228,7 @@ func (d *TopVPCDAO) UpdateSubnetStatus(ctx context.Context, subnetName, az, stat
 	return err
 }
 
-func (d *TopVPCDAO) DeleteSubnet(ctx context.Context, subnetName, az string) error {
+func (d *TopVPCDAO) DeleteSubnetAndReleaseTarget(ctx context.Context, subnetName, az string) error {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -155,8 +236,11 @@ func (d *TopVPCDAO) DeleteSubnet(ctx context.Context, subnetName, az string) err
 	defer tx.Rollback()
 
 	var cidr string
-	err = tx.QueryRowContext(ctx, `SELECT cidr FROM subnet_registry WHERE subnet_name = $1 AND az = $2`, subnetName, az).Scan(&cidr)
+	err = tx.QueryRowContext(ctx, `SELECT cidr FROM subnet_registry WHERE subnet_name = $1 AND az = $2 FOR UPDATE`, subnetName, az).Scan(&cidr)
 	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if err := assertTerminalTargetClaim(ctx, tx, "subnet", az+"/"+subnetName); err != nil {
 		return err
 	}
 
@@ -169,6 +253,13 @@ func (d *TopVPCDAO) DeleteSubnet(ctx context.Context, subnetName, az string) err
 
 	_, err = tx.ExecContext(ctx, `DELETE FROM subnet_registry WHERE subnet_name = $1 AND az = $2`, subnetName, az)
 	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_target_claims SET active = FALSE, retiring = FALSE, updated_at = NOW()
+		WHERE owner_service = 'top-nsp-vpc' AND resource_type = 'subnet'
+		  AND target_scope = $1 AND active = TRUE
+	`, az+"/"+subnetName); err != nil {
 		return err
 	}
 
@@ -206,10 +297,12 @@ func (d *TopVPCDAO) FindZoneByIP(ctx context.Context, ipStr string) (*models.Zon
 	ipNum := uint64(binary.BigEndian.Uint32(ip))
 
 	query := `
-		SELECT vpc_name, subnet_name, region, az, firewall_zone, cidr
-		FROM cidr_zone_mapping
-		WHERE cidr_start <= $1 AND cidr_end >= $2
-		ORDER BY (cidr_end - cidr_start) ASC
+		SELECT mapping.vpc_name, mapping.subnet_name, mapping.region, mapping.az, mapping.firewall_zone, mapping.cidr
+		FROM cidr_zone_mapping mapping
+		JOIN vpc_registry vpc ON vpc.vpc_name = mapping.vpc_name AND vpc.status = 'running'
+		JOIN subnet_registry subnet ON subnet.subnet_name = mapping.subnet_name AND subnet.az = mapping.az AND subnet.status = 'running'
+		WHERE mapping.cidr_start <= $1 AND mapping.cidr_end >= $2
+		ORDER BY (mapping.cidr_end - mapping.cidr_start) ASC
 		LIMIT 1
 	`
 	var info models.ZoneInfo
